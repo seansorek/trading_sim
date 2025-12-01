@@ -23,6 +23,8 @@ import json
 import argparse
 import shutil
 import subprocess
+import requests
+from bs4 import BeautifulSoup
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -57,10 +59,77 @@ def safe_copy(src: str, dst: str):
     print(f"[ok] Copied {src} -> {dst}")
 
 
-def generate_recommendation(metrics: dict, wf_metrics: dict) -> str:
+def fetch_expert_opinion(symbol: str) -> dict:
     """
-    Generate a trading recommendation based on backtest and walk-forward metrics.
+    Fetch expert sentiment and ratings for a stock from multiple sources.
+    Returns dict with keys: 'consensus', 'target_price', 'upside_pct', 'num_analysts'
+    """
+    try:
+        # Try Yahoo Finance API for analyst ratings
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=recommendationTrend"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        
+        rec_trend = data.get('quoteSummary', {}).get('result', [{}])[0].get('recommendationTrend', {})
+        trend = rec_trend.get('trend', [])
+        
+        if trend:
+            # Most recent recommendation
+            latest = trend[0]
+            strong_buy = latest.get('strongBuy', 0)
+            buy = latest.get('buy', 0)
+            hold = latest.get('hold', 0)
+            sell = latest.get('sell', 0)
+            strong_sell = latest.get('strongSell', 0)
+            total = strong_buy + buy + hold + sell + strong_sell
+            
+            if total > 0:
+                # Calculate weighted score: strong_buy=2, buy=1, hold=0, sell=-1, strong_sell=-2
+                score = (strong_buy * 2 + buy * 1 - sell * 1 - strong_sell * 2) / total
+                
+                if score > 0.5:
+                    consensus = "BUY"
+                elif score < -0.5:
+                    consensus = "SELL"
+                else:
+                    consensus = "HOLD"
+                
+                return {
+                    "consensus": consensus,
+                    "score": float(score),
+                    "num_analysts": total,
+                    "breakdown": {
+                        "strong_buy": strong_buy,
+                        "buy": buy,
+                        "hold": hold,
+                        "sell": sell,
+                        "strong_sell": strong_sell
+                    }
+                }
+    except Exception as e:
+        print(f"[warn] Could not fetch expert opinion for {symbol}: {e}")
+    
+    return {
+        "consensus": "HOLD",
+        "score": 0.0,
+        "num_analysts": 0,
+        "breakdown": {}
+    }
+
+
+def generate_recommendation(metrics: dict, wf_metrics: dict, expert_opinion: dict) -> str:
+    """
+    Generate a trading recommendation based on backtest, walk-forward metrics, and expert opinion.
     Returns: 'BUY', 'HOLD', 'SELL', or 'NO_DATA'
+    
+    Combines:
+    - Backtest performance (40%)
+    - Walk-forward validation (30%)
+    - Risk metrics (20%)
+    - Expert opinion prior (10%)
     """
     if not metrics or not wf_metrics:
         return 'NO_DATA'
@@ -101,6 +170,13 @@ def generate_recommendation(metrics: dict, wf_metrics: dict) -> str:
     if max_dd > -10:
         score += 10
     
+    # Expert opinion prior (10% weight, normalized)
+    expert_score = expert_opinion.get('score', 0.0)  # Range: [-2, 2]
+    if expert_score > 0.5:
+        score += 10
+    elif expert_score < -0.5:
+        score -= 5
+    
     # Recommendations
     if score >= 80:
         return 'BUY'
@@ -116,11 +192,15 @@ def run_symbol_strategy(symbol: str,
                         feats,
                         cfg: StrategyConfig,
                         exec_cfg: ExecutionConfig,
-                        n_mc_runs: int = 10):
+                        n_mc_runs: int = 10,
+                        expert_opinion: dict = None):
     """
     Build signal for (symbol, strategy), run backtest, walk-forward, Monte Carlo,
     save artifacts, and return summary dict for multi_summary.json.
     """
+    if expert_opinion is None:
+        expert_opinion = {}
+    
     print(f"→ [{symbol}] Strategy: {strategy_name} | Config: {cfg.__dict__}")
 
     # 1) Signal (from registry)
@@ -147,8 +227,8 @@ def run_symbol_strategy(symbol: str,
     safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
     safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
 
-    # 6) Generate recommendation for next week
-    recommendation = generate_recommendation(res.metrics, wf.metrics)
+    # 6) Generate recommendation with expert opinion prior
+    recommendation = generate_recommendation(res.metrics, wf.metrics, expert_opinion)
 
     # 7) Summary for dashboard
     summary = {
@@ -215,6 +295,13 @@ def main():
         daily_loss_limit_pct=0.02,
     )
 
+    # Fetch expert opinions for all symbols upfront
+    expert_opinions = {}
+    print("\n[info] Fetching expert opinions from Yahoo Finance...")
+    for symbol in symbols:
+        expert_opinions[symbol] = fetch_expert_opinion(symbol)
+        print(f"  {symbol}: {expert_opinions[symbol]['consensus']} (score: {expert_opinions[symbol]['score']:.2f})")
+
     for symbol in symbols:
         print(f"\n=== Running symbol: {symbol} ===")
 
@@ -239,6 +326,7 @@ def main():
                 "start": args.start,
                 "end": args.end,
             },
+            "expert_opinion": expert_opinions[symbol],
         }
 
         # Run each strategy and collect results
@@ -260,7 +348,10 @@ def main():
                     cfg=cfg,
                     exec_cfg=exec_cfg,
                     n_mc_runs=args.mc_runs,
+                    expert_opinion=expert_opinions[symbol],
                 )
+                # Enhance with expert opinion
+                strat_summary['expert_opinion'] = expert_opinions[symbol]
                 multi_summary[symbol][strat] = strat_summary
             except Exception as e:
                 print(f"[error] Failed on {symbol} / {strat}: {e}")
@@ -272,6 +363,7 @@ def main():
                     "mc_std": {},
                     "config": cfg.__dict__,
                     "artifacts": {},
+                    "expert_opinion": expert_opinions[symbol],
                     "error": str(e),
                 }
 
@@ -279,6 +371,20 @@ def main():
     with open("results/multi_summary.json", "w") as f:
         json.dump(multi_summary, f, indent=2)
     print("\n[ok] Wrote results/multi_summary.json")
+
+    # Build a sorted recommendations summary for Discord
+    recommendations_sorted = {}
+    for symbol in sorted(multi_summary.keys()):
+        recommendations_sorted[symbol] = {}
+        for strat in strategies:
+            strat_data = multi_summary[symbol].get(strat, {})
+            rec = strat_data.get("recommendation", "NO_DATA")
+            recommendations_sorted[symbol][strat] = rec
+    
+    # Write recommendations summary
+    with open("results/recommendations_summary.json", "w") as f:
+        json.dump(recommendations_sorted, f, indent=2)
+    print("[ok] Wrote results/recommendations_summary.json")
 
     # Build the dashboard (site/index.html)
     print("[info] Building multi-symbol strategy dashboard...")

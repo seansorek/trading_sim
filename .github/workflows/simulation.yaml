@@ -39,35 +39,37 @@ jobs:
           import json
           import requests
           import os
-          from collections import Counter
           
-          # Read the multi_summary to extract recommendations
-          with open('results/multi_summary.json', 'r') as f:
-              multi_summary = json.load(f)
+          # Read the recommendations summary (sorted by stock)
+          with open('results/recommendations_summary.json', 'r') as f:
+              recommendations = json.load(f)
           
-          # Count recommendations
+          # Count totals
           buy_count = 0
           hold_count = 0
           sell_count = 0
-          strategies_summary = []
           
-          for symbol, symdata in multi_summary.items():
-              for strat in symdata.get("strategies", []):
-                  strat_data = symdata.get(strat, {})
-                  rec = strat_data.get("recommendation", "NO_DATA")
+          # Build detailed recommendations message
+          rec_details = []
+          for symbol in sorted(recommendations.keys()):
+              rec_details.append(f"**{symbol}**")
+              for strat in sorted(recommendations[symbol].keys()):
+                  rec = recommendations[symbol][strat]
+                  emoji = "🟢" if rec == "BUY" else "🟡" if rec == "HOLD" else "🔴" if rec == "SELL" else "⚪"
+                  rec_details.append(f"  {emoji} {strat}: {rec}")
+                  
                   if rec == "BUY":
                       buy_count += 1
                   elif rec == "HOLD":
                       hold_count += 1
                   elif rec == "SELL":
                       sell_count += 1
-                  strategies_summary.append(f"{symbol} ({strat}): {rec}")
+          
+          rec_details_str = "\n".join(rec_details)
+          rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
           
           # Prepare Discord message
           webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
-          
-          # Build recommendations summary
-          rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
           
           payload = {
               "content": "📊 Trading Simulation Dashboard Updated",
@@ -79,6 +81,11 @@ jobs:
                       {
                           "name": "Recommendations Summary",
                           "value": rec_summary,
+                          "inline": False
+                      },
+                      {
+                          "name": "Detailed Recommendations",
+                          "value": f"```\n{rec_details_str}\n```",
                           "inline": False
                       },
                       {
