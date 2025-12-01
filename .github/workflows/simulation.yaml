@@ -29,20 +29,74 @@ jobs:
           # Explicitly ensure these are present
           pip install yfinance pandas numpy matplotlib
 
+      - name: Notify Discord - Simulation Started
+        run: |
+          python - << 'EOF'
+          import requests
+          import json
+          from datetime import datetime
+          
+          webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          
+          payload = {
+              "content": "🚀 Trading Simulation Starting",
+              "embeds": [{
+                  "title": "Simulation Pipeline Initiated",
+                  "description": f"Simulation started at {datetime.now().isoformat()}",
+                  "color": 3447003,
+                  "fields": [
+                      {
+                          "name": "Status",
+                          "value": "⏳ Running...",
+                          "inline": True
+                      }
+                  ]
+              }]
+          }
+          
+          response = requests.post(webhook_url, json=payload)
+          print(f"Start notification sent: {response.status_code}")
+          EOF
+
       - name: Run multi-symbol simulation
         run: |
-          python simulate_multi.py
+          python simulate_multi.py 2>&1 | tee simulation_output.log
+
+      - name: Check simulation status
+        if: always()
+        run: |
+          if [ -f simulation_output.log ]; then
+            echo "ERROR_COUNT=$(grep -c '\[error\]' simulation_output.log || echo 0)" >> $GITHUB_ENV
+            echo "WARNING_COUNT=$(grep -c '\[warn\]' simulation_output.log || echo 0)" >> $GITHUB_ENV
+          else
+            echo "ERROR_COUNT=unknown" >> $GITHUB_ENV
+            echo "WARNING_COUNT=unknown" >> $GITHUB_ENV
+          fi
 
       - name: Send dashboard to Discord
+        if: always()
         run: |
           python - << 'EOF'
           import json
           import requests
           import os
+          from datetime import datetime
+          
+          # Read error and warning counts
+          error_count = 0
+          warning_count = 0
+          if os.path.exists('simulation_output.log'):
+              with open('simulation_output.log', 'r') as f:
+                  content = f.read()
+                  error_count = content.count('[error]')
+                  warning_count = content.count('[warn]')
           
           # Read the recommendations summary (sorted by stock)
-          with open('results/recommendations_summary.json', 'r') as f:
-              recommendations = json.load(f)
+          recommendations = {}
+          has_recommendations = os.path.exists('results/recommendations_summary.json')
+          if has_recommendations:
+              with open('results/recommendations_summary.json', 'r') as f:
+                  recommendations = json.load(f)
           
           # Read trade history statistics
           trade_stats = {}
@@ -54,25 +108,38 @@ jobs:
           buy_count = 0
           hold_count = 0
           sell_count = 0
+          failed_symbols = []
           
           # Build detailed recommendations message
           rec_details = []
-          for symbol in sorted(recommendations.keys()):
-              rec_details.append(f"**{symbol}**")
-              for strat in sorted(recommendations[symbol].keys()):
-                  rec = recommendations[symbol][strat]
-                  emoji = "🟢" if rec == "BUY" else "🟡" if rec == "HOLD" else "🔴" if rec == "SELL" else "⚪"
-                  rec_details.append(f"  {emoji} {strat}: {rec}")
-                  
-                  if rec == "BUY":
-                      buy_count += 1
-                  elif rec == "HOLD":
-                      hold_count += 1
-                  elif rec == "SELL":
-                      sell_count += 1
+          if has_recommendations:
+              for symbol in sorted(recommendations.keys()):
+                  rec_details.append(f"**{symbol}**")
+                  for strat in sorted(recommendations[symbol].keys()):
+                      rec = recommendations[symbol][strat]
+                      emoji = "🟢" if rec == "BUY" else "🟡" if rec == "HOLD" else "🔴" if rec == "SELL" else "⚪"
+                      rec_details.append(f"  {emoji} {strat}: {rec}")
+                      
+                      if rec == "BUY":
+                          buy_count += 1
+                      elif rec == "HOLD":
+                          hold_count += 1
+                      elif rec == "SELL":
+                          sell_count += 1
           
-          rec_details_str = "\n".join(rec_details)
+          rec_details_str = "\n".join(rec_details) if rec_details else "No recommendations available"
           rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
+          
+          # Determine overall status
+          if error_count > 0:
+              status_color = 15158332  # Red
+              status_text = f"❌ Completed with {error_count} errors"
+          elif warning_count > 0:
+              status_color = 16776960  # Yellow
+              status_text = f"⚠️ Completed with {warning_count} warnings"
+          else:
+              status_color = 3447003  # Green
+              status_text = "✅ Completed successfully"
           
           # Build trade history summary
           trade_summary = "No trade history yet"
@@ -83,12 +150,13 @@ jobs:
               win_rate = overall.get('win_rate', 0)
               profit_factor = overall.get('profit_factor', 0)
               
+              pf_str = f"{profit_factor:.2f}" if profit_factor != float('inf') else "∞"
               trade_summary = (
                   f"📊 **Historical Trade Audit Trail**\n"
                   f"Total Trades: {total_trades}\n"
                   f"Win Rate: {win_rate*100:.1f}%\n"
                   f"Total P&L: ${total_pnl:,.2f}\n"
-                  f"Profit Factor: {profit_factor:.2f}" if profit_factor != float('inf') else "Profit Factor: ∞"
+                  f"Profit Factor: {pf_str}"
               )
               
               # Add top performers by symbol
@@ -117,37 +185,58 @@ jobs:
                           pnl = stats.get('total_pnl', 0)
                           trade_summary += f"\n  {strat}: ${pnl:,.2f}"
           
+          # Build error/warning statistics
+          error_stats = ""
+          if error_count > 0 or warning_count > 0:
+              error_stats = (
+                  f"**Execution Statistics**\n"
+                  f"Errors: {error_count}\n"
+                  f"Warnings: {warning_count}"
+              )
+          
           # Prepare Discord message
           webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          
+          fields = [
+              {
+                  "name": "Status",
+                  "value": status_text,
+                  "inline": True
+              }
+          ]
+          
+          if has_recommendations:
+              fields.append({
+                  "name": "Recommendations Summary",
+                  "value": rec_summary,
+                  "inline": False
+              })
+              fields.append({
+                  "name": "Detailed Recommendations",
+                  "value": f"```\n{rec_details_str}\n```",
+                  "inline": False
+              })
+          
+          fields.append({
+              "name": "Trade History Summary",
+              "value": trade_summary,
+              "inline": False
+          })
+          
+          if error_stats:
+              fields.append({
+                  "name": "Execution Statistics",
+                  "value": error_stats,
+                  "inline": False
+              })
           
           payload = {
               "content": "📊 Trading Simulation Dashboard Updated",
               "embeds": [{
                   "title": "Simulation Results",
                   "description": "Dashboard has been generated and is ready for review.",
-                  "color": 3447003,
-                  "fields": [
-                      {
-                          "name": "Recommendations Summary",
-                          "value": rec_summary,
-                          "inline": False
-                      },
-                      {
-                          "name": "Detailed Recommendations",
-                          "value": f"```\n{rec_details_str}\n```",
-                          "inline": False
-                      },
-                      {
-                          "name": "Trade History Summary",
-                          "value": trade_summary,
-                          "inline": False
-                      },
-                      {
-                          "name": "Status",
-                          "value": "✅ Complete",
-                          "inline": True
-                      }
-                  ]
+                  "color": status_color,
+                  "fields": fields
               }],
               "file": None
           }
@@ -159,12 +248,15 @@ jobs:
           else:
               print(f"Failed to send Discord notification: {response.status_code}")
           
-          # For file upload, use multipart form data
-          with open('./site/index.html', 'rb') as f:
-              files = {'file': ('dashboard.html', f)}
-              response = requests.post(webhook_url, files=files)
-              if response.status_code == 204:
-                  print("HTML file uploaded to Discord!")
-              else:
-                  print(f"Failed to upload file: {response.status_code}")
+          # For file upload, use multipart form data (only if dashboard was generated)
+          if os.path.exists('./site/index.html'):
+              with open('./site/index.html', 'rb') as f:
+                  files = {'file': ('dashboard.html', f)}
+                  response = requests.post(webhook_url, files=files)
+                  if response.status_code == 204:
+                      print("HTML file uploaded to Discord!")
+                  else:
+                      print(f"Failed to upload file: {response.status_code}")
+          else:
+              print("Warning: Dashboard HTML not found, skipping file upload")
           EOF

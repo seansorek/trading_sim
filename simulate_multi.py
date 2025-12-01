@@ -256,7 +256,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run multi-symbol, multi-strategy simulation-only pipeline and build dashboard."
     )
-    parser.add_argument("--symbols", default="SPY,QQQ,AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,NFLX,AMD,INTEL,AVGO,ADBE,CSCO,CRM,NVSN,IBM,DXCM,SQ,SHOP,ZM,DOCU,CRWD,OKTA,NET,ROKU,COIN,HOOD,LCID,PLTR",
+    parser.add_argument("--symbols", default="SPY,QQQ,AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,NVSN,IBM,DXCM,SQ,SHOP,ZM,DOCU,CRWD,OKTA,NET,ROKU,COIN,HOOD,LCID,PLTR",
                         help="Comma-separated list of symbols (e.g., 'SPY,AAPL,QQQ').")
     parser.add_argument("--strategies", default="all",
                         help="Comma-separated list of strategies to run per symbol, or 'all'.")
