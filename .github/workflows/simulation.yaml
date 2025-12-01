@@ -44,6 +44,12 @@ jobs:
           with open('results/recommendations_summary.json', 'r') as f:
               recommendations = json.load(f)
           
+          # Read trade history statistics
+          trade_stats = {}
+          if os.path.exists('results/trade_history/statistics.json'):
+              with open('results/trade_history/statistics.json', 'r') as f:
+                  trade_stats = json.load(f)
+          
           # Count totals
           buy_count = 0
           hold_count = 0
@@ -68,6 +74,49 @@ jobs:
           rec_details_str = "\n".join(rec_details)
           rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
           
+          # Build trade history summary
+          trade_summary = "No trade history yet"
+          if trade_stats and 'overall' in trade_stats:
+              overall = trade_stats['overall']
+              total_trades = trade_stats.get('total_trades', 0)
+              total_pnl = overall.get('total_pnl', 0)
+              win_rate = overall.get('win_rate', 0)
+              profit_factor = overall.get('profit_factor', 0)
+              
+              trade_summary = (
+                  f"📊 **Historical Trade Audit Trail**\n"
+                  f"Total Trades: {total_trades}\n"
+                  f"Win Rate: {win_rate*100:.1f}%\n"
+                  f"Total P&L: ${total_pnl:,.2f}\n"
+                  f"Profit Factor: {profit_factor:.2f}" if profit_factor != float('inf') else "Profit Factor: ∞"
+              )
+              
+              # Add top performers by symbol
+              if 'by_symbol' in trade_stats and trade_stats['by_symbol']:
+                  top_symbols = sorted(
+                      trade_stats['by_symbol'].items(),
+                      key=lambda x: x[1].get('total_pnl', 0),
+                      reverse=True
+                  )[:3]
+                  if top_symbols:
+                      trade_summary += "\n\n**Top Symbols:**"
+                      for symbol, stats in top_symbols:
+                          pnl = stats.get('total_pnl', 0)
+                          trade_summary += f"\n  {symbol}: ${pnl:,.2f}"
+              
+              # Add top performers by strategy
+              if 'by_strategy' in trade_stats and trade_stats['by_strategy']:
+                  top_strats = sorted(
+                      trade_stats['by_strategy'].items(),
+                      key=lambda x: x[1].get('total_pnl', 0),
+                      reverse=True
+                  )[:3]
+                  if top_strats:
+                      trade_summary += "\n\n**Top Strategies:**"
+                      for strat, stats in top_strats:
+                          pnl = stats.get('total_pnl', 0)
+                          trade_summary += f"\n  {strat}: ${pnl:,.2f}"
+          
           # Prepare Discord message
           webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
           
@@ -86,6 +135,11 @@ jobs:
                       {
                           "name": "Detailed Recommendations",
                           "value": f"```\n{rec_details_str}\n```",
+                          "inline": False
+                      },
+                      {
+                          "name": "Trade History Summary",
+                          "value": trade_summary,
                           "inline": False
                       },
                       {

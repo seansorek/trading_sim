@@ -38,6 +38,7 @@ from simulation_pipeline import (
     STRATEGY_REGISTRY,  # so we can use all available strategy names automatically
 )
 from data_loader import load_yfinance, load_csv
+from trade_history import append_trade, save_stats
 from datetime import datetime, timedelta
 
 # Calculate last month's dates for more historical context
@@ -242,6 +243,11 @@ def run_symbol_strategy(symbol: str,
     safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
     safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
 
+    # 5b) Track historical trades
+    run_timestamp = datetime.now().isoformat()
+    if not res.trades.empty:
+        append_trade(symbol, strategy_name, res.trades, run_timestamp)
+
     # 6) Generate recommendation with expert opinion prior
     recommendation = generate_recommendation(res.metrics, wf.metrics, expert_opinion)
 
@@ -400,6 +406,13 @@ def main():
     with open("results/recommendations_summary.json", "w") as f:
         json.dump(recommendations_sorted, f, indent=2)
     print("[ok] Wrote results/recommendations_summary.json")
+
+    # Update historical trade statistics
+    print("[info] Updating historical trade statistics...")
+    trade_stats = save_stats()
+    print(f"[ok] Trade history updated: {trade_stats.get('total_trades', 0)} total trades")
+    print(f"     Overall win rate: {trade_stats.get('overall', {}).get('win_rate', 'N/A')}")
+    print(f"     Overall P&L: ${trade_stats.get('overall', {}).get('total_pnl', 0):.2f}")
 
     # Build the dashboard (site/index.html)
     print("[info] Building multi-symbol strategy dashboard...")
