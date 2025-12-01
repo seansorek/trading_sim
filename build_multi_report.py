@@ -1,5 +1,6 @@
 
 import os, json, base64
+from ascii_charts import equity_curve_to_ascii, simple_metric_chart
 
 RESULTS_DIR = "results"
 SITE_DIR = "site"
@@ -37,6 +38,7 @@ html = """<!doctype html>
  .recommendation.hold { background:#f39c12; color:white; }
  .recommendation.sell { background:#e74c3c; color:white; }
  .recommendation.no_data { background:#95a5a6; color:white; }
+ pre { background:#f5f5f5; padding:1rem; border-radius:4px; overflow-x:auto; font-family:monospace; }
 </style>
 <script>
 function showStrategy(symbol) {
@@ -66,8 +68,7 @@ for symbol, symdata in data.items():
 
     # Strategy-specific sections
     for strat in strategies:
-        img_path = os.path.join(RESULTS_DIR, f"{symbol}_{strat}_equity_curve.png")
-        img_b64 = b64img(img_path)
+        csv_path = os.path.join(RESULTS_DIR, f"{symbol}_{strat}_equity_curve.csv")
         strat_data = symdata.get(strat, {})
         metrics = strat_data.get("metrics", {})
         recommendation = strat_data.get("recommendation", "NO_DATA")
@@ -79,13 +80,19 @@ for symbol, symdata in data.items():
         rec_class = recommendation.lower() if recommendation in ['BUY', 'HOLD', 'SELL'] else 'no_data'
         html += f"<div class='recommendation {rec_class}'>Recommendation: {recommendation}</div>"
         
-        if img_b64:
-            html += f"<img src='data:image/png;base64,{img_b64}' alt='{strat} equity curve'/>"
+        # ASCII chart from equity curve
+        if os.path.exists(csv_path):
+            ascii_chart = equity_curve_to_ascii(csv_path, height=10, width=40)
+            html += f"<pre>{ascii_chart}</pre>"
         else:
             html += "<p><em>No equity curve available.</em></p>"
         
-        # Metrics table
+        # Simple metric chart
         if metrics:
+            metric_chart = simple_metric_chart(metrics)
+            html += f"<pre>{metric_chart}</pre>"
+            
+            # Full metrics table
             html += "<table><tbody>"
             for k,v in metrics.items():
                 try:

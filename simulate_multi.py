@@ -26,6 +26,7 @@ import subprocess
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import multiprocessing
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -41,6 +42,7 @@ from simulation_pipeline import (
 from data_loader import load_yfinance, load_csv
 import yfinance as yf
 from trade_history import append_trade, save_stats
+from ascii_charts import equity_curve_to_ascii, simple_metric_chart
 from datetime import datetime, timedelta
 
 # Thread-safe lock for shared resources
@@ -221,12 +223,10 @@ def run_symbol_strategy(symbol: str,
     mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
 
     # 5) Persist per-symbol, per-strategy artifacts (copy from the last backtest run)
-    base_png   = "results/equity_curve.png"
     base_csv   = "results/equity_curve.csv"
     base_log   = "results/trade_log.csv"
     base_mjson = "results/metrics.json"
 
-    safe_copy(base_png,   f"results/{symbol}_{strategy_name}_equity_curve.png")
     safe_copy(base_csv,   f"results/{symbol}_{strategy_name}_equity_curve.csv")
     safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
     safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
@@ -248,7 +248,6 @@ def run_symbol_strategy(symbol: str,
         "config": cfg.__dict__,            # strategy config used
         "recommendation": recommendation,  # BUY / HOLD / SELL
         "artifacts": {
-            "equity_curve_png": f"{symbol}_{strategy_name}_equity_curve.png",
             "equity_curve_csv": f"{symbol}_{strategy_name}_equity_curve.csv",
             "trade_log_csv":    f"{symbol}_{strategy_name}_trade_log.csv",
             "metrics_json":     f"{symbol}_{strategy_name}_metrics.json",
@@ -351,7 +350,7 @@ def main():
     parser.add_argument("--interval", default="1m", help="Bar interval (e.g., 1m, 5m).")
     parser.add_argument("--start", default=None, help="YYYY-MM-DD (optional)")
     parser.add_argument("--end", default=None, help="YYYY-MM-DD (optional)")
-    parser.add_argument("--threads", type=int, default=4, help="Number of threads for parallel processing.")
+    parser.add_argument("--threads", type=int, default=None, help="Number of threads for parallel processing (default: min(4, available_threads)).")
 
     # Shared strategy hyperparameters (applied to all strategies where relevant)
     parser.add_argument("--lookback", type=int, default=20, help="Generic lookback for MR/breakout.")
@@ -361,6 +360,13 @@ def main():
     parser.add_argument("--mc-runs", type=int, default=10, help="Monte Carlo stress test runs.")
 
     args = parser.parse_args()
+
+    # Determine number of threads (default: min(4, available CPUs))
+    if args.threads is None:
+        available_threads = multiprocessing.cpu_count()
+        args.threads = min(4, available_threads)
+    
+    print(f"[info] Using {args.threads} threads for parallel processing")
 
     # Parse lists
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

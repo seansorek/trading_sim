@@ -303,12 +303,7 @@ class Backtester:
         # Save outputs
         trades_df.to_csv('results/trade_log.csv') if not trades_df.empty else None
         equity_series.to_csv('results/equity_curve.csv')
-        plt.figure(figsize=(10, 4))
-        plt.plot(equity_series.index, equity_series.values, label='Equity')
-        plt.title('Simulation Equity Curve (Paper Trading)')
-        plt.xlabel('Time'); plt.ylabel('Equity ($)')
-        plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout()
-        plt.savefig('results/equity_curve.png', dpi=150); plt.close()
+        # Skip PNG generation - use ASCII charts in Discord instead
         with open('results/metrics.json', 'w') as f:
             json.dump(metrics, f, indent=2)
         return BacktestResult(equity_series, trades_df, metrics)
