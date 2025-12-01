@@ -176,8 +176,8 @@ def build_strategy_signal(strategy_name: str,
 # 4) Execution + Backtester
 @dataclass
 class ExecutionConfig:
-    commission_per_share: float = 0.0001    # Reduced from 0.0005
-    slippage_bps: float = 0.5               # Reduced from 2.0
+    commission_per_share: float = 0.000001    # Reduced from 0.0005
+    slippage_bps: float = 0.2               # Reduced from 2.0
     max_position: int = 2000
     stop_loss_pct: float = 0.05             # Increased from 0.03
     daily_loss_limit_pct: float = 0.05      # Increased from 0.02

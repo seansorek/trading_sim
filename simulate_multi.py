@@ -24,6 +24,8 @@ import argparse
 import shutil
 import subprocess
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -40,6 +42,9 @@ from data_loader import load_yfinance, load_csv
 import yfinance as yf
 from trade_history import append_trade, save_stats
 from datetime import datetime, timedelta
+
+# Thread-safe lock for shared resources
+results_lock = Lock()
 
 # Calculate last month's dates for more historical context
 end_date = datetime.now()
@@ -252,6 +257,87 @@ def run_symbol_strategy(symbol: str,
     return summary
 
 
+def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict, 
+                   exec_cfg: ExecutionConfig, start: str, end: str, interval: str,
+                   multi_summary: dict):
+    """
+    Process a single symbol across all strategies.
+    Runs in a separate thread.
+    """
+    print(f"\n=== Running symbol: {symbol} ===")
+    
+    symbol_results = {
+        "strategies": strategies,
+        "meta": {
+            "source": args.source,
+            "interval": args.interval,
+            "start": args.start,
+            "end": args.end,
+        },
+        "expert_opinion": expert_opinions[symbol],
+    }
+    
+    # Load data
+    try:
+        if args.source == "yfinance":
+            df = load_yfinance(symbol, start=start, end=end, interval=interval)
+        elif args.source == "csv":
+            df = load_csv(symbol)
+        else:
+            raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
+    except Exception as e:
+        print(f"[error] Failed to load data for {symbol}: {e}")
+        symbol_results["meta"]["error"] = f"Failed to load data: {str(e)}"
+        with results_lock:
+            multi_summary[symbol] = symbol_results
+        return
+    
+    # Features once per symbol
+    feats = make_features(df)
+    
+    # Run each strategy and collect results
+    for strat in strategies:
+        cfg = StrategyConfig(
+            name=strat,
+            lookback=args.lookback,
+            threshold=args.threshold,
+            rsi_lower=args.rsi_lower,
+            rsi_upper=args.rsi_upper,
+        )
+        
+        try:
+            strat_summary = run_symbol_strategy(
+                symbol=symbol,
+                strategy_name=strat,
+                df=df,
+                feats=feats,
+                cfg=cfg,
+                exec_cfg=exec_cfg,
+                n_mc_runs=args.mc_runs,
+                expert_opinion=expert_opinions[symbol],
+            )
+            # Enhance with expert opinion
+            strat_summary['expert_opinion'] = expert_opinions[symbol]
+            symbol_results[strat] = strat_summary
+        except Exception as e:
+            print(f"[error] Failed on {symbol} / {strat}: {e}")
+            # Still record the failure so dashboard can show a notice
+            symbol_results[strat] = {
+                "metrics": {},
+                "wf_metrics": {},
+                "mc_mean": {},
+                "mc_std": {},
+                "config": cfg.__dict__,
+                "artifacts": {},
+                "expert_opinion": expert_opinions[symbol],
+                "error": str(e),
+            }
+    
+    # Thread-safe update of shared multi_summary
+    with results_lock:
+        multi_summary[symbol] = symbol_results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run multi-symbol, multi-strategy simulation-only pipeline and build dashboard."
@@ -265,6 +351,7 @@ def main():
     parser.add_argument("--interval", default="1m", help="Bar interval (e.g., 1m, 5m).")
     parser.add_argument("--start", default=None, help="YYYY-MM-DD (optional)")
     parser.add_argument("--end", default=None, help="YYYY-MM-DD (optional)")
+    parser.add_argument("--threads", type=int, default=4, help="Number of threads for parallel processing.")
 
     # Shared strategy hyperparameters (applied to all strategies where relevant)
     parser.add_argument("--lookback", type=int, default=20, help="Generic lookback for MR/breakout.")
@@ -272,6 +359,69 @@ def main():
     parser.add_argument("--rsi-lower", type=int, default=30, help="RSI lower band.")
     parser.add_argument("--rsi-upper", type=int, default=70, help="RSI upper band.")
     parser.add_argument("--mc-runs", type=int, default=10, help="Monte Carlo stress test runs.")
+
+    args = parser.parse_args()
+
+    # Parse lists
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if args.strategies.lower() == "all":
+        strategies = sorted(STRATEGY_REGISTRY.keys())
+    else:
+        strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+
+    if not symbols or not strategies:
+        raise ValueError("Provide at least one symbol and one strategy (or 'all').")
+
+    os.makedirs("results", exist_ok=True)
+
+    # Combined summary for dropdown dashboard
+    multi_summary = {}
+
+    # Common execution config for all runs (tweak as needed)
+    exec_cfg = ExecutionConfig(
+        commission_per_share=0.0005,
+        slippage_bps=2.0,
+        max_position=2000,
+        stop_loss_pct=0.03,
+        daily_loss_limit_pct=0.02,
+    )
+
+    # Fetch expert opinions for all symbols upfront (sequentially)
+    expert_opinions = {}
+    print("\n[info] Fetching expert opinions from Yahoo Finance...")
+    for symbol in symbols:
+        expert_opinions[symbol] = fetch_expert_opinion(symbol)
+        print(f"  {symbol}: {expert_opinions[symbol]['consensus']} (score: {expert_opinions[symbol]['score']:.2f})")
+
+    # Process symbols in parallel using ThreadPoolExecutor
+    print(f"\n[info] Processing {len(symbols)} symbols using {args.threads} threads...")
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        futures = {}
+        for symbol in symbols:
+            future = executor.submit(
+                process_symbol,
+                symbol=symbol,
+                strategies=strategies,
+                args=args,
+                expert_opinions=expert_opinions,
+                exec_cfg=exec_cfg,
+                start=start,
+                end=end,
+                interval=interval,
+                multi_summary=multi_summary
+            )
+            futures[future] = symbol
+        
+        # Wait for all threads to complete
+        completed = 0
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                future.result()
+                completed += 1
+                print(f"[ok] Completed {symbol} ({completed}/{len(symbols)})")
+            except Exception as e:
+                print(f"[error] Thread failed for {symbol}: {e}")
 
     args = parser.parse_args()
 
