@@ -39,13 +39,35 @@ jobs:
           import json
           import requests
           import os
+          from collections import Counter
           
-          # Read the HTML file
-          with open('./site/index.html', 'r') as f:
-              html_content = f.read()
+          # Read the multi_summary to extract recommendations
+          with open('results/multi_summary.json', 'r') as f:
+              multi_summary = json.load(f)
+          
+          # Count recommendations
+          buy_count = 0
+          hold_count = 0
+          sell_count = 0
+          strategies_summary = []
+          
+          for symbol, symdata in multi_summary.items():
+              for strat in symdata.get("strategies", []):
+                  strat_data = symdata.get(strat, {})
+                  rec = strat_data.get("recommendation", "NO_DATA")
+                  if rec == "BUY":
+                      buy_count += 1
+                  elif rec == "HOLD":
+                      hold_count += 1
+                  elif rec == "SELL":
+                      sell_count += 1
+                  strategies_summary.append(f"{symbol} ({strat}): {rec}")
           
           # Prepare Discord message
           webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          
+          # Build recommendations summary
+          rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
           
           payload = {
               "content": "📊 Trading Simulation Dashboard Updated",
@@ -54,6 +76,11 @@ jobs:
                   "description": "Dashboard has been generated and is ready for review.",
                   "color": 3447003,
                   "fields": [
+                      {
+                          "name": "Recommendations Summary",
+                          "value": rec_summary,
+                          "inline": False
+                      },
                       {
                           "name": "Status",
                           "value": "✅ Complete",

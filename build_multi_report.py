@@ -32,6 +32,11 @@ html = """<!doctype html>
  table { border-collapse: collapse; width:100%; margin-top:1rem; }
  th, td { border:1px solid #ddd; padding:8px; text-align:left; }
  th { background:#f0f0f0; }
+ .recommendation { display:inline-block; padding:0.5rem 1rem; border-radius:4px; font-weight:bold; margin-top:0.5rem; }
+ .recommendation.buy { background:#2ecc71; color:white; }
+ .recommendation.hold { background:#f39c12; color:white; }
+ .recommendation.sell { background:#e74c3c; color:white; }
+ .recommendation.no_data { background:#95a5a6; color:white; }
 </style>
 <script>
 function showStrategy(symbol) {
@@ -63,13 +68,22 @@ for symbol, symdata in data.items():
     for strat in strategies:
         img_path = os.path.join(RESULTS_DIR, f"{symbol}_{strat}_equity_curve.png")
         img_b64 = b64img(img_path)
-        metrics = symdata.get(strat, {}).get("metrics", {})
+        strat_data = symdata.get(strat, {})
+        metrics = strat_data.get("metrics", {})
+        recommendation = strat_data.get("recommendation", "NO_DATA")
+        
         html += f"<div class='{symbol}-strategy' data-strategy='{strat}' style='display:none;'>"
         html += f"<h3>{strat.capitalize()} Strategy</h3>"
+        
+        # Recommendation badge
+        rec_class = recommendation.lower() if recommendation in ['BUY', 'HOLD', 'SELL'] else 'no_data'
+        html += f"<div class='recommendation {rec_class}'>Recommendation: {recommendation}</div>"
+        
         if img_b64:
             html += f"<img src='data:image/png;base64,{img_b64}' alt='{strat} equity curve'/>"
         else:
             html += "<p><em>No equity curve available.</em></p>"
+        
         # Metrics table
         if metrics:
             html += "<table><tbody>"

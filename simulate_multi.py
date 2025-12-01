@@ -38,9 +38,9 @@ from simulation_pipeline import (
 from data_loader import load_yfinance, load_csv
 from datetime import datetime, timedelta
 
-# Calculate last week's dates
+# Calculate last month's dates for more historical context
 end_date = datetime.now()
-start_date = end_date - timedelta(days=7)
+start_date = end_date - timedelta(days=30)
 
 # Format as strings
 start = start_date.strftime("%Y-%m-%d")
@@ -54,6 +54,59 @@ def safe_copy(src: str, dst: str):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
     print(f"[ok] Copied {src} -> {dst}")
+
+
+def generate_recommendation(metrics: dict, wf_metrics: dict) -> str:
+    """
+    Generate a trading recommendation based on backtest and walk-forward metrics.
+    Returns: 'BUY', 'HOLD', 'SELL', or 'NO_DATA'
+    """
+    if not metrics or not wf_metrics:
+        return 'NO_DATA'
+    
+    # Extract key metrics
+    backtest_return = metrics.get('total_return_pct', 0)
+    wf_return = wf_metrics.get('total_return_pct', 0)
+    sharpe = metrics.get('daily_sharpe', 0)
+    max_dd = metrics.get('max_drawdown_pct', 0)
+    hit_rate = metrics.get('hit_rate', 0)
+    
+    # Scoring logic
+    score = 0
+    
+    # Profitability (40% weight)
+    if backtest_return > 5:
+        score += 40
+    elif backtest_return > 0:
+        score += 20
+    elif backtest_return > -5:
+        score += 10
+    
+    # Walk-forward validation (30% weight)
+    if wf_return > 2:
+        score += 30
+    elif wf_return > 0:
+        score += 15
+    elif wf_return > -2:
+        score += 5
+    
+    # Risk-adjusted returns (20% weight)
+    if sharpe > 1.0:
+        score += 20
+    elif sharpe > 0.5:
+        score += 10
+    
+    # Drawdown check (10% weight)
+    if max_dd > -10:
+        score += 10
+    
+    # Recommendations
+    if score >= 80:
+        return 'BUY'
+    elif score >= 50:
+        return 'HOLD'
+    else:
+        return 'SELL'
 
 
 def run_symbol_strategy(symbol: str,
@@ -93,13 +146,17 @@ def run_symbol_strategy(symbol: str,
     safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
     safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
 
-    # 6) Summary for dashboard
+    # 6) Generate recommendation for next week
+    recommendation = generate_recommendation(res.metrics, wf.metrics)
+
+    # 7) Summary for dashboard
     summary = {
         "metrics": res.metrics,            # backtest metrics for this strategy
         "wf_metrics": wf.metrics,          # walk-forward (out-of-sample) metrics
         "mc_mean": mc.mean().to_dict(),    # Monte Carlo average metrics
         "mc_std": mc.std().to_dict(),      # Monte Carlo std dev of metrics
         "config": cfg.__dict__,            # strategy config used
+        "recommendation": recommendation,  # BUY / HOLD / SELL
         "artifacts": {
             "equity_curve_png": f"{symbol}_{strategy_name}_equity_curve.png",
             "equity_curve_csv": f"{symbol}_{strategy_name}_equity_curve.csv",
