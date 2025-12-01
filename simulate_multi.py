@@ -24,7 +24,6 @@ import argparse
 import shutil
 import subprocess
 import requests
-from bs4 import BeautifulSoup
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -38,6 +37,7 @@ from simulation_pipeline import (
     STRATEGY_REGISTRY,  # so we can use all available strategy names automatically
 )
 from data_loader import load_yfinance, load_csv
+import yfinance as yf
 from trade_history import append_trade, save_stats
 from datetime import datetime, timedelta
 
@@ -62,63 +62,46 @@ def safe_copy(src: str, dst: str):
 
 def fetch_expert_opinion(symbol: str) -> dict:
     """
-    Fetch expert sentiment and ratings for a stock from multiple sources.
-    Returns dict with keys: 'consensus', 'target_price', 'upside_pct', 'num_analysts'
+    Fetch expert sentiment and ratings for a stock using yfinance.
+    Returns dict with keys: 'consensus', 'score', 'analyst_count'
     """
     try:
-        # Try Yahoo Finance API for analyst ratings
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=recommendationTrend"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
         
-        response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status()
-        data = response.json()
+        # yfinance provides recommendation ratings
+        recommendation = info.get('recommendationKey', 'hold').upper()
+        analyst_count = info.get('numberOfAnalystOpinions', 0)
         
-        rec_trend = data.get('quoteSummary', {}).get('result', [{}])[0].get('recommendationTrend', {})
-        trend = rec_trend.get('trend', [])
+        # Map recommendation to consensus and score
+        if recommendation in ['STRONG_BUY', 'BUY']:
+            consensus = 'BUY'
+            score = 2.0
+        elif recommendation == 'HOLD':
+            consensus = 'HOLD'
+            score = 0.0
+        elif recommendation in ['STRONG_SELL', 'SELL']:
+            consensus = 'SELL'
+            score = -2.0
+        else:
+            consensus = 'HOLD'
+            score = 0.0
         
-        if trend:
-            # Most recent recommendation
-            latest = trend[0]
-            strong_buy = latest.get('strongBuy', 0)
-            buy = latest.get('buy', 0)
-            hold = latest.get('hold', 0)
-            sell = latest.get('sell', 0)
-            strong_sell = latest.get('strongSell', 0)
-            total = strong_buy + buy + hold + sell + strong_sell
-            
-            if total > 0:
-                # Calculate weighted score: strong_buy=2, buy=1, hold=0, sell=-1, strong_sell=-2
-                score = (strong_buy * 2 + buy * 1 - sell * 1 - strong_sell * 2) / total
-                
-                if score > 0.5:
-                    consensus = "BUY"
-                elif score < -0.5:
-                    consensus = "SELL"
-                else:
-                    consensus = "HOLD"
-                
-                return {
-                    "consensus": consensus,
-                    "score": float(score),
-                    "num_analysts": total,
-                    "breakdown": {
-                        "strong_buy": strong_buy,
-                        "buy": buy,
-                        "hold": hold,
-                        "sell": sell,
-                        "strong_sell": strong_sell
-                    }
-                }
+        return {
+            "consensus": consensus,
+            "score": float(score),
+            "num_analysts": int(analyst_count),
+            "recommendation_key": recommendation
+        }
+        
     except Exception as e:
         print(f"[warn] Could not fetch expert opinion for {symbol}: {e}")
-    
-    return {
-        "consensus": "HOLD",
-        "score": 0.0,
-        "num_analysts": 0,
-        "breakdown": {}
-    }
+        return {
+            "consensus": "HOLD",
+            "score": 0.0,
+            "num_analysts": 0,
+            "recommendation_key": "unknown"
+        }
 
 
 def generate_recommendation(metrics: dict, wf_metrics: dict, expert_opinion: dict) -> str:
@@ -327,13 +310,30 @@ def main():
         print(f"\n=== Running symbol: {symbol} ===")
 
         # Load data
-        if args.source == "yfinance":
-            df = load_yfinance(symbol, start=start, end=end, interval=interval)
-        elif args.source == "csv":
-            # For CSV source, 'symbol' should be a file path; multi-symbol via CSV only if you pass multiple file paths.
-            df = load_csv(symbol)
-        else:
-            raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
+        try:
+            if args.source == "yfinance":
+                df = load_yfinance(symbol, start=start, end=end, interval=interval)
+            elif args.source == "csv":
+                # For CSV source, 'symbol' should be a file path; multi-symbol via CSV only if you pass multiple file paths.
+                df = load_csv(symbol)
+            else:
+                raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
+        except Exception as e:
+            print(f"[error] Failed to load data for {symbol}: {e}")
+            print(f"[warn] Skipping {symbol}")
+            # Record as failed in multi_summary
+            multi_summary[symbol] = {
+                "strategies": strategies,
+                "meta": {
+                    "source": args.source,
+                    "interval": args.interval,
+                    "start": args.start,
+                    "end": args.end,
+                    "error": f"Failed to load data: {str(e)}"
+                },
+                "expert_opinion": fetch_expert_opinion(symbol),
+            }
+            continue
 
         # Features once per symbol
         feats = make_features(df)

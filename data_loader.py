@@ -43,16 +43,34 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "1m") -> pd
     """
     Fetch intraday bars from Yahoo Finance via yfinance.
     NOTE: 1m data is often limited to ~7 days for free access and may be delayed or incomplete.
+    Raises ValueError if no data is returned or if data is insufficient.
     """
     import yfinance as yf
+    
     ticker = yf.Ticker(symbol)
     df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
+    
+    # Check if empty
     if df.empty:
-        raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}).")
+        raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}). Symbol may be invalid or data unavailable.")
+    
+    # Check if we have sufficient data (at least 10 candles)
+    if len(df) < 10:
+        raise ValueError(f"Insufficient data for {symbol}: only {len(df)} candles returned (need at least 10). Try a different date range or interval.")
+    
+    # Rename columns
     df = df.rename(columns={"Open":"open", "High":"high", "Low":"low", "Close":"close", "Volume":"volume"})
-    # yfinance timestamps are tz-aware (UTC or local depending on source). Standardize:
+    
+    # Ensure required columns exist
+    required = ["open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for {symbol}: {missing}")
+    
+    # Standardize timezone
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
+    
     return _standardize(df)
 
 def load_csv(path: str) -> pd.DataFrame:
