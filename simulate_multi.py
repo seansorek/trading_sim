@@ -126,10 +126,10 @@ def generate_recommendation(metrics: dict, wf_metrics: dict, expert_opinion: dic
     Returns: 'BUY', 'HOLD', 'SELL', or 'NO_DATA'
     
     Combines:
-    - Backtest performance (40%)
-    - Walk-forward validation (30%)
+    - Backtest performance (30%)
+    - Walk-forward validation (20%)
     - Risk metrics (20%)
-    - Expert opinion prior (10%)
+    - Expert opinion prior (30%)
     """
     if not metrics or not wf_metrics:
         return 'NO_DATA'
@@ -139,48 +139,63 @@ def generate_recommendation(metrics: dict, wf_metrics: dict, expert_opinion: dic
     wf_return = wf_metrics.get('total_return_pct', 0)
     sharpe = metrics.get('daily_sharpe', 0)
     max_dd = metrics.get('max_drawdown_pct', 0)
-    hit_rate = metrics.get('hit_rate', 0)
     
     # Scoring logic
     score = 0
     
-    # Profitability (40% weight)
-    if backtest_return > 5:
-        score += 40
+    # Backtest profitability (30% weight, less strict)
+    if backtest_return > 2:
+        score += 30
     elif backtest_return > 0:
         score += 20
-    elif backtest_return > -5:
+    elif backtest_return > -3:
         score += 10
+    elif backtest_return > -5:
+        score += 5
     
-    # Walk-forward validation (30% weight)
-    if wf_return > 2:
-        score += 30
+    # Walk-forward validation (20% weight, much less strict)
+    if wf_return > 1:
+        score += 20
     elif wf_return > 0:
         score += 15
+    elif wf_return > -1:
+        score += 10
     elif wf_return > -2:
         score += 5
     
     # Risk-adjusted returns (20% weight)
-    if sharpe > 1.0:
+    if sharpe > 0.5:
         score += 20
-    elif sharpe > 0.5:
+    elif sharpe > 0:
         score += 10
     
     # Drawdown check (10% weight)
     if max_dd > -10:
         score += 10
+    elif max_dd > -15:
+        score += 5
     
-    # Expert opinion prior (10% weight, normalized)
-    expert_score = expert_opinion.get('score', 0.0)  # Range: [-2, 2]
+    # Expert opinion prior (30% weight, greatly increased)
+    expert_score = expert_opinion.get('score', 0.0)
+    expert_consensus = expert_opinion.get('consensus', 'HOLD')
+    
+    if expert_consensus == 'BUY':
+        score += 30
+    elif expert_consensus == 'HOLD':
+        score += 20
+    elif expert_consensus == 'SELL':
+        score += 5
+    
+    # Boost if expert score is positive
     if expert_score > 0.5:
-        score += 10
+        score += 5
     elif expert_score < -0.5:
         score -= 5
     
-    # Recommendations
-    if score >= 80:
+    # Recommendations with lower thresholds
+    if score >= 65:
         return 'BUY'
-    elif score >= 50:
+    elif score >= 35:
         return 'HOLD'
     else:
         return 'SELL'
