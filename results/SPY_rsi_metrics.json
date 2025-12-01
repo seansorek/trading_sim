@@ -1,0 +1,10 @@
+{
+  "final_equity": 99935.35889838776,
+  "total_return_pct": -0.06378816542850219,
+  "daily_sharpe": -12.469166785412401,
+  "daily_sortino": -36.556173215651896,
+  "max_drawdown_pct": -0.060086886499639294,
+  "n_round_trades": 42,
+  "hit_rate": 0.07142857142857142,
+  "profit_factor": 0.11005249544158817
+}

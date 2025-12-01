@@ -95,33 +95,92 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     feats = feats.bfill().ffill()
     return feats
 
-# 3) Strategies
+
 @dataclass
 class StrategyConfig:
     name: str
+    # Common params used by various strategies
     lookback: int = 20
     threshold: float = 0.8
+    rsi_lower: int = 30
+    rsi_upper: int = 70
 
-class MeanReversionStrategy:
+class BaseStrategy:
+    """Unified interface: implement signal(feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series."""
     def __init__(self, cfg: StrategyConfig):
         self.cfg = cfg
-    def signal(self, feats: pd.DataFrame) -> pd.Series:
+
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        raise NotImplementedError
+
+class MeanReversionStrategy(BaseStrategy):
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         ret = feats['ret_1m']
         mu = ret.rolling(self.cfg.lookback).mean()
         sd = ret.rolling(self.cfg.lookback).std().replace(0, np.nan)
         z = (ret - mu) / (sd + 1e-12)
-        return pd.Series(np.where(z < -self.cfg.threshold, 1,
-                             np.where(z > self.cfg.threshold, -1, 0)),
-                         index=feats.index)
+        return pd.Series(
+            np.where(z < -self.cfg.threshold, 1,
+                     np.where(z >  self.cfg.threshold, -1, 0)),
+            index=feats.index
+        )
+
+class MomentumStrategy(BaseStrategy):
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        ma_spread = feats['ma_spread']
+        return pd.Series(
+            np.where(ma_spread > 0, 1,
+                     np.where(ma_spread < 0, -1, 0)),
+            index=feats.index
+        )
+
+class BreakoutStrategy(BaseStrategy):
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        price = df['close']
+        high_roll = price.rolling(self.cfg.lookback).max()
+        low_roll  = price.rolling(self.cfg.lookback).min()
+        sig = np.where(price > high_roll.shift(1), 1,
+                  np.where(price < low_roll.shift(1), -1, 0))
+        return pd.Series(sig, index=price.index).fillna(0)
+
+class RSIStrategy(BaseStrategy):
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        rsi = feats['rsi_14']
+        sig = np.where(rsi < self.cfg.rsi_lower, 1,
+                  np.where(rsi > self.cfg.rsi_upper, -1, 0))
+        return pd.Series(sig, index=feats.index).fillna(0)
+
+# ===== Strategy Registry & Builder =====
+
+STRATEGY_REGISTRY = {
+    "mean_reversion": MeanReversionStrategy,
+    "momentum":       MomentumStrategy,
+    "breakout":       BreakoutStrategy,
+    "rsi":            RSIStrategy,
+}
+
+def build_strategy_signal(strategy_name: str,
+                          cfg: StrategyConfig,
+                          feats: pd.DataFrame,
+                          df: pd.DataFrame) -> pd.Series:
+    name = strategy_name.lower()
+    if name not in STRATEGY_REGISTRY:
+        raise ValueError(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGY_REGISTRY.keys())}")
+    strat_cls = STRATEGY_REGISTRY[name]
+    strat = strat_cls(cfg)
+    sig = strat.signal(feats, df)
+    # Final sanity: ensure integer {-1,0,+1}
+    sig = pd.Series(np.sign(sig).astype(int), index=sig.index)
+    return sig
 
 # 4) Execution + Backtester
 @dataclass
 class ExecutionConfig:
-    commission_per_share: float = 0.0005   # $0.0005/share
-    slippage_bps: float = 2.0              # extra bps on fills
+    commission_per_share: float = 0.0001    # Reduced from 0.0005
+    slippage_bps: float = 0.5               # Reduced from 2.0
     max_position: int = 2000
-    stop_loss_pct: float = 0.03
-    daily_loss_limit_pct: float = 0.02
+    stop_loss_pct: float = 0.05             # Increased from 0.03
+    daily_loss_limit_pct: float = 0.05      # Increased from 0.02
 
 @dataclass
 class BacktestResult:
@@ -158,8 +217,8 @@ class Backtester:
 
             desired = int(signal.loc[ts])  # -1 / 0 / +1
 
-            # Simple notional sizing (10% of capital per trade)
-            notional = self.start_cash * 0.1
+            # Simple notional sizing (5% of capital per trade)
+            notional = self.start_cash * 0.05
             shares = int(notional / mid) if mid > 0 else 0
             shares = min(shares, self.exec_cfg.max_position)
 
@@ -349,7 +408,7 @@ if __name__ == '__main__':
     df = generate_synthetic_intraday(start_price=100.0, days=10)
     feats = make_features(df)
 
-    mr_cfg = StrategyConfig(name='mean_reversion', lookback=20, threshold=0.8)
+    mr_cfg = StrategyConfig(name='mean_reversion', lookback=20, threshold=1.5)
     mr = MeanReversionStrategy(mr_cfg)
     signal_mr = mr.signal(feats)
 

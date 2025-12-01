@@ -1,11 +1,41 @@
 
-# simulate_multi.py
-import os, json, subprocess, shutil
+#!/usr/bin/env python3
+"""
+simulate_multi.py
+
+Runs multiple strategies for multiple symbols in a simulation-only pipeline,
+saves per-symbol/per-strategy artifacts, builds a multi-symbol summary JSON,
+and triggers the HTML dashboard builder (build_multi_report.py).
+
+Artifacts written per symbol+strategy:
+- results/{SYMBOL}_{STRATEGY}_equity_curve.png
+- results/{SYMBOL}_{STRATEGY}_equity_curve.csv
+- results/{SYMBOL}_{STRATEGY}_trade_log.csv
+- results/{SYMBOL}_{STRATEGY}_metrics.json
+
+Index:
+- results/multi_summary.json
+- site/index.html (via build_multi_report.py)
+"""
+
+import os
+import json
+import argparse
+import shutil
+import subprocess
+
+# Import your pipeline components
 from simulation_pipeline import (
-    make_features, MeanReversionStrategy, StrategyConfig,
-    Backtester, ExecutionConfig, walk_forward_backtest, monte_carlo_stress
+    make_features,
+    StrategyConfig,
+    ExecutionConfig,
+    Backtester,
+    walk_forward_backtest,
+    monte_carlo_stress,
+    build_strategy_signal,
+    STRATEGY_REGISTRY,  # so we can use all available strategy names automatically
 )
-from data_loader import load_yfinance
+from data_loader import load_yfinance, load_csv
 from datetime import datetime, timedelta
 
 # Calculate last week's dates
@@ -16,61 +46,187 @@ start_date = end_date - timedelta(days=7)
 start = start_date.strftime("%Y-%m-%d")
 end = end_date.strftime("%Y-%m-%d")
 
+def safe_copy(src: str, dst: str):
+    """Copy file if it exists; create destination folder as needed."""
+    if not os.path.exists(src):
+        print(f"[warn] Source missing, skip: {src}")
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    print(f"[ok] Copied {src} -> {dst}")
 
-SYMBOLS = ["SPY", "AAPL", "QQQ"]   # Adjust as you like
-INTERVAL = "1m"
 
-os.makedirs("results", exist_ok=True)
-all_results = {}
+def run_symbol_strategy(symbol: str,
+                        strategy_name: str,
+                        df,
+                        feats,
+                        cfg: StrategyConfig,
+                        exec_cfg: ExecutionConfig,
+                        n_mc_runs: int = 10):
+    """
+    Build signal for (symbol, strategy), run backtest, walk-forward, Monte Carlo,
+    save artifacts, and return summary dict for multi_summary.json.
+    """
+    print(f"→ [{symbol}] Strategy: {strategy_name} | Config: {cfg.__dict__}")
 
-for symbol in SYMBOLS:
+    # 1) Signal (from registry)
+    signal = build_strategy_signal(strategy_name, cfg, feats, df)
 
-    print(f"Running simulation for {symbol}...")
+    # 2) Backtest (writes results/equity_curve.png, trade_log.csv, metrics.json)
+    bt = Backtester(exec_cfg)
+    res = bt.run(df, feats, signal)
 
-    # 1) Load data (yfinance minute data often covers ~7 days)
-    df = load_yfinance(symbol, start=start, end=end, interval=INTERVAL)
+    # 3) Walk-forward (out-of-sample)
+    wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
 
-    # 2) Features + signals
-    feats = make_features(df)
-    mr_cfg = StrategyConfig(name="mean_reversion", lookback=20, threshold=0.8)
-    mr = MeanReversionStrategy(mr_cfg)
-    signal_mr = mr.signal(feats)
+    # 4) Monte Carlo stress test for execution assumptions
+    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
 
-    # 3) Backtest
-    bt = Backtester(ExecutionConfig())
-    result = bt.run(df, feats, signal_mr)
+    # 5) Persist per-symbol, per-strategy artifacts (copy from the last backtest run)
+    base_png   = "results/equity_curve.png"
+    base_csv   = "results/equity_curve.csv"
+    base_log   = "results/trade_log.csv"
+    base_mjson = "results/metrics.json"
 
-    # 4) Walk-forward (train 3 days → test 1 day)
-    wf_result = walk_forward_backtest(df, feats, train_days=3, test_days=1)
+    safe_copy(base_png,   f"results/{symbol}_{strategy_name}_equity_curve.png")
+    safe_copy(base_csv,   f"results/{symbol}_{strategy_name}_equity_curve.csv")
+    safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
+    safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
 
-    # 5) Monte Carlo stress test on execution assumptions
-    mc_stats = monte_carlo_stress(df, feats, signal_mr, n_runs=10)
-
-    # 6) Collect metrics
+    # 6) Summary for dashboard
     summary = {
-        "symbol": symbol,
-        "mean_reversion_metrics": result.metrics,
-        "walk_forward_metrics": wf_result.metrics,
-        "monte_carlo_metrics_mean": mc_stats.mean().to_dict(),
-        "monte_carlo_metrics_std": mc_stats.std().to_dict()
+        "metrics": res.metrics,            # backtest metrics for this strategy
+        "wf_metrics": wf.metrics,          # walk-forward (out-of-sample) metrics
+        "mc_mean": mc.mean().to_dict(),    # Monte Carlo average metrics
+        "mc_std": mc.std().to_dict(),      # Monte Carlo std dev of metrics
+        "config": cfg.__dict__,            # strategy config used
+        "artifacts": {
+            "equity_curve_png": f"{symbol}_{strategy_name}_equity_curve.png",
+            "equity_curve_csv": f"{symbol}_{strategy_name}_equity_curve.csv",
+            "trade_log_csv":    f"{symbol}_{strategy_name}_trade_log.csv",
+            "metrics_json":     f"{symbol}_{strategy_name}_metrics.json",
+        },
     }
-    all_results[symbol] = summary
-
-    # 7) Save symbol-specific artifacts (copy/rename last-run outputs)
-    # NOTE: Backtester saved general files; we preserve a per-symbol copy.
-    def _copy(src, dst):
-        if os.path.exists(src):
-            shutil.copy2(src, dst)
-
-    _copy("results/equity_curve.png", f"results/{symbol}_equity_curve.png")
-    _copy("results/equity_curve.csv", f"results/{symbol}_equity_curve.csv")
-    _copy("results/trade_log.csv",   f"results/{symbol}_trade_log.csv")
-    _copy("results/metrics.json",    f"results/{symbol}_metrics.json")
+    return summary
 
 
-with open("results/multi_summary.json", "w") as f:
-    json.dump(all_results, f, indent=2)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run multi-symbol, multi-strategy simulation-only pipeline and build dashboard."
+    )
+    parser.add_argument("--symbols", default="SPY,AAPL,QQQ",
+                        help="Comma-separated list of symbols (e.g., 'SPY,AAPL,QQQ').")
+    parser.add_argument("--strategies", default="all",
+                        help="Comma-separated list of strategies to run per symbol, or 'all'.")
+    parser.add_argument("--source", default="yfinance", choices=["yfinance", "csv"],
+                        help="Data source: yfinance or csv.")
+    parser.add_argument("--interval", default="1m", help="Bar interval (e.g., 1m, 5m).")
+    parser.add_argument("--start", default=None, help="YYYY-MM-DD (optional)")
+    parser.add_argument("--end", default=None, help="YYYY-MM-DD (optional)")
 
-# Build multi-symbol site
-subprocess.check_call(["python", "build_multi_report.py"])
-print("Multi-symbol run complete. See site/index.html after build.")
+    # Shared strategy hyperparameters (applied to all strategies where relevant)
+    parser.add_argument("--lookback", type=int, default=20, help="Generic lookback for MR/breakout.")
+    parser.add_argument("--threshold", type=float, default=0.8, help="Z-score threshold for MR.")
+    parser.add_argument("--rsi-lower", type=int, default=30, help="RSI lower band.")
+    parser.add_argument("--rsi-upper", type=int, default=70, help="RSI upper band.")
+    parser.add_argument("--mc-runs", type=int, default=10, help="Monte Carlo stress test runs.")
+
+    args = parser.parse_args()
+
+    # Parse lists
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if args.strategies.lower() == "all":
+        strategies = sorted(STRATEGY_REGISTRY.keys())
+    else:
+        strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+
+    if not symbols or not strategies:
+        raise ValueError("Provide at least one symbol and one strategy (or 'all').")
+
+    os.makedirs("results", exist_ok=True)
+
+    # Combined summary for dropdown dashboard
+    multi_summary = {}
+
+    # Common execution config for all runs (tweak as needed)
+    exec_cfg = ExecutionConfig(
+        commission_per_share=0.0005,
+        slippage_bps=2.0,
+        max_position=2000,
+        stop_loss_pct=0.03,
+        daily_loss_limit_pct=0.02,
+    )
+
+    for symbol in symbols:
+        print(f"\n=== Running symbol: {symbol} ===")
+
+        # Load data
+        if args.source == "yfinance":
+            df = load_yfinance(symbol, start=start, end=end, interval="1m")
+        elif args.source == "csv":
+            # For CSV source, 'symbol' should be a file path; multi-symbol via CSV only if you pass multiple file paths.
+            df = load_csv(symbol)
+        else:
+            raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
+
+        # Features once per symbol
+        feats = make_features(df)
+
+        # Prepare symbol entry for multi_summary
+        multi_summary[symbol] = {
+            "strategies": strategies,  # the dashboard dropdown reads this list
+            "meta": {
+                "source": args.source,
+                "interval": args.interval,
+                "start": args.start,
+                "end": args.end,
+            },
+        }
+
+        # Run each strategy and collect results
+        for strat in strategies:
+            cfg = StrategyConfig(
+                name=strat,
+                lookback=args.lookback,
+                threshold=args.threshold,
+                rsi_lower=args.rsi_lower,
+                rsi_upper=args.rsi_upper,
+            )
+
+            try:
+                strat_summary = run_symbol_strategy(
+                    symbol=symbol,
+                    strategy_name=strat,
+                    df=df,
+                    feats=feats,
+                    cfg=cfg,
+                    exec_cfg=exec_cfg,
+                    n_mc_runs=args.mc_runs,
+                )
+                multi_summary[symbol][strat] = strat_summary
+            except Exception as e:
+                print(f"[error] Failed on {symbol} / {strat}: {e}")
+                # Still record the failure so dashboard can show a notice
+                multi_summary[symbol][strat] = {
+                    "metrics": {},
+                    "wf_metrics": {},
+                    "mc_mean": {},
+                    "mc_std": {},
+                    "config": cfg.__dict__,
+                    "artifacts": {},
+                    "error": str(e),
+                }
+
+    # Write combined multi-summary used by the dropdown dashboard
+    with open("results/multi_summary.json", "w") as f:
+        json.dump(multi_summary, f, indent=2)
+    print("\n[ok] Wrote results/multi_summary.json")
+
+    # Build the dashboard (site/index.html)
+    print("[info] Building multi-symbol strategy dashboard...")
+    subprocess.check_call(["python", "build_multi_report.py"])
+    print("[ok] Dashboard generated → site/index.html")
+
+
+if __name__ == "__main__":
+    main()
