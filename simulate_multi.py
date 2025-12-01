@@ -27,6 +27,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import multiprocessing
+import time
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -50,12 +51,12 @@ results_lock = Lock()
 
 # Calculate last month's dates for more historical context
 end_date = datetime.now()
-start_date = end_date - timedelta(days=8)
+start_date = end_date - timedelta(days=14)
 
 # Format as strings
 start = start_date.strftime("%Y-%m-%d")
 end = end_date.strftime("%Y-%m-%d")
-interval = "1m"
+interval = "5m"
 
 def safe_copy(src: str, dst: str):
     """Copy file if it exists; create destination folder as needed."""
@@ -302,6 +303,7 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
             threshold=args.threshold,
             rsi_lower=args.rsi_lower,
             rsi_upper=args.rsi_upper,
+            holding_period=args.holding_period,
         )
         
         try:
@@ -338,6 +340,8 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
 
 
 def main():
+    start_time = time.time()
+    
     parser = argparse.ArgumentParser(
         description="Run multi-symbol, multi-strategy simulation-only pipeline and build dashboard."
     )
@@ -357,6 +361,7 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.8, help="Z-score threshold for MR.")
     parser.add_argument("--rsi-lower", type=int, default=30, help="RSI lower band.")
     parser.add_argument("--rsi-upper", type=int, default=70, help="RSI upper band.")
+    parser.add_argument("--holding-period", type=int, default=5, help="Minimum bars to hold between position changes (reduces trading frequency).")
     parser.add_argument("--mc-runs", type=int, default=10, help="Monte Carlo stress test runs.")
 
     args = parser.parse_args()
@@ -574,6 +579,34 @@ def main():
     print("[info] Building multi-symbol strategy dashboard...")
     subprocess.check_call(["python", "build_multi_report.py"])
     print("[ok] Dashboard generated → site/index.html")
+    
+    # Calculate and save runtime statistics
+    end_time = time.time()
+    elapsed_seconds = end_time - start_time
+    elapsed_minutes = elapsed_seconds / 60
+    
+    runtime_stats = {
+        "start_time": datetime.fromtimestamp(start_time).isoformat(),
+        "end_time": datetime.fromtimestamp(end_time).isoformat(),
+        "elapsed_seconds": round(elapsed_seconds, 2),
+        "elapsed_minutes": round(elapsed_minutes, 2),
+        "symbols_processed": len(symbols),
+        "strategies_per_symbol": len(strategies),
+        "total_runs": len(symbols) * len(strategies),
+        "threads_used": args.threads,
+        "data_source": args.source,
+        "interval": args.interval,
+    }
+    
+    with open("results/runtime_stats.json", "w") as f:
+        json.dump(runtime_stats, f, indent=2)
+    
+    print(f"\n[ok] Runtime Statistics:")
+    print(f"     Total Time: {elapsed_minutes:.2f} minutes ({elapsed_seconds:.0f} seconds)")
+    print(f"     Symbols Processed: {runtime_stats['symbols_processed']}")
+    print(f"     Strategies per Symbol: {runtime_stats['strategies_per_symbol']}")
+    print(f"     Total Backtests Run: {runtime_stats['total_runs']}")
+    print(f"     Threads Used: {runtime_stats['threads_used']}")
 
 
 if __name__ == "__main__":

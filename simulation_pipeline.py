@@ -8,6 +8,13 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Dict
 
+# Try to import ML strategies (optional)
+try:
+    from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy
+    HAS_ML_STRATEGIES = True
+except ImportError:
+    HAS_ML_STRATEGIES = False
+
 np.random.seed(42)
 os.makedirs('data', exist_ok=True)
 os.makedirs('results', exist_ok=True)
@@ -104,6 +111,7 @@ class StrategyConfig:
     threshold: float = 0.8
     rsi_lower: int = 30
     rsi_upper: int = 70
+    holding_period: int = 5  # Minimum bars between position changes
 
 class BaseStrategy:
     """Unified interface: implement signal(feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series."""
@@ -119,20 +127,49 @@ class MeanReversionStrategy(BaseStrategy):
         mu = ret.rolling(self.cfg.lookback).mean()
         sd = ret.rolling(self.cfg.lookback).std().replace(0, np.nan)
         z = (ret - mu) / (sd + 1e-12)
-        return pd.Series(
-            np.where(z < -self.cfg.threshold, 1,
-                     np.where(z >  self.cfg.threshold, -1, 0)),
+        # Increase threshold to 1.2 for stronger conviction
+        sig = pd.Series(
+            np.where(z < -1.2, 1,
+                     np.where(z >  1.2, -1, 0)),
             index=feats.index
         )
+        # Apply holding period to reduce trading frequency
+        sig = self._apply_holding_period(sig)
+        return sig
+    
+    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
+        """Prevent position changes for holding_period bars after each trade."""
+        result = sig.copy()
+        last_trade_idx = -self.cfg.holding_period
+        for i in range(len(result)):
+            if i - last_trade_idx < self.cfg.holding_period:
+                result.iloc[i] = 0  # Suppress signal during holding period
+            elif result.iloc[i] != 0:
+                last_trade_idx = i
+        return result
 
 class MomentumStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         ma_spread = feats['ma_spread']
-        return pd.Series(
+        sig = pd.Series(
             np.where(ma_spread > 0, 1,
                      np.where(ma_spread < 0, -1, 0)),
             index=feats.index
         )
+        # Apply holding period to reduce trading frequency
+        sig = self._apply_holding_period(sig)
+        return sig
+    
+    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
+        """Prevent position changes for holding_period bars after each trade."""
+        result = sig.copy()
+        last_trade_idx = -self.cfg.holding_period
+        for i in range(len(result)):
+            if i - last_trade_idx < self.cfg.holding_period:
+                result.iloc[i] = 0  # Suppress signal during holding period
+            elif result.iloc[i] != 0:
+                last_trade_idx = i
+        return result
 
 class BreakoutStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
@@ -141,14 +178,44 @@ class BreakoutStrategy(BaseStrategy):
         low_roll  = price.rolling(self.cfg.lookback).min()
         sig = np.where(price > high_roll.shift(1), 1,
                   np.where(price < low_roll.shift(1), -1, 0))
-        return pd.Series(sig, index=price.index).fillna(0)
+        result = pd.Series(sig, index=price.index).fillna(0)
+        # Apply holding period to reduce trading frequency
+        result = self._apply_holding_period(result)
+        return result
+    
+    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
+        """Prevent position changes for holding_period bars after each trade."""
+        result = sig.copy()
+        last_trade_idx = -self.cfg.holding_period
+        for i in range(len(result)):
+            if i - last_trade_idx < self.cfg.holding_period:
+                result.iloc[i] = 0  # Suppress signal during holding period
+            elif result.iloc[i] != 0:
+                last_trade_idx = i
+        return result
 
 class RSIStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         rsi = feats['rsi_14']
-        sig = np.where(rsi < self.cfg.rsi_lower, 1,
-                  np.where(rsi > self.cfg.rsi_upper, -1, 0))
-        return pd.Series(sig, index=feats.index).fillna(0)
+        sig = pd.Series(
+            np.where(rsi < self.cfg.rsi_lower, 1,
+                     np.where(rsi > self.cfg.rsi_upper, -1, 0)),
+            index=feats.index
+        ).fillna(0)
+        # Apply holding period to reduce trading frequency
+        sig = self._apply_holding_period(sig)
+        return sig
+    
+    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
+        """Prevent position changes for holding_period bars after each trade."""
+        result = sig.copy()
+        last_trade_idx = -self.cfg.holding_period
+        for i in range(len(result)):
+            if i - last_trade_idx < self.cfg.holding_period:
+                result.iloc[i] = 0  # Suppress signal during holding period
+            elif result.iloc[i] != 0:
+                last_trade_idx = i
+        return result
 
 # ===== Strategy Registry & Builder =====
 
@@ -158,6 +225,11 @@ STRATEGY_REGISTRY = {
     "breakout":       BreakoutStrategy,
     "rsi":            RSIStrategy,
 }
+
+# Add ML strategies if available
+if HAS_ML_STRATEGIES:
+    STRATEGY_REGISTRY["ordinal_logistic"] = OrdinalLogisticStrategy
+    STRATEGY_REGISTRY["xgboost"] = XGBoostStrategy
 
 def build_strategy_signal(strategy_name: str,
                           cfg: StrategyConfig,

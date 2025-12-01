@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           # Explicitly ensure these are present
-          pip install yfinance pandas numpy matplotlib
+          pip install yfinance pandas numpy matplotlib scikit-learn xgboost
 
       - name: Notify Discord - Simulation Started
         run: |
@@ -90,6 +90,12 @@ jobs:
                   content = f.read()
                   error_count = content.count('[error]')
                   warning_count = content.count('[warn]')
+          
+          # Read runtime statistics
+          runtime_stats = {}
+          if os.path.exists('results/runtime_stats.json'):
+              with open('results/runtime_stats.json', 'r') as f:
+                  runtime_stats = json.load(f)
           
           # Read the recommendations summary (sorted by stock)
           recommendations = {}
@@ -185,6 +191,27 @@ jobs:
                           pnl = stats.get('total_pnl', 0)
                           trade_summary += f"\n  {strat}: ${pnl:,.2f}"
           
+          # Build runtime statistics
+          runtime_summary = ""
+          if runtime_stats:
+              elapsed_mins = runtime_stats.get('elapsed_minutes', 0)
+              elapsed_secs = runtime_stats.get('elapsed_seconds', 0)
+              symbols_processed = runtime_stats.get('symbols_processed', 0)
+              strategies = runtime_stats.get('strategies_per_symbol', 0)
+              total_runs = runtime_stats.get('total_runs', 0)
+              threads_used = runtime_stats.get('threads_used', 0)
+              data_source = runtime_stats.get('data_source', 'unknown')
+              interval = runtime_stats.get('interval', 'unknown')
+              
+              runtime_summary = (
+                  f"⏱️ **Execution Performance**\n"
+                  f"Total Time: {elapsed_mins:.2f} minutes ({elapsed_secs:.0f}s)\n"
+                  f"Symbols: {symbols_processed} | Strategies: {strategies}\n"
+                  f"Total Backtests: {total_runs}\n"
+                  f"Threads Used: {threads_used}\n"
+                  f"Data Source: {data_source} ({interval})"
+              )
+          
           # Build error/warning statistics
           error_stats = ""
           if error_count > 0 or warning_count > 0:
@@ -222,6 +249,13 @@ jobs:
               "value": trade_summary,
               "inline": False
           })
+          
+          if runtime_summary:
+              fields.append({
+                  "name": "Execution Performance",
+                  "value": runtime_summary,
+                  "inline": False
+              })
           
           if error_stats:
               fields.append({
