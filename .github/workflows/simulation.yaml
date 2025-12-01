@@ -8,12 +8,6 @@ on:
 
 permissions:
   contents: read
-  pages: write      # to deploy to Pages
-  id-token: write   # for OIDC authentication
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -39,20 +33,50 @@ jobs:
         run: |
           python simulate_multi.py
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./site
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
+      - name: Send dashboard to Discord
+        run: |
+          python - << 'EOF'
+          import json
+          import requests
+          import os
+          
+          # Read the HTML file
+          with open('./site/index.html', 'r') as f:
+              html_content = f.read()
+          
+          # Prepare Discord message
+          webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          
+          payload = {
+              "content": "📊 Trading Simulation Dashboard Updated",
+              "embeds": [{
+                  "title": "Simulation Results",
+                  "description": "Dashboard has been generated and is ready for review.",
+                  "color": 3447003,
+                  "fields": [
+                      {
+                          "name": "Status",
+                          "value": "✅ Complete",
+                          "inline": True
+                      }
+                  ]
+              }],
+              "file": None
+          }
+          
+          # Send message
+          response = requests.post(webhook_url, json=payload)
+          if response.status_code == 204:
+              print("Discord notification sent successfully!")
+          else:
+              print(f"Failed to send Discord notification: {response.status_code}")
+          
+          # For file upload, use multipart form data
+          with open('./site/index.html', 'rb') as f:
+              files = {'file': ('dashboard.html', f)}
+              response = requests.post(webhook_url, files=files)
+              if response.status_code == 204:
+                  print("HTML file uploaded to Discord!")
+              else:
+                  print(f"Failed to upload file: {response.status_code}")
+          EOF
