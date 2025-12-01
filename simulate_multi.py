@@ -40,11 +40,12 @@ from datetime import datetime, timedelta
 
 # Calculate last month's dates for more historical context
 end_date = datetime.now()
-start_date = end_date - timedelta(days=30)
+start_date = end_date - timedelta(days=8)
 
 # Format as strings
 start = start_date.strftime("%Y-%m-%d")
 end = end_date.strftime("%Y-%m-%d")
+interval = "1m"
 
 def safe_copy(src: str, dst: str):
     """Copy file if it exists; create destination folder as needed."""
@@ -219,7 +220,7 @@ def main():
 
         # Load data
         if args.source == "yfinance":
-            df = load_yfinance(symbol, start=start, end=end, interval="1m")
+            df = load_yfinance(symbol, start=start, end=end, interval=interval)
         elif args.source == "csv":
             # For CSV source, 'symbol' should be a file path; multi-symbol via CSV only if you pass multiple file paths.
             df = load_csv(symbol)
