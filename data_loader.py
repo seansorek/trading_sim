@@ -20,7 +20,7 @@ def _filter_us_hours(df: pd.DataFrame) -> pd.DataFrame:
     idx_local = df.index.tz_convert(US_TZ) if df.index.tz is not None else df.index.tz_localize(US_TZ)
     df = df.copy()
     df.index = idx_local
-    df = df.between_time("09:30", "16:00", include_end=False)
+    df = df.between_time("09:30", "16:00", inclusive="left")
     return df
 
 def _add_spread(df: pd.DataFrame) -> pd.DataFrame:

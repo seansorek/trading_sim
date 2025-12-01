@@ -1,0 +1,131 @@
+{
+  "SPY": {
+    "symbol": "SPY",
+    "mean_reversion_metrics": {
+      "final_equity": 97451.64962694698,
+      "total_return_pct": -2.548350373053021,
+      "daily_sharpe": -38.0355572886319,
+      "daily_sortino": -38.0355572886319,
+      "max_drawdown_pct": -1.806776122870105,
+      "n_round_trades": 437,
+      "hit_rate": 0.06636155606407322,
+      "profit_factor": 0.04629927189466352
+    },
+    "walk_forward_metrics": {
+      "final_equity": 100000.0,
+      "total_return_pct": 0.0,
+      "daily_sharpe": 0.0,
+      "daily_sortino": NaN,
+      "max_drawdown_pct": 0.0,
+      "n_round_trades": 0,
+      "hit_rate": 0.0,
+      "profit_factor": Infinity
+    },
+    "monte_carlo_metrics_mean": {
+      "final_equity": 97243.74411466633,
+      "total_return_pct": -2.75625588533366,
+      "daily_sharpe": -38.22037173936464,
+      "daily_sortino": -38.22037173936464,
+      "max_drawdown_pct": -1.9569808378167832,
+      "n_round_trades": 437.0,
+      "hit_rate": 0.06270022883295194,
+      "profit_factor": 0.04553888915321949
+    },
+    "monte_carlo_metrics_std": {
+      "final_equity": 696.5083777919461,
+      "total_return_pct": 0.6965083777919452,
+      "daily_sharpe": 1.709606613800097,
+      "daily_sortino": 1.709606613800097,
+      "max_drawdown_pct": 0.5007355049787462,
+      "n_round_trades": 0.0,
+      "hit_rate": 0.009478092794513542,
+      "profit_factor": 0.014935429713351078
+    }
+  },
+  "AAPL": {
+    "symbol": "AAPL",
+    "mean_reversion_metrics": {
+      "final_equity": 97550.60023277873,
+      "total_return_pct": -2.449399767221272,
+      "daily_sharpe": -46.5651942805751,
+      "daily_sortino": -46.5651942805751,
+      "max_drawdown_pct": -1.8800873922223973,
+      "n_round_trades": 440,
+      "hit_rate": 0.1159090909090909,
+      "profit_factor": 0.13259727447417038
+    },
+    "walk_forward_metrics": {
+      "final_equity": 100000.0,
+      "total_return_pct": 0.0,
+      "daily_sharpe": 0.0,
+      "daily_sortino": NaN,
+      "max_drawdown_pct": 0.0,
+      "n_round_trades": 0,
+      "hit_rate": 0.0,
+      "profit_factor": Infinity
+    },
+    "monte_carlo_metrics_mean": {
+      "final_equity": 97671.71249181134,
+      "total_return_pct": -2.328287508188657,
+      "daily_sharpe": -46.13877180275141,
+      "daily_sortino": -46.13877180275141,
+      "max_drawdown_pct": -1.7907593104579256,
+      "n_round_trades": 440.0,
+      "hit_rate": 0.12863636363636363,
+      "profit_factor": 0.1472416980126652
+    },
+    "monte_carlo_metrics_std": {
+      "final_equity": 522.2090303772849,
+      "total_return_pct": 0.5222090303772849,
+      "daily_sharpe": 1.1501372972132755,
+      "daily_sortino": 1.1501372972132755,
+      "max_drawdown_pct": 0.38734477518250504,
+      "n_round_trades": 0.0,
+      "hit_rate": 0.02185707812347068,
+      "profit_factor": 0.03807370574018489
+    }
+  },
+  "QQQ": {
+    "symbol": "QQQ",
+    "mean_reversion_metrics": {
+      "final_equity": 97450.83529960964,
+      "total_return_pct": -2.5491647003903606,
+      "daily_sharpe": -38.091528357277674,
+      "daily_sortino": -38.091528357277674,
+      "max_drawdown_pct": -1.8281077140963533,
+      "n_round_trades": 424,
+      "hit_rate": 0.06839622641509434,
+      "profit_factor": 0.07187256263449181
+    },
+    "walk_forward_metrics": {
+      "final_equity": 100000.0,
+      "total_return_pct": 0.0,
+      "daily_sharpe": 0.0,
+      "daily_sortino": NaN,
+      "max_drawdown_pct": 0.0,
+      "n_round_trades": 0,
+      "hit_rate": 0.0,
+      "profit_factor": Infinity
+    },
+    "monte_carlo_metrics_mean": {
+      "final_equity": 97586.10639993897,
+      "total_return_pct": -2.4138936000610087,
+      "daily_sharpe": -37.16492903142499,
+      "daily_sortino": -37.16492903142499,
+      "max_drawdown_pct": -1.7347863230328033,
+      "n_round_trades": 424.0,
+      "hit_rate": 0.0775943396226415,
+      "profit_factor": 0.08055112696048364
+    },
+    "monte_carlo_metrics_std": {
+      "final_equity": 506.9273312707985,
+      "total_return_pct": 0.5069273312707976,
+      "daily_sharpe": 2.3988452343039883,
+      "daily_sortino": 2.3988452343039883,
+      "max_drawdown_pct": 0.35141410369523957,
+      "n_round_trades": 0.0,
+      "hit_rate": 0.01855245973217138,
+      "profit_factor": 0.02140622632228392
+    }
+  }
+}
