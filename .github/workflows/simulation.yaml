@@ -82,6 +82,12 @@ jobs:
           import os
           from datetime import datetime
           
+          # Helper function to truncate field values to Discord's 2048 character limit
+          def truncate_field(value, max_length=2040):
+              if isinstance(value, str) and len(value) > max_length:
+                  return value[:max_length-3] + "..."
+              return value
+          
           # Read error and warning counts
           error_count = 0
           warning_count = 0
@@ -227,7 +233,7 @@ jobs:
           fields = [
               {
                   "name": "Status",
-                  "value": status_text,
+                  "value": truncate_field(status_text),
                   "inline": True
               }
           ]
@@ -235,32 +241,34 @@ jobs:
           if has_recommendations:
               fields.append({
                   "name": "Recommendations Summary",
-                  "value": rec_summary,
+                  "value": truncate_field(rec_summary),
                   "inline": False
               })
+              # Limit detailed recommendations to first 20 strategies
+              limited_details = "\n".join(rec_details[:60]) if len(rec_details) > 60 else rec_details_str
               fields.append({
                   "name": "Detailed Recommendations",
-                  "value": f"```\n{rec_details_str}\n```",
+                  "value": truncate_field(f"```\n{limited_details}\n```"),
                   "inline": False
               })
           
           fields.append({
               "name": "Trade History Summary",
-              "value": trade_summary,
+              "value": truncate_field(trade_summary),
               "inline": False
           })
           
           if runtime_summary:
               fields.append({
                   "name": "Execution Performance",
-                  "value": runtime_summary,
+                  "value": truncate_field(runtime_summary),
                   "inline": False
               })
           
           if error_stats:
               fields.append({
                   "name": "Execution Statistics",
-                  "value": error_stats,
+                  "value": truncate_field(error_stats),
                   "inline": False
               })
           
@@ -280,7 +288,16 @@ jobs:
           if response.status_code == 204:
               print("Discord notification sent successfully!")
           else:
-              print(f"Failed to send Discord notification: {response.status_code}")
+              print(f"Failed to send Discord notification: HTTP {response.status_code}")
+              print(f"Response: {response.text[:500]}")
+              # Debug: print payload size
+              import sys
+              payload_size = sys.getsizeof(json.dumps(payload))
+              print(f"Payload size: {payload_size} bytes")
+              # Debug: check field sizes
+              for field in fields:
+                  field_size = sys.getsizeof(json.dumps(field))
+                  print(f"  Field '{field['name']}': {field_size} bytes (value length: {len(field['value'])})")
           
           # For file upload, use multipart form data (only if dashboard was generated)
           if os.path.exists('./site/index.html'):
@@ -290,7 +307,8 @@ jobs:
                   if response.status_code == 204:
                       print("HTML file uploaded to Discord!")
                   else:
-                      print(f"Failed to upload file: {response.status_code}")
+                      print(f"Failed to upload file: HTTP {response.status_code}")
+                      print(f"Response: {response.text[:500]}")
           else:
               print("Warning: Dashboard HTML not found, skipping file upload")
           EOF
