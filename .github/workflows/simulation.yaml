@@ -3,7 +3,7 @@ name: Build & Publish Simulation Dashboard
 
 on:
   schedule:
-    - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
+    - cron: "0 7 * * *"   # Every day at 07:00 UTC
   workflow_dispatch:       # Manual trigger
 
 permissions:
@@ -39,15 +39,15 @@ jobs:
           webhook_url = "${{ secrets.DISCORD_WEBHOOK_URL }}"
           
           payload = {
-              "content": "🚀 Trading Simulation Starting",
+              "content": "☀️ **Daily Trading Signal Report** - {}".format(datetime.now().strftime('%Y-%m-%d')),
               "embeds": [{
-                  "title": "Simulation Pipeline Initiated",
-                  "description": f"Simulation started at {datetime.now().isoformat()}",
+                  "title": "Morning Trading Analysis Running",
+                  "description": f"Analyzing market conditions and generating trading signals...",
                   "color": 3447003,
                   "fields": [
                       {
                           "name": "Status",
-                          "value": "⏳ Running...",
+                          "value": "⏳ Processing market data...",
                           "inline": True
                       }
                   ]
@@ -122,22 +122,45 @@ jobs:
           sell_count = 0
           failed_symbols = []
           
-          # Build detailed recommendations message
+          # Build trading actions message - group by action type
+          buy_actions = []
+          sell_actions = []
+          hold_actions = []
           rec_details = []
+          
           if has_recommendations:
               for symbol in sorted(recommendations.keys()):
+                  symbol_buys = []
+                  symbol_sells = []
+                  symbol_holds = []
+                  
+                  for strat in sorted(recommendations[symbol].keys()):
+                      rec = recommendations[symbol][strat]
+                      
+                      if rec == "BUY":
+                          buy_count += 1
+                          symbol_buys.append(strat)
+                      elif rec == "SELL":
+                          sell_count += 1
+                          symbol_sells.append(strat)
+                      elif rec == "HOLD":
+                          hold_count += 1
+                          symbol_holds.append(strat)
+                  
+                  # Add to action lists
+                  if symbol_buys:
+                      buy_actions.append(f"**{symbol}**: {', '.join(symbol_buys)}")
+                  if symbol_sells:
+                      sell_actions.append(f"**{symbol}**: {', '.join(symbol_sells)}")
+                  if symbol_holds:
+                      hold_actions.append(f"**{symbol}**: {', '.join(symbol_holds)}")
+                  
+                  # Still build detailed view
                   rec_details.append(f"**{symbol}**")
                   for strat in sorted(recommendations[symbol].keys()):
                       rec = recommendations[symbol][strat]
                       emoji = "🟢" if rec == "BUY" else "🟡" if rec == "HOLD" else "🔴" if rec == "SELL" else "⚪"
                       rec_details.append(f"  {emoji} {strat}: {rec}")
-                      
-                      if rec == "BUY":
-                          buy_count += 1
-                      elif rec == "HOLD":
-                          hold_count += 1
-                      elif rec == "SELL":
-                          sell_count += 1
           
           rec_details_str = "\n".join(rec_details) if rec_details else "No recommendations available"
           rec_summary = f"🟢 BUY: {buy_count} | 🟡 HOLD: {hold_count} | 🔴 SELL: {sell_count}"
@@ -240,14 +263,36 @@ jobs:
           
           if has_recommendations:
               fields.append({
-                  "name": "Recommendations Summary",
+                  "name": "📊 Summary",
                   "value": truncate_field(rec_summary),
                   "inline": False
               })
-              # Limit detailed recommendations to first 20 strategies
+              
+              # Show actionable trading signals
+              if buy_actions:
+                  buy_msg = "\n".join(buy_actions[:15])  # Limit to 15 stocks
+                  if len(buy_actions) > 15:
+                      buy_msg += f"\n... and {len(buy_actions)-15} more"
+                  fields.append({
+                      "name": "🟢 BUY Signals",
+                      "value": truncate_field(buy_msg),
+                      "inline": False
+                  })
+              
+              if sell_actions:
+                  sell_msg = "\n".join(sell_actions[:15])
+                  if len(sell_actions) > 15:
+                      sell_msg += f"\n... and {len(sell_actions)-15} more"
+                  fields.append({
+                      "name": "🔴 SELL Signals",
+                      "value": truncate_field(sell_msg),
+                      "inline": False
+                  })
+              
+              # Show detailed view (collapsed)
               limited_details = "\n".join(rec_details[:60]) if len(rec_details) > 60 else rec_details_str
               fields.append({
-                  "name": "Detailed Recommendations",
+                  "name": "📋 Detailed Analysis (All Strategies)",
                   "value": truncate_field(f"```\n{limited_details}\n```"),
                   "inline": False
               })
@@ -273,10 +318,10 @@ jobs:
               })
           
           payload = {
-              "content": "📊 Trading Simulation Dashboard Updated",
+              "content": "📈 **Today's Trading Actions** - {}".format(datetime.now().strftime('%A, %B %d, %Y')),
               "embeds": [{
-                  "title": "Simulation Results",
-                  "description": "Dashboard has been generated and is ready for review.",
+                  "title": "Daily Trading Signals & Recommendations",
+                  "description": "Based on multi-strategy backtesting and walk-forward validation.",
                   "color": status_color,
                   "fields": fields
               }],

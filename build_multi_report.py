@@ -61,19 +61,23 @@ for symbol, symdata in data.items():
     # Dropdown
     html += f"<label for='{symbol}-select'>Select Strategy:</label> "
     html += f"<select id='{symbol}-select' onchange='showStrategy(\"{symbol}\")'>"
-    strategies = symdata.get("strategies", [])
+    # Discover strategies by finding keys that are not 'meta' or 'strategies'
+    strategies = sorted([k for k in symdata.keys() if k not in ['strategies', 'meta', 'expert_opinion']])
+
     for strat in strategies:
         html += f"<option value='{strat}'>{strat}</option>"
     html += "</select>"
 
     # Strategy-specific sections
-    for strat in strategies:
+    for i, strat in enumerate(strategies):
         csv_path = os.path.join(RESULTS_DIR, f"{symbol}_{strat}_equity_curve.csv")
         strat_data = symdata.get(strat, {})
         metrics = strat_data.get("metrics", {})
         recommendation = strat_data.get("recommendation", "NO_DATA")
         
-        html += f"<div class='{symbol}-strategy' data-strategy='{strat}' style='display:none;'>"
+        # Show the first strategy by default, hide the rest.
+        display_style = 'block' if i == 0 else 'none'
+        html += f"<div class='{symbol}-strategy' data-strategy='{strat}' style='display:{display_style};'>"
         html += f"<h3>{strat.capitalize()} Strategy</h3>"
         
         # Recommendation badge
@@ -104,10 +108,13 @@ for symbol, symdata in data.items():
         html += "</div>"
     html += "</div>"
 
-html += "<script>document.querySelectorAll('select').forEach(sel => sel.dispatchEvent(new Event('change')));</script>"
+with open(os.path.join(SITE_DIR, "index.html"), "w", encoding="utf-8") as f:
+    f.write(html)
+
+print("Dashboard generated -> site/index.html")
 html += "</body></html>"
 
 with open(os.path.join(SITE_DIR, "index.html"), "w", encoding="utf-8") as f:
     f.write(html)
 
-print("Dashboard with strategy dropdown generated → site/index.html")
+print("Dashboard generated -> site/index.html")

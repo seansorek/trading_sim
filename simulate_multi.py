@@ -22,12 +22,12 @@ import os
 import json
 import argparse
 import shutil
+import sys
 import subprocess
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import time
+import pandas as pd
 
 # Import your pipeline components
 from simulation_pipeline import (
@@ -40,33 +40,17 @@ from simulation_pipeline import (
     build_strategy_signal,
     STRATEGY_REGISTRY,  # so we can use all available strategy names automatically
 )
-from data_loader import load_yfinance, load_csv
+from data_loader import load_yfinance, load_csv, load_alpha_vantage
 import yfinance as yf
 from trade_history import append_trade, save_stats
 from ascii_charts import equity_curve_to_ascii, simple_metric_chart
 from datetime import datetime, timedelta
 
-# Thread-safe lock for shared resources
-results_lock = Lock()
-
-# Calculate last month's dates for more historical context
-end_date = datetime.now()
-start_date = end_date - timedelta(days=14)
-
-# Format as strings
-start = start_date.strftime("%Y-%m-%d")
-end = end_date.strftime("%Y-%m-%d")
-interval = "5m"
-
-def safe_copy(src: str, dst: str):
-    """Copy file if it exists; create destination folder as needed."""
-    if not os.path.exists(src):
-        print(f"[warn] Source missing, skip: {src}")
-        return
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copy2(src, dst)
-    print(f"[ok] Copied {src} -> {dst}")
-
+def is_weekly_run():
+    """Check if this is the Monday 6am weekly run."""
+    now = datetime.now()
+    # Check if it's Monday (weekday 0) and between 6am-7am
+    return now.weekday() == 0 and 6 <= now.hour < 7
 
 def fetch_expert_opinion(symbol: str) -> dict:
     """
@@ -208,34 +192,31 @@ def run_symbol_strategy(symbol: str,
     if expert_opinion is None:
         expert_opinion = {}
     
-    print(f"→ [{symbol}] Strategy: {strategy_name} | Config: {cfg.__dict__}")
+    # Define unique artifact paths for this specific run
+    artifact_base = f"results/{symbol}_{strategy_name}"
+    artifacts = {
+        "equity_curve_csv": f"{artifact_base}_equity_curve.csv",
+        "trade_log_csv":    f"{artifact_base}_trade_log.csv",
+        "metrics_json":     f"{artifact_base}_metrics.json",
+    }
 
     # 1) Signal (from registry)
     signal = build_strategy_signal(strategy_name, cfg, feats, df)
 
-    # 2) Backtest (writes results/equity_curve.png, trade_log.csv, metrics.json)
+    # 2) Backtest (now writes directly to unique, symbol-specific files)
     bt = Backtester(exec_cfg)
-    res = bt.run(df, feats, signal)
+    res = bt.run(df, feats, signal, artifact_paths=artifacts)
 
-    # 3) Walk-forward (out-of-sample)
-    wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
-
-    # 4) Monte Carlo stress test for execution assumptions
-    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
-
-    # 5) Persist per-symbol, per-strategy artifacts (copy from the last backtest run)
-    base_csv   = "results/equity_curve.csv"
-    base_log   = "results/trade_log.csv"
-    base_mjson = "results/metrics.json"
-
-    safe_copy(base_csv,   f"results/{symbol}_{strategy_name}_equity_curve.csv")
-    safe_copy(base_log,   f"results/{symbol}_{strategy_name}_trade_log.csv")
-    safe_copy(base_mjson, f"results/{symbol}_{strategy_name}_metrics.json")
-
-    # 5b) Track historical trades
+    # 3) Track historical trades
     run_timestamp = datetime.now().isoformat()
     if not res.trades.empty:
         append_trade(symbol, strategy_name, res.trades, run_timestamp)
+
+    # 4) Walk-forward (out-of-sample)
+    wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
+
+    # 5) Monte Carlo stress test for execution assumptions
+    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
 
     # 6) Generate recommendation with expert opinion prior
     recommendation = generate_recommendation(res.metrics, wf.metrics, expert_opinion)
@@ -248,26 +229,22 @@ def run_symbol_strategy(symbol: str,
         "mc_std": mc.std().to_dict(),      # Monte Carlo std dev of metrics
         "config": cfg.__dict__,            # strategy config used
         "recommendation": recommendation,  # BUY / HOLD / SELL
-        "artifacts": {
-            "equity_curve_csv": f"{symbol}_{strategy_name}_equity_curve.csv",
-            "trade_log_csv":    f"{symbol}_{strategy_name}_trade_log.csv",
-            "metrics_json":     f"{symbol}_{strategy_name}_metrics.json",
-        },
+        "artifacts": {k: os.path.basename(v) for k, v in artifacts.items()},
+        "current_run_trades": len(res.trades),  # Number of trades in this run
     }
     return summary
 
 
 def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict, 
-                   exec_cfg: ExecutionConfig, start: str, end: str, interval: str,
-                   multi_summary: dict):
+                   exec_cfg: ExecutionConfig, start: str, end: str, interval: str, api_key: str = None):
     """
     Process a single symbol across all strategies.
     Runs in a separate thread.
     """
-    print(f"\n=== Running symbol: {symbol} ===")
+    logs = []
+    logs.append(f"\n=== Running symbol: {symbol} ===")
     
     symbol_results = {
-        "strategies": strategies,
         "meta": {
             "source": args.source,
             "interval": args.interval,
@@ -283,18 +260,18 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
             df = load_yfinance(symbol, start=start, end=end, interval=interval)
         elif args.source == "csv":
             df = load_csv(symbol)
+        elif args.source == "alphavantage":
+            df = load_alpha_vantage(symbol, api_key=api_key, interval=interval)
         else:
             raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
     except Exception as e:
-        print(f"[error] Failed to load data for {symbol}: {e}")
+        logs.append(f"[error] Failed to load data for {symbol}: {e}")
         symbol_results["meta"]["error"] = f"Failed to load data: {str(e)}"
-        with results_lock:
-            multi_summary[symbol] = symbol_results
-        return
+        return symbol, symbol_results, logs
     
     # Features once per symbol
     feats = make_features(df)
-    
+
     # Run each strategy and collect results
     for strat in strategies:
         cfg = StrategyConfig(
@@ -315,13 +292,20 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
                 cfg=cfg,
                 exec_cfg=exec_cfg,
                 n_mc_runs=args.mc_runs,
-                expert_opinion=expert_opinions[symbol],
+                expert_opinion=expert_opinions[symbol]
             )
             # Enhance with expert opinion
             strat_summary['expert_opinion'] = expert_opinions[symbol]
             symbol_results[strat] = strat_summary
+            
+            # Buffer PnL summary for this strategy
+            metrics = strat_summary.get('metrics', {})
+            pnl_pct = metrics.get('total_return_pct', 0.0)
+            pnl_dollar = (pnl_pct / 100.0) * 100000  # Assuming $100k starting capital
+            n_trades = metrics.get('n_round_trades', 0)
+            logs.append(f"  [{symbol}] {strat}: PnL = ${pnl_dollar:+,.2f} ({pnl_pct:+.2f}%) | Trades: {n_trades}")
         except Exception as e:
-            print(f"[error] Failed on {symbol} / {strat}: {e}")
+            logs.append(f"[error] Failed on {symbol} / {strat}: {e}")
             # Still record the failure so dashboard can show a notice
             symbol_results[strat] = {
                 "metrics": {},
@@ -334,9 +318,7 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
                 "error": str(e),
             }
     
-    # Thread-safe update of shared multi_summary
-    with results_lock:
-        multi_summary[symbol] = symbol_results
+    return symbol, symbol_results, logs
 
 
 def main():
@@ -349,29 +331,46 @@ def main():
                         help="Comma-separated list of symbols (e.g., 'SPY,AAPL,QQQ').")
     parser.add_argument("--strategies", default="all",
                         help="Comma-separated list of strategies to run per symbol, or 'all'.")
-    parser.add_argument("--source", default="yfinance", choices=["yfinance", "csv"],
-                        help="Data source: yfinance or csv.")
-    parser.add_argument("--interval", default="1m", help="Bar interval (e.g., 1m, 5m).")
+    parser.add_argument("--source", default="yfinance", choices=["yfinance", "csv", "alphavantage"],
+                        help="Data source: yfinance, csv, or alphavantage.")
+    parser.add_argument("--interval", default="5m", help="Bar interval (e.g., 1m, 5m).")
     parser.add_argument("--start", default=None, help="YYYY-MM-DD (optional)")
     parser.add_argument("--end", default=None, help="YYYY-MM-DD (optional)")
-    parser.add_argument("--threads", type=int, default=None, help="Number of threads for parallel processing (default: min(4, available_threads)).")
+    parser.add_argument("--av-key", default=None, help="Alpha Vantage API key. Can also be set via AV_API_KEY environment variable.")
+    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes for parallel processing (default: number of CPUs).")
 
     # Shared strategy hyperparameters (applied to all strategies where relevant)
     parser.add_argument("--lookback", type=int, default=20, help="Generic lookback for MR/breakout.")
-    parser.add_argument("--threshold", type=float, default=0.8, help="Z-score threshold for MR.")
-    parser.add_argument("--rsi-lower", type=int, default=30, help="RSI lower band.")
-    parser.add_argument("--rsi-upper", type=int, default=70, help="RSI upper band.")
-    parser.add_argument("--holding-period", type=int, default=5, help="Minimum bars to hold between position changes (reduces trading frequency).")
+    parser.add_argument("--threshold", type=float, default=1.2, help="Z-score threshold for MR (higher = fewer trades).")
+    parser.add_argument("--rsi-lower", type=int, default=20, help="RSI lower band (lower = fewer buys).")
+    parser.add_argument("--rsi-upper", type=int, default=80, help="RSI upper band (higher = fewer sells).")
+    parser.add_argument("--holding-period", type=int, default=78, help="Minimum bars to hold between position changes (78 bars = 1 trading day for 5m intervals).")
     parser.add_argument("--mc-runs", type=int, default=10, help="Monte Carlo stress test runs.")
 
     args = parser.parse_args()
 
-    # Determine number of threads (default: min(4, available CPUs))
-    if args.threads is None:
-        available_threads = multiprocessing.cpu_count()
-        args.threads = min(4, available_threads)
+    # --- Date Handling ---
+    # Set default date range to the last 14 days
+    if args.end is None:
+        end_date = datetime.now()
+        args.end = end_date.strftime("%Y-%m-%d")
     
-    print(f"[info] Using {args.threads} threads for parallel processing")
+    if args.start is None:
+        start_date = datetime.strptime(args.end, "%Y-%m-%d") - timedelta(days=14)
+        args.start = start_date.strftime("%Y-%m-%d")
+
+    # Determine number of workers (default: min(available CPUs, 8) for stability)
+    if args.workers is None:
+        args.workers = min(multiprocessing.cpu_count(), 8)
+    
+    print(f"[info] Using {args.workers} worker processes for parallel processing")
+
+    # Handle Alpha Vantage API key
+    api_key = args.av_key or os.environ.get("AV_API_KEY")
+    if args.source == "alphavantage" and not api_key:
+        raise ValueError(
+            "Alpha Vantage source requires an API key. "
+            "Provide it with --av-key or set the AV_API_KEY environment variable.")
 
     # Parse lists
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
@@ -390,11 +389,11 @@ def main():
 
     # Common execution config for all runs (tweak as needed)
     exec_cfg = ExecutionConfig(
-        commission_per_share=0.0005,
-        slippage_bps=2.0,
+        commission_per_share=0.00005,  # Reduced from 0.0001 for better profitability
+        slippage_bps=1.0,              # Reduced from 2.0 - use limit orders
         max_position=2000,
-        stop_loss_pct=0.03,
-        daily_loss_limit_pct=0.02,
+        stop_loss_pct=0.05,            # Widened from 0.03 to avoid premature exits
+        daily_loss_limit_pct=0.05,     # Increased from 0.02
     )
 
     # Fetch expert opinions for all symbols upfront (sequentially)
@@ -404,9 +403,9 @@ def main():
         expert_opinions[symbol] = fetch_expert_opinion(symbol)
         print(f"  {symbol}: {expert_opinions[symbol]['consensus']} (score: {expert_opinions[symbol]['score']:.2f})")
 
-    # Process symbols in parallel using ThreadPoolExecutor
-    print(f"\n[info] Processing {len(symbols)} symbols using {args.threads} threads...")
-    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+    # Process symbols in parallel using ProcessPoolExecutor
+    print(f"\n[info] Processing {len(symbols)} symbols using {args.workers} processes...")
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {}
         for symbol in symbols:
             future = executor.submit(
@@ -416,143 +415,39 @@ def main():
                 args=args,
                 expert_opinions=expert_opinions,
                 exec_cfg=exec_cfg,
-                start=start,
-                end=end,
-                interval=interval,
-                multi_summary=multi_summary
+                start=args.start,
+                end=args.end,
+                interval=args.interval,
+                api_key=api_key,
             )
             futures[future] = symbol
-        
-        # Wait for all threads to complete
+
+        # Collect results without printing, then print in input order
         completed = 0
+        results_by_symbol = {}
+        logs_by_symbol = {}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
-                future.result()
+                s, res, logs = future.result()
+                results_by_symbol[s] = res
+                logs_by_symbol[s] = logs
                 completed += 1
-                print(f"[ok] Completed {symbol} ({completed}/{len(symbols)})")
             except Exception as e:
-                print(f"[error] Thread failed for {symbol}: {e}")
+                logs_by_symbol[symbol] = [f"[error] Process failed for {symbol}: {e}"]
 
-    args = parser.parse_args()
-
-    # Parse lists
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    if args.strategies.lower() == "all":
-        strategies = sorted(STRATEGY_REGISTRY.keys())
-    else:
-        strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
-
-    if not symbols or not strategies:
-        raise ValueError("Provide at least one symbol and one strategy (or 'all').")
-
-    os.makedirs("results", exist_ok=True)
-
-    # Combined summary for dropdown dashboard
-    multi_summary = {}
-
-    # Common execution config for all runs (tweak as needed)
-    exec_cfg = ExecutionConfig(
-        commission_per_share=0.0005,
-        slippage_bps=2.0,
-        max_position=2000,
-        stop_loss_pct=0.03,
-        daily_loss_limit_pct=0.02,
-    )
-
-    # Fetch expert opinions for all symbols upfront
-    expert_opinions = {}
-    print("\n[info] Fetching expert opinions from Yahoo Finance...")
-    for symbol in symbols:
-        expert_opinions[symbol] = fetch_expert_opinion(symbol)
-        print(f"  {symbol}: {expert_opinions[symbol]['consensus']} (score: {expert_opinions[symbol]['score']:.2f})")
-
-    for symbol in symbols:
-        print(f"\n=== Running symbol: {symbol} ===")
-
-        # Load data
-        try:
-            if args.source == "yfinance":
-                df = load_yfinance(symbol, start=start, end=end, interval=interval)
-            elif args.source == "csv":
-                # For CSV source, 'symbol' should be a file path; multi-symbol via CSV only if you pass multiple file paths.
-                df = load_csv(symbol)
-            else:
-                raise ValueError("Unsupported source. Use 'yfinance' or 'csv'.")
-        except Exception as e:
-            print(f"[error] Failed to load data for {symbol}: {e}")
-            print(f"[warn] Skipping {symbol}")
-            # Record as failed in multi_summary
-            multi_summary[symbol] = {
-                "strategies": strategies,
-                "meta": {
-                    "source": args.source,
-                    "interval": args.interval,
-                    "start": args.start,
-                    "end": args.end,
-                    "error": f"Failed to load data: {str(e)}"
-                },
-                "expert_opinion": fetch_expert_opinion(symbol),
-            }
-            continue
-
-        # Features once per symbol
-        feats = make_features(df)
-
-        # Prepare symbol entry for multi_summary
-        multi_summary[symbol] = {
-            "strategies": strategies,  # the dashboard dropdown reads this list
-            "meta": {
-                "source": args.source,
-                "interval": args.interval,
-                "start": args.start,
-                "end": args.end,
-            },
-            "expert_opinion": expert_opinions[symbol],
-        }
-
-        # Run each strategy and collect results
-        for strat in strategies:
-            cfg = StrategyConfig(
-                name=strat,
-                lookback=args.lookback,
-                threshold=args.threshold,
-                rsi_lower=args.rsi_lower,
-                rsi_upper=args.rsi_upper,
-            )
-
-            try:
-                strat_summary = run_symbol_strategy(
-                    symbol=symbol,
-                    strategy_name=strat,
-                    df=df,
-                    feats=feats,
-                    cfg=cfg,
-                    exec_cfg=exec_cfg,
-                    n_mc_runs=args.mc_runs,
-                    expert_opinion=expert_opinions[symbol],
-                )
-                # Enhance with expert opinion
-                strat_summary['expert_opinion'] = expert_opinions[symbol]
-                multi_summary[symbol][strat] = strat_summary
-            except Exception as e:
-                print(f"[error] Failed on {symbol} / {strat}: {e}")
-                # Still record the failure so dashboard can show a notice
-                multi_summary[symbol][strat] = {
-                    "metrics": {},
-                    "wf_metrics": {},
-                    "mc_mean": {},
-                    "mc_std": {},
-                    "config": cfg.__dict__,
-                    "artifacts": {},
-                    "expert_opinion": expert_opinions[symbol],
-                    "error": str(e),
-                }
+        # Now assign multi_summary and print logs deterministically
+        for idx, symbol in enumerate(symbols, start=1):
+            if symbol in results_by_symbol:
+                multi_summary[symbol] = results_by_symbol[symbol]
+            if symbol in logs_by_symbol:
+                for line in logs_by_symbol[symbol]:
+                    print(line)
+                print(f"[ok] Completed {symbol} ({idx}/{len(symbols)})")
 
     # Write combined multi-summary used by the dropdown dashboard
     with open("results/multi_summary.json", "w") as f:
         json.dump(multi_summary, f, indent=2)
-    print("\n[ok] Wrote results/multi_summary.json")
 
     # Build a sorted recommendations summary for Discord
     recommendations_sorted = {}
@@ -566,19 +461,87 @@ def main():
     # Write recommendations summary
     with open("results/recommendations_summary.json", "w") as f:
         json.dump(recommendations_sorted, f, indent=2)
-    print("[ok] Wrote results/recommendations_summary.json")
+
+    # Print PnL summary table (averages only)
+    print("\n" + "="*100)
+    print("STRATEGY PERFORMANCE SUMMARY")
+    print("="*100)
+    print(f"{'Strategy':<20} {'Avg PnL ($)':<15} {'Avg PnL (%)':<12} {'Total PnL ($)':<15} {'Total Trades':<15} {'Symbols':<10}")
+    print("-"*100)
+    
+    strategy_totals = {strat: {'pnl_dollar': 0, 'pnl_pct': 0, 'trades': 0, 'count': 0} for strat in strategies}
+    
+    for strat in strategies:
+        for symbol in sorted(multi_summary.keys()):
+            strat_data = multi_summary[symbol].get(strat, {})
+            metrics = strat_data.get('metrics', {})
+            pnl_pct = metrics.get('total_return_pct', 0.0)
+            pnl_dollar = (pnl_pct / 100.0) * 100000  # Assuming $100k starting capital
+            n_trades = metrics.get('n_round_trades', 0)
+            
+            if 'error' not in strat_data:
+                strategy_totals[strat]['pnl_dollar'] += pnl_dollar
+                strategy_totals[strat]['pnl_pct'] += pnl_pct
+                strategy_totals[strat]['trades'] += n_trades
+                strategy_totals[strat]['count'] += 1
+
+    for strat in strategies:
+        totals = strategy_totals[strat]
+        if totals['count'] > 0:
+            avg_pnl_dollar = totals['pnl_dollar'] / totals['count']
+            avg_pnl_pct = totals['pnl_pct'] / totals['count']
+            total_trades = totals['trades']
+            symbol_count = totals['count']
+            total_pnl_dollar = totals['pnl_dollar']
+            print(f"{strat:<20} ${avg_pnl_dollar:>+12,.2f} {avg_pnl_pct:>+10.2f}% ${total_pnl_dollar:>+12,.2f} {total_trades:>13} {symbol_count:>9}")
+    print("="*100 + "\n")
 
     # Update historical trade statistics
-    print("[info] Updating historical trade statistics...")
     trade_stats = save_stats()
-    print(f"[ok] Trade history updated: {trade_stats.get('total_trades', 0)} total trades")
-    print(f"     Overall win rate: {trade_stats.get('overall', {}).get('win_rate', 'N/A')}")
-    print(f"     Overall P&L: ${trade_stats.get('overall', {}).get('total_pnl', 0):.2f}")
+    
+    # Calculate current run statistics
+    current_run_trades = sum(
+        multi_summary.get(symbol, {}).get(strat, {}).get('current_run_trades', 0)
+        for symbol in multi_summary.keys()
+        for strat in strategies
+    )
+    
+    # Calculate current run PnL from the multi_summary
+    current_run_pnl = sum(
+        multi_summary.get(symbol, {}).get(strat, {}).get('metrics', {}).get('total_return_pct', 0) / 100.0 * 100000
+        for symbol in multi_summary.keys()
+        for strat in strategies
+        if 'error' not in multi_summary.get(symbol, {}).get(strat, {})
+    )
+    
+    # Show current run stats or full history based on whether it's the weekly run
+    weekly_run = is_weekly_run()
+    if weekly_run:
+        print(f"[ok] Weekly Run - Full Trade History:")
+        print(f"     Total historical trades: {trade_stats.get('total_trades', 0)}")
+        print(f"     Overall win rate: {trade_stats.get('overall', {}).get('win_rate', 'N/A')}")
+        print(f"     Overall P&L: ${trade_stats.get('overall', {}).get('total_pnl', 0):.2f}")
+        print(f"     Current run trades: {current_run_trades}")
+        print(f"     Current run P&L: ${current_run_pnl:+,.2f}")
+    else:
+        print(f"[ok] Current Run Statistics:")
+        print(f"     Trades in this run: {current_run_trades}")
+        print(f"     P&L for this run: ${current_run_pnl:+,.2f}")
+        print(f"     (Run on Monday 6-7am for full historical stats)")
 
     # Build the dashboard (site/index.html)
-    print("[info] Building multi-symbol strategy dashboard...")
-    subprocess.check_call(["python", "build_multi_report.py"])
-    print("[ok] Dashboard generated → site/index.html")
+    try:
+        subprocess.run(
+            [sys.executable, "build_multi_report.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[warn] Dashboard build failed: {e.stderr}")
+    except Exception as e:
+        print(f"[warn] Dashboard build error: {e}")
     
     # Calculate and save runtime statistics
     end_time = time.time()
@@ -593,7 +556,7 @@ def main():
         "symbols_processed": len(symbols),
         "strategies_per_symbol": len(strategies),
         "total_runs": len(symbols) * len(strategies),
-        "threads_used": args.threads,
+        "workers_used": args.workers,
         "data_source": args.source,
         "interval": args.interval,
     }
@@ -601,13 +564,7 @@ def main():
     with open("results/runtime_stats.json", "w") as f:
         json.dump(runtime_stats, f, indent=2)
     
-    print(f"\n[ok] Runtime Statistics:")
-    print(f"     Total Time: {elapsed_minutes:.2f} minutes ({elapsed_seconds:.0f} seconds)")
-    print(f"     Symbols Processed: {runtime_stats['symbols_processed']}")
-    print(f"     Strategies per Symbol: {runtime_stats['strategies_per_symbol']}")
-    print(f"     Total Backtests Run: {runtime_stats['total_runs']}")
-    print(f"     Threads Used: {runtime_stats['threads_used']}")
-
+    print(f"\n[Completed in {elapsed_minutes:.2f} min | {runtime_stats['total_runs']} backtests]")
 
 if __name__ == "__main__":
     main()

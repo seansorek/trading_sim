@@ -34,12 +34,13 @@ def _standardize(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_index().loc[~df.index.duplicated(keep="last")]
     df = _ensure_cols(df)
     df = _filter_us_hours(df)
+    df = df.ffill().bfill()  # Fill any gaps
     df = _add_spread(df)
     df.index.name = "timestamp"
     return df
 
 # --- Loaders: YFinance and CSV ---
-def load_yfinance(symbol: str, start: str, end: str, interval: str = "1m") -> pd.DataFrame:
+def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd.DataFrame:
     """
     Fetch intraday bars from Yahoo Finance via yfinance.
     NOTE: 1m data is often limited to ~7 days for free access and may be delayed or incomplete.
@@ -49,10 +50,37 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "1m") -> pd
     
     ticker = yf.Ticker(symbol)
     df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+    
+    # yfinance has a 7-day limit for 1m data. We'll fetch in chunks if needed.
+    if interval == "1m" and (end_dt - start_dt).days > 7:
+        print(f"[info] Fetching 1m data for {symbol} in 7-day chunks due to yfinance API limits...")
+        all_dfs = []
+        current_start = start_dt
+        while current_start < end_dt:
+            chunk_end = min(current_start + timedelta(days=7), end_dt)
+            try:
+                ticker = yf.Ticker(symbol)
+                chunk_df = ticker.history(start=current_start, end=chunk_end, interval=interval, actions=False, prepost=False)
+                if not chunk_df.empty:
+                    all_dfs.append(chunk_df)
+            except Exception as e:
+                print(f"[warn] Failed to fetch chunk for {symbol} from {current_start.date()} to {chunk_end.date()}: {e}")
+            current_start += timedelta(days=7)
+        
+        if not all_dfs:
+            df = pd.DataFrame()
+        else:
+            df = pd.concat(all_dfs)
+    else:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
     
     # Check if empty
     if df.empty:
         raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}). Symbol may be invalid or data unavailable.")
+        raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}). Symbol may be invalid, data unavailable, or API limit exceeded.")
     
     # Check if we have sufficient data (at least 10 candles)
     if len(df) < 10:
@@ -85,7 +113,7 @@ def load_csv(path: str) -> pd.DataFrame:
     return _standardize(df)
 
 # --- Optional: Alpha Vantage (intraday 1min/5min/15min); requires API key ---
-def load_alpha_vantage(symbol: str, api_key: str, interval: str = "1min", outputsize: str = "full") -> pd.DataFrame:
+def load_alpha_vantage(symbol: str, api_key: str, interval: str = "5min", outputsize: str = "full") -> pd.DataFrame:
     """
     Fetch intraday bars using Alpha Vantage TIME_SERIES_INTRADAY.
     NOTE: Free tier has strict rate limits and may have limited historical coverage.

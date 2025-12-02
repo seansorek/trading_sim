@@ -64,9 +64,12 @@ def calculate_trade_stats() -> dict:
     # Read all trades
     trades = []
     with open(HISTORY_FILE, 'r') as f:
-        for line in f:
+        for i, line in enumerate(f, 1):
             if line.strip():
-                trades.append(json.loads(line))
+                try:
+                    trades.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[warn] Skipping malformed JSON on line {i} in {HISTORY_FILE}")
     
     if not trades:
         return {"total_trades": 0, "message": "No trades in history"}
@@ -135,7 +138,7 @@ def calculate_trade_stats() -> dict:
     
     # Overall stats
     if not pnl_df.empty:
-        pnls = pnl_df['pnl']
+        pnls = pnl_df['pnl'].dropna()
         stats['overall'] = {
             "total_pnl": float(pnls.sum()),
             "avg_pnl": float(pnls.mean()),
@@ -206,9 +209,12 @@ def export_trades_csv():
     
     trades = []
     with open(HISTORY_FILE, 'r') as f:
-        for line in f:
+        for i, line in enumerate(f, 1):
             if line.strip():
-                trades.append(json.loads(line))
+                try:
+                    trades.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[warn] Skipping malformed JSON on line {i} in {HISTORY_FILE}")
     
     if not trades:
         return None
@@ -228,9 +234,12 @@ def get_recent_trades(limit: int = 50) -> list:
     
     trades = []
     with open(HISTORY_FILE, 'r') as f:
-        for line in f:
+        for i, line in enumerate(f, 1):
             if line.strip():
-                trades.append(json.loads(line))
+                try:
+                    trades.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"[warn] Skipping malformed JSON on line {i} in {HISTORY_FILE}")
     
     return trades[-limit:] if trades else []
 

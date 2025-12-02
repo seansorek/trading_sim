@@ -7,12 +7,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Dict
+from base_strategy import BaseStrategy, StrategyConfig
 
 # Try to import ML strategies (optional)
 try:
     from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy
     HAS_ML_STRATEGIES = True
-except ImportError:
+except ImportError as e:
+    print(f"[warning] ML strategies not loaded. Please verify scikit-learn and xgboost are installed. Error: {e}")
     HAS_ML_STRATEGIES = False
 
 np.random.seed(42)
@@ -99,77 +101,57 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     feats['vol_z']     = ((df['volume'] - df['volume'].rolling(60).mean())
                           / (df['volume'].rolling(60).std() + 1e-12))
     feats['hour']      = feats.index.hour + feats.index.minute / 60.0
+    
+    # Enhanced features for better predictions
+    feats['momentum_5'] = price.pct_change(5).fillna(0)   # 5-bar momentum
+    feats['momentum_20'] = price.pct_change(20).fillna(0)  # Longer trend
+    feats['vp_ratio'] = feats['ret_1m'] / (feats['vol_z'].abs() + 1e-6)  # Volume-price divergence
+    feats['vol_regime'] = (feats['vol_60'] > feats['vol_60'].rolling(100).mean()).astype(int)  # Volatility regime
+    
+    # Price relative to daily range
+    range_high = df['high'].rolling(60).max()
+    range_low = df['low'].rolling(60).min()
+    feats['price_position'] = (price - range_low) / (range_high - range_low + 1e-6)
+    
     feats = feats.bfill().ffill()
     return feats
 
-
-@dataclass
-class StrategyConfig:
-    name: str
-    # Common params used by various strategies
-    lookback: int = 20
-    threshold: float = 0.8
-    rsi_lower: int = 30
-    rsi_upper: int = 70
-    holding_period: int = 5  # Minimum bars between position changes
-
-class BaseStrategy:
-    """Unified interface: implement signal(feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series."""
-    def __init__(self, cfg: StrategyConfig):
-        self.cfg = cfg
-
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        raise NotImplementedError
 
 class MeanReversionStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         ret = feats['ret_1m']
         mu = ret.rolling(self.cfg.lookback).mean()
         sd = ret.rolling(self.cfg.lookback).std().replace(0, np.nan)
-        z = (ret - mu) / (sd + 1e-12)
-        # Increase threshold to 1.2 for stronger conviction
+        # Calculate Z-score, filling NaNs from std=0 with 0 to avoid warnings
+        z = ((ret - mu) / sd).fillna(0)
         sig = pd.Series(
-            np.where(z < -1.2, 1,
-                     np.where(z >  1.2, -1, 0)),
+            np.where(z < -self.cfg.threshold, 1,
+                     np.where(z >  self.cfg.threshold, -1, 0)),
             index=feats.index
         )
+        
+        # Don't trade mean reversion in strong trends - it fails there
+        ma_trend = feats['ma_spread'] / (feats['ma_slow'] + 1e-6)
+        in_strong_trend = np.abs(ma_trend) > 0.02
+        sig[in_strong_trend] = 0
+        
         # Apply holding period to reduce trading frequency
         sig = self._apply_holding_period(sig)
         return sig
-    
-    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
-        """Prevent position changes for holding_period bars after each trade."""
-        result = sig.copy()
-        last_trade_idx = -self.cfg.holding_period
-        for i in range(len(result)):
-            if i - last_trade_idx < self.cfg.holding_period:
-                result.iloc[i] = 0  # Suppress signal during holding period
-            elif result.iloc[i] != 0:
-                last_trade_idx = i
-        return result
 
 class MomentumStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         ma_spread = feats['ma_spread']
+        # Add volume confirmation - momentum with volume is stronger
+        vol_confirmed = feats['vol_z'] > 0.5  # Above-average volume
         sig = pd.Series(
-            np.where(ma_spread > 0, 1,
-                     np.where(ma_spread < 0, -1, 0)),
+            np.where((ma_spread > 0) & vol_confirmed, 1,
+                     np.where((ma_spread < 0) & vol_confirmed, -1, 0)),
             index=feats.index
         )
         # Apply holding period to reduce trading frequency
         sig = self._apply_holding_period(sig)
         return sig
-    
-    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
-        """Prevent position changes for holding_period bars after each trade."""
-        result = sig.copy()
-        last_trade_idx = -self.cfg.holding_period
-        for i in range(len(result)):
-            if i - last_trade_idx < self.cfg.holding_period:
-                result.iloc[i] = 0  # Suppress signal during holding period
-            elif result.iloc[i] != 0:
-                last_trade_idx = i
-        return result
 
 class BreakoutStrategy(BaseStrategy):
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
@@ -181,17 +163,6 @@ class BreakoutStrategy(BaseStrategy):
         result = pd.Series(sig, index=price.index).fillna(0)
         # Apply holding period to reduce trading frequency
         result = self._apply_holding_period(result)
-        return result
-    
-    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
-        """Prevent position changes for holding_period bars after each trade."""
-        result = sig.copy()
-        last_trade_idx = -self.cfg.holding_period
-        for i in range(len(result)):
-            if i - last_trade_idx < self.cfg.holding_period:
-                result.iloc[i] = 0  # Suppress signal during holding period
-            elif result.iloc[i] != 0:
-                last_trade_idx = i
         return result
 
 class RSIStrategy(BaseStrategy):
@@ -205,17 +176,6 @@ class RSIStrategy(BaseStrategy):
         # Apply holding period to reduce trading frequency
         sig = self._apply_holding_period(sig)
         return sig
-    
-    def _apply_holding_period(self, sig: pd.Series) -> pd.Series:
-        """Prevent position changes for holding_period bars after each trade."""
-        result = sig.copy()
-        last_trade_idx = -self.cfg.holding_period
-        for i in range(len(result)):
-            if i - last_trade_idx < self.cfg.holding_period:
-                result.iloc[i] = 0  # Suppress signal during holding period
-            elif result.iloc[i] != 0:
-                last_trade_idx = i
-        return result
 
 # ===== Strategy Registry & Builder =====
 
@@ -234,7 +194,8 @@ if HAS_ML_STRATEGIES:
 def build_strategy_signal(strategy_name: str,
                           cfg: StrategyConfig,
                           feats: pd.DataFrame,
-                          df: pd.DataFrame) -> pd.Series:
+                          df: pd.DataFrame,
+                          **kwargs) -> pd.Series:
     name = strategy_name.lower()
     if name not in STRATEGY_REGISTRY:
         raise ValueError(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGY_REGISTRY.keys())}")
@@ -265,7 +226,15 @@ class Backtester:
         self.exec_cfg = exec_cfg
         self.start_cash = start_cash
 
-    def run(self, df: pd.DataFrame, feats: pd.DataFrame, signal: pd.Series) -> BacktestResult:
+    def run(self, df: pd.DataFrame, feats: pd.DataFrame, signal: pd.Series, artifact_paths: dict = None) -> BacktestResult:
+        # Define default paths if none are provided (for backward compatibility or single runs)
+        if artifact_paths is None:
+            artifact_paths = {
+                "equity_curve_csv": "results/equity_curve.csv",
+                "trade_log_csv": "results/trade_log.csv",
+                "metrics_json": "results/metrics.json",
+            }
+
         df = df.loc[signal.index]
         feats = feats.loc[signal.index]
         cash = self.start_cash
@@ -321,6 +290,29 @@ class Backtester:
                 else:
                     avg_entry_price = None
 
+            # Take-profit: Exit at 10% profit target
+            if position != 0 and avg_entry_price is not None:
+                pnl_from_entry = (mid - avg_entry_price) * np.sign(position)
+                take_profit_threshold = 0.10 * avg_entry_price  # 10% profit target
+                
+                if pnl_from_entry > take_profit_threshold:
+                    # Exit at profit
+                    side = -np.sign(position)
+                    fill_price = mid + side * (spr/2 + slippage)
+                    cost_commission = self.exec_cfg.commission_per_share * abs(position)
+                    cost_spread = (spr/2) * abs(position)
+                    cash -= fill_price * (-position) + cost_commission
+                    trade_log.append({
+                        'timestamp': ts,
+                        'side': 'SELL' if side<0 else 'BUY',
+                        'shares': abs(position),
+                        'fill_price': float(fill_price),
+                        'commission': float(cost_commission),
+                        'spread_cost': float(cost_spread)
+                    })
+                    position = 0
+                    avg_entry_price = None
+            
             # Stop-loss
             if position != 0 and avg_entry_price is not None:
                 pnl_from_entry = (mid - avg_entry_price) * np.sign(position)
@@ -372,11 +364,11 @@ class Backtester:
             trades_df.sort_index(inplace=True)
 
         metrics = compute_metrics(equity_series, trades_df)
-        # Save outputs
-        trades_df.to_csv('results/trade_log.csv') if not trades_df.empty else None
-        equity_series.to_csv('results/equity_curve.csv')
-        # Skip PNG generation - use ASCII charts in Discord instead
-        with open('results/metrics.json', 'w') as f:
+        # Save outputs to the specified artifact paths
+        if not trades_df.empty:
+            trades_df.to_csv(artifact_paths["trade_log_csv"])
+        equity_series.to_csv(artifact_paths["equity_curve_csv"])
+        with open(artifact_paths["metrics_json"], 'w') as f:
             json.dump(metrics, f, indent=2)
         return BacktestResult(equity_series, trades_df, metrics)
 
@@ -445,7 +437,8 @@ def walk_forward_backtest(df: pd.DataFrame, feats: pd.DataFrame,
         X_test = feats.loc[test_idx, ['ret_1m', 'ma_spread', 'vol_10', 'rsi_14', 'vol_z']].values
         X_t = np.c_[np.ones(len(X_test)), X_test]
         y_hat = X_t @ beta
-        sig = np.where(y_hat > 0.05, 1, np.where(y_hat < -0.05, -1, 0))
+        # Stricter threshold to reduce trades
+        sig = np.where(y_hat > 0.10, 1, np.where(y_hat < -0.10, -1, 0))
         signals.append(pd.Series(sig, index=feats.loc[test_idx].index))
     signal_full = pd.concat(signals).sort_index() if signals else pd.Series(0, index=feats.index)
 
@@ -467,31 +460,9 @@ def monte_carlo_stress(df: pd.DataFrame, feats: pd.DataFrame, signal: pd.Series,
         res = bt.run(df, feats, signal)
         stats.append(res.metrics)
     df_stats = pd.DataFrame(stats)
+    # Clean up non-finite values (inf, -inf) before calculating stats to avoid warnings
+    df_stats.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df_stats.dropna(inplace=True)
+    
     df_stats.to_csv('results/monte_carlo_stats.csv', index=False)
     return df_stats
-
-# 8) Main
-if __name__ == '__main__':
-    df = generate_synthetic_intraday(start_price=100.0, days=10)
-    feats = make_features(df)
-
-    mr_cfg = StrategyConfig(name='mean_reversion', lookback=20, threshold=1.5)
-    mr = MeanReversionStrategy(mr_cfg)
-    signal_mr = mr.signal(feats)
-
-    bt = Backtester(ExecutionConfig())
-    result = bt.run(df, feats, signal_mr)
-    wf_result = walk_forward_backtest(df, feats, train_days=5, test_days=1)
-
-    mc_stats = monte_carlo_stress(df, feats, signal_mr, n_runs=20)
-
-    summary = {
-        'mean_reversion_metrics': result.metrics,
-        'walk_forward_metrics': wf_result.metrics,
-        'monte_carlo_metrics_mean': mc_stats.mean().to_dict(),
-        'monte_carlo_metrics_std': mc_stats.std().to_dict()
-    }
-    with open('results/summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    print('Done. See outputs in /results and synthetic data in /data')
