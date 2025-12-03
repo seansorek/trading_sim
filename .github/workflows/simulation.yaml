@@ -30,8 +30,7 @@ jobs:
       - name: Generate next-day predictions
         run: |
           python predict_next_day_lite.py \
-            --symbols AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO \
-            --webhook
+            --symbols AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 

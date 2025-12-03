@@ -405,15 +405,19 @@ def main():
     
     print("="*50 + "\n")
     
-    # Send Discord (check both possible env var names)
+    # Send Discord (ALWAYS try if webhook URL exists, regardless of flag)
     webhook = os.environ.get('DISCORD_WEBHOOK_URL') or os.environ.get('WEBHOOK_URL')
     if webhook:
+        print('[info] Sending to Discord...')
         if send_discord(predictions, webhook):
-            print('[ok] Sent to Discord')
+            print('[ok] Successfully sent predictions to Discord!')
         else:
-            print('[warn] Discord send failed (webhook misconfigured?)')
-    elif args.webhook:
-        print('[warn] Discord flag set but no webhook URL in environment')
+            print('[error] Failed to send to Discord')
+    else:
+        if args.webhook:
+            print('[error] Discord flag set but DISCORD_WEBHOOK_URL environment variable not found')
+        else:
+            print('[info] Discord URL not configured (skipping Discord send)')
     
     # Save results
     with open('tomorrow_trades.json', 'w') as f:
