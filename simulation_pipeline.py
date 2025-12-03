@@ -14,7 +14,7 @@ from data_loader import load_yfinance
 
 # Try to import ML strategies (optional)
 try:
-    from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy, DailyLogisticStrategy, DailyXGBoostStrategy, DailyRNNStrategy
+    from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy, DailyLogisticStrategy, DailyXGBoostStrategy
     HAS_ML_STRATEGIES = True
 except ImportError as e:
     print(f"[warning] ML strategies not loaded. Please verify required ML libraries are installed. Error: {e}")
@@ -80,7 +80,6 @@ if HAS_ML_STRATEGIES:
     STRATEGY_REGISTRY["xgboost"] = XGBoostStrategy
     STRATEGY_REGISTRY["daily_logistic"] = DailyLogisticStrategy
     STRATEGY_REGISTRY["daily_xgboost"] = DailyXGBoostStrategy
-    STRATEGY_REGISTRY["daily_rnn"] = DailyRNNStrategy
     # DQN strategy will be added below as a local class
 
 if HAS_HYBRID:

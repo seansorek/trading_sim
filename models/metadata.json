@@ -1,26 +1,44 @@
 {
-  "training_date": "2025-12-02T23:03:44.578465",
-  "training_days": 365,
+  "training_date": "2025-12-03T01:08:36.866618",
+  "training_days": 500,
   "interval": "1d",
   "symbols": [
     "AAPL",
+    "SPY",
     "MSFT",
     "GOOGL",
-    "AMZN",
     "NVDA",
     "TSLA",
     "META",
     "NFLX",
     "AMD",
     "INTC",
-    "SPY",
-    "QQQ"
+    "AVGO",
+    "ADBE",
+    "CSCO",
+    "CRM",
+    "DXCM",
+    "QQQ",
+    "IWM",
+    "GLD",
+    "USO",
+    "XLF",
+    "XLV",
+    "XLE",
+    "XLY",
+    "XLI",
+    "COIN",
+    "RIOT",
+    "MARA",
+    "SOXL",
+    "TQQQ",
+    "UPRO"
   ],
   "models": {
     "ordinal_logistic": {
       "file": "ordinal_logistic.pkl",
-      "training_samples": 2400,
-      "test_samples": 600,
+      "training_samples": 8256,
+      "test_samples": 2064,
       "features": [
         "ret_1d",
         "ret_5d",
@@ -42,26 +60,26 @@
         "volume_ma_20"
       ],
       "train_metrics": {
-        "accuracy": 0.3670833333333333,
-        "precision": 0.4571278414824252,
-        "recall": 0.3670833333333333,
-        "f1_score": 0.38636704732549343,
-        "sharpe_ratio": 0.47006041421850403,
-        "max_drawdown_pct": -65.70244826499018
+        "accuracy": 0.33648255813953487,
+        "precision": 0.4556013474344774,
+        "recall": 0.33648255813953487,
+        "f1_score": 0.3571959877005796,
+        "sharpe_ratio": 0.47987918136190977,
+        "max_drawdown_pct": -95.27357608845452
       },
       "test_metrics": {
-        "accuracy": 0.325,
-        "precision": 0.43419937314805895,
-        "recall": 0.325,
-        "f1_score": 0.34903051874149327,
-        "sharpe_ratio": 0.3444138158257116,
-        "max_drawdown_pct": -47.28671446229977
+        "accuracy": 0.32122093023255816,
+        "precision": 0.4379654785428805,
+        "recall": 0.32122093023255816,
+        "f1_score": 0.3419741337926833,
+        "sharpe_ratio": 0.8051799076585903,
+        "max_drawdown_pct": -71.84121274474626
       }
     },
     "xgboost": {
       "file": "xgboost.pkl",
-      "training_samples": 2400,
-      "test_samples": 600,
+      "training_samples": 8256,
+      "test_samples": 2064,
       "features": [
         "ret_1d",
         "ret_5d",
@@ -83,26 +101,21 @@
         "volume_ma_20"
       ],
       "train_metrics": {
-        "accuracy": 0.50625,
-        "precision": 0.5983535658036101,
-        "recall": 0.50625,
-        "f1_score": 0.514926402758057,
-        "sharpe_ratio": 2.4746834000802633,
-        "max_drawdown_pct": -73.2128085479577
+        "accuracy": 0.6981589147286822,
+        "precision": 0.7414704805508848,
+        "recall": 0.6981589147286822,
+        "f1_score": 0.653410588515013,
+        "sharpe_ratio": 5.114040862499329,
+        "max_drawdown_pct": -32.312014882458
       },
       "test_metrics": {
-        "accuracy": 0.345,
-        "precision": 0.4268991813944792,
-        "recall": 0.345,
-        "f1_score": 0.3512114047003929,
-        "sharpe_ratio": 0.4302496681749833,
-        "max_drawdown_pct": -41.49224943298245
+        "accuracy": 0.49176356589147285,
+        "precision": 0.43200392240413876,
+        "recall": 0.49176356589147285,
+        "f1_score": 0.4489232834682215,
+        "sharpe_ratio": 0.7630501001677822,
+        "max_drawdown_pct": -66.5954051082899
       }
-    },
-    "daily_rnn": {
-      "file": "daily_rnn.pkl",
-      "seq_len": 30,
-      "features": 18
     }
   }
 }

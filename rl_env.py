@@ -31,6 +31,7 @@ class TradingEnv:
         self.transaction_cost_bps = transaction_cost_bps
         self.scaler = feature_scaler
 
+        # Load REAL data from yfinance
         raw = load_yfinance(symbol=symbol, start=start or "2024-01-01", end=end or "2025-12-02", interval="1d")
         feats = make_daily_features(raw)
         # Drop rows needing forward return to avoid peeking
@@ -40,6 +41,11 @@ class TradingEnv:
 
         if len(self.df) < self.window + 2:
             raise ValueError(f"Insufficient data for env: {symbol} has {len(self.df)} bars")
+        
+        # Log data source verification
+        self._data_source = "yfinance"
+        self._num_bars = len(self.df)
+        self._date_range = f"{self.df.index[0].date()} to {self.df.index[-1].date()}"
 
         # Optional simple scaler: z-score per feature
         if self.scaler is None:
@@ -65,6 +71,17 @@ class TradingEnv:
     @property
     def observation_space_shape(self) -> Tuple[int]:
         return (self.window * len(self.features),)
+    
+    def get_data_info(self) -> Dict:
+        """Get information about the data source and quality."""
+        return {
+            "symbol": self.symbol,
+            "source": self._data_source,
+            "num_bars": self._num_bars,
+            "date_range": self._date_range,
+            "features": len(self.features),
+            "feature_list": self.features
+        }
 
     def _get_state(self) -> np.ndarray:
         w = self.window

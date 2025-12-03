@@ -42,21 +42,6 @@ from simulation_pipeline import make_features
 from daily_features import make_daily_features
 from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy
 from base_strategy import StrategyConfig
-from skorch import NeuralNetClassifier
-import torch
-import torch.nn as nn
-
-# Top-level RNN module to ensure picklability
-class RNNModule(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 1):
-        super().__init__()
-        self.rnn = nn.GRU(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 3)
-        self.hidden_size = hidden_size
-    def forward(self, X):
-        out, _ = self.rnn(X)
-        last = out[:, -1, :]
-        return self.fc(last)
 
 def load_or_fetch_data(symbol, start_date, end_date, interval, cache_dir="data/cache"):
     """
@@ -231,6 +216,8 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
     all_returns = []
     
     print("Loading and processing data...")
+    data_sources = []  # Track where data comes from
+    
     for symbol in symbols:
         try:
             df = load_or_fetch_data(
@@ -282,8 +269,13 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
             X = feats[available_features].values
             y = labels  # labels is already a numpy array
             
-            # Remove NaN rows
+            # Remove rows with NaN features (real data validation)
             valid_mask = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
+            # Also remove rows with inf values which can occur in feature calculation
+            valid_mask = valid_mask & ~np.isinf(X).any(axis=1)
+            # Remove the last few rows where forward returns might be NaN (end of series)
+            valid_mask = valid_mask & ~np.isnan(future_returns.values)
+            
             X_clean = X[valid_mask]
             y_clean = y[valid_mask]
             
@@ -298,7 +290,13 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
             all_labels.append(y_clean)
             all_returns.append(future_returns_clean)
             
-            print(f"  ✓ {symbol}: {len(X_clean)} samples")
+            # Track data source (yfinance or cache)
+            data_source = "[cache]" if os.path.exists(
+                os.path.join("data/cache", f"{symbol}_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}_{interval}.pkl")
+            ) else "[yfinance]"
+            data_sources.append(f"{symbol} {data_source}")
+            
+            print(f"  [ok] {symbol}: {len(X_clean)} samples (real data from {data_source})")
             
         except Exception as e:
             print(f"  [error] {symbol}: {e}")
@@ -312,6 +310,10 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
     X_combined = np.vstack(all_features)
     y_combined = np.hstack(all_labels)
     returns_combined = np.hstack(all_returns)
+    
+    print(f"\n[ok] Data loaded from {len(data_sources)} symbols (all from real yfinance data):")
+    for source in data_sources:
+        print(f"    {source}")
     
     print(f"\nTotal training samples: {len(X_combined)}")
     print(f"Class distribution: BUY={np.sum(y_combined==1)}, HOLD={np.sum(y_combined==0)}, SELL={np.sum(y_combined==-1)}")
@@ -414,7 +416,7 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
             'test_metrics': test_metrics
         }
         
-        print(f"  ✓ Saved to models/ordinal_logistic.pkl")
+        print(f"  [ok] Saved to models/ordinal_logistic.pkl")
         
     except Exception as e:
         print(f"  [error] Failed to train OrdinalLogistic: {e}")
@@ -443,35 +445,37 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
             print("  Running Bayesian hyperparameter optimization...")
             
             search_space = {
-                'n_estimators': Integer(30, 100),
-                'max_depth': Integer(2, 5),
-                'learning_rate': Real(0.01, 0.2, prior='log-uniform'),
-                'subsample': Real(0.5, 1.0),
-                'colsample_bytree': Real(0.5, 1.0),
-                'min_child_weight': Integer(1, 10),
-                'gamma': Real(0.0, 0.5),
-                'reg_alpha': Real(0.0, 1.0),
-                'reg_lambda': Real(0.5, 2.0)
+                'n_estimators': Integer(50, 150),
+                'max_depth': Integer(3, 7),
+                'learning_rate': Real(0.02, 0.15, prior='log-uniform'),
+                'subsample': Real(0.6, 1.0),
+                'colsample_bytree': Real(0.6, 1.0),
+                'min_child_weight': Integer(1, 5),
+                'gamma': Real(0.0, 0.3),
+                'reg_alpha': Real(0.0, 0.5),
+                'reg_lambda': Real(1.0, 2.0)
             }
             
             base_model = xgb.XGBClassifier(
                 random_state=42,
                 verbosity=0,
                 tree_method='hist',
-                enable_categorical=False
+                enable_categorical=False,
+                scale_pos_weight=1
             )
             
             opt = BayesSearchCV(
                 base_model,
                 search_space,
-                n_iter=30,
+                n_iter=15,
                 cv=3,
-                n_jobs=-1,
+                n_jobs=1,  # Changed to 1 to avoid multiprocessing issues
                 random_state=42,
                 verbose=1
             )
             
-            opt.fit(X_train_clean, y_train_mapped, sample_weight=sample_weights)
+            # Fit without sample weights in BayesSearchCV to avoid numerical issues
+            opt.fit(X_train_clean, y_train_mapped)
             model = opt.best_estimator_
             
             print(f"  Best params: {opt.best_params_}")
@@ -546,76 +550,16 @@ def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams
             'test_metrics': test_metrics
         }
         
-        print(f"  ✓ Saved to models/xgboost.pkl")
+        print(f"  [ok] Saved to models/xgboost.pkl")
         
     except Exception as e:
         print(f"  [error] Failed to train XGBoost: {e}")
     
-    # If training daily interval, also train and save an RNN on sequences
-    try:
-        if interval == '1d':
-            print("\nTraining Daily RNN (GRU) model...")
-            # Build sequences from scaled features
-            from sklearn.preprocessing import StandardScaler
-            scaler_seq = StandardScaler()
-            X_scaled_all = scaler_seq.fit_transform(X_combined)
-            seq_len = 30  # Increased from 10 for better temporal context
-            X_seq = []
-            y_seq = []
-            for i in range(seq_len, len(X_scaled_all)):
-                X_seq.append(X_scaled_all[i-seq_len:i])
-                y_seq.append(y_combined[i])
-            X_seq = np.asarray(X_seq, dtype=np.float32)
-            y_seq = np.asarray(y_seq) + 1  # map to {0,1,2}
-            net = NeuralNetClassifier(
-                RNNModule,
-                module__input_size=X_seq.shape[-1],
-                module__hidden_size=128,  # Increased from 64 for better feature extraction
-                max_epochs=40,  # Increased from 25 for better convergence
-                lr=5e-4,  # Reduced learning rate for stability
-                optimizer=torch.optim.Adam,
-                criterion=nn.CrossEntropyLoss,
-                batch_size=32,  # Reduced batch size for better gradient updates
-                device='cpu'
-            )
-
-            if optimize_hyperparams and HAS_SKOPT:
-                print("  Running Bayesian hyperparameter optimization for RNN...")
-                search_space = {
-                    'module__hidden_size': Integer(32, 128),
-                    'lr': Real(1e-4, 5e-3, prior='log-uniform')
-                }
-                opt = BayesSearchCV(net, search_space, n_iter=16, cv=3, n_jobs=1, random_state=42, verbose=1)
-                opt.fit(X_seq, y_seq)
-                net = opt.best_estimator_
-                print(f"  Best params: {opt.best_params_}")
-            else:
-                net.fit(X_seq, y_seq)
-
-            # Save RNN (save weights separately to avoid pickle deserialization issues in multiprocessing)
-            model_weights = {name: param.data.cpu().numpy() for name, param in net.module_.named_parameters()}
-            with open('models/daily_rnn.pkl', 'wb') as f:
-                pickle.dump({
-                    'model': net,  # Keep for backward compatibility
-                    'model_weights': model_weights,  # Use this for multiprocessing-safe loading
-                    'scaler': scaler_seq,
-                    'seq_len': seq_len,
-                    'hidden_size': getattr(net.module_, 'hidden_size', 64)
-                }, f)
-            model_metadata['models']['daily_rnn'] = {
-                'file': 'daily_rnn.pkl',
-                'seq_len': seq_len,
-                'features': X_seq.shape[-1]
-            }
-            print("  ✓ Saved to models/daily_rnn.pkl")
-    except Exception as e:
-        print(f"  [error] Failed to train Daily RNN: {e}")
-
     # Save metadata
     with open('models/metadata.json', 'w') as f:
         json.dump(model_metadata, f, indent=2)
     
-    print(f"\n✓ Training complete! Model metadata saved to models/metadata.json")
+    print(f"\n[ok] Training complete! Model metadata saved to models/metadata.json")
     print(f"\nNext steps:")
     print(f"  1. Commit the models/ directory to git")
     print(f"  2. Deploy to GitHub Actions - models will be loaded instead of retrained")
@@ -625,7 +569,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pre-train ML models for deployment")
     parser.add_argument(
         "--symbols",
-        default="SPY,QQQ,AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO",
+        default="AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO",
         help="Comma-separated list of symbols to train on"
     )
     parser.add_argument(

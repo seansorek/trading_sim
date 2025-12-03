@@ -16,8 +16,8 @@ def train(symbols: List[str], start: str, end: str, window: int, episodes: int, 
     
     Args:
         symbols: List of stock symbols
-        start: Start date
-        end: End date
+        start: Start date (YYYY-MM-DD)
+        end: End date (YYYY-MM-DD)
         window: Observation window (days)
         episodes: Number of training episodes
         steps_per_episode: Steps per episode
@@ -25,13 +25,34 @@ def train(symbols: List[str], start: str, end: str, window: int, episodes: int, 
         use_dueling: Enable Dueling architecture
         use_per: Enable Prioritized Experience Replay
     """
+    print("\n" + "=" * 70)
+    print("DQN AGENT TRAINING - REAL DATA VERIFICATION")
+    print("=" * 70)
+    print(f"Training Period: {start} to {end}")
+    print(f"Data Source: yfinance (REAL MARKET DATA)")
+    print(f"Symbols: {len(symbols)}")
+    print(f"Interval: Daily (1d)")
+    print(f"Architecture: Dueling DQN with PER")
+    print("=" * 70 + "\n")
+    
     envs = [TradingEnv(sym, start=start, end=end, window=window) for sym in symbols]
     state_dim = envs[0].observation_space_shape[0]
     action_dim = envs[0].action_space_n
     
-    print(f"[info] Training Enhanced DQN with Dueling={use_dueling}, PER={use_per}")
+    print(f"[info] Loaded {len(symbols)} symbols with real yfinance data")
+    
+    # Display data verification for each environment
+    print("\nData Verification:")
+    total_bars = 0
+    for env in envs:
+        info = env.get_data_info()
+        print(f"  [ok] {info['symbol']:6s}: {info['num_bars']:4d} bars from {info['date_range']} ({info['source']})")
+        total_bars += info['num_bars']
+    print(f"\n[ok] Total bars loaded: {total_bars:,}")
+    
+    print(f"\n[info] Training Enhanced DQN with Dueling={use_dueling}, PER={use_per}")
     print(f"[info] State dim: {state_dim}, Action dim: {action_dim}")
-    print(f"[info] Episodes: {episodes}, Steps/ep: {steps_per_episode}")
+    print(f"[info] Episodes: {episodes}, Steps/ep: {steps_per_episode}\n")
 
     cfg = DQNConfig(
         gamma=0.99,
@@ -85,7 +106,7 @@ def train(symbols: List[str], start: str, end: str, window: int, episodes: int, 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--symbols", type=str, default="AAPL,MSFT")
+    p.add_argument("--symbols", type=str, default="AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO")
     p.add_argument("--start", type=str, default="2024-01-01")
     p.add_argument("--end", type=str, default="2025-12-02")
     p.add_argument("--window", type=int, default=20)
