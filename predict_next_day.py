@@ -66,6 +66,7 @@ def get_daily_prediction(symbol: str, predict_only: bool = True) -> Dict:
                 result["strategies"][strategy_name] = {
                     "signal": "HOLD",
                     "confidence": 0.0,
+                    "position_size": {'fraction': 0.0, 'dollar_amount': 0.0},
                     "error": "Intraday-only strategy (requires 5m data)",
                 }
                 continue
@@ -85,19 +86,20 @@ def get_daily_prediction(symbol: str, predict_only: bool = True) -> Dict:
                     )
 
                     signal_name = "BUY" if latest_signal == 1 else "SELL" if latest_signal == -1 else "HOLD"
-                    position_size = calculate_position_size(confidence, signal_name)
+                    position_data = calculate_position_size(confidence, signal_name, volatility=1.0, account_size=100.0)
+                    position_display = format_position_size(position_data)
 
                     result["strategies"][strategy_name] = {
                         "signal": signal_name,
                         "confidence": float(confidence),
-                        "position_size": float(position_size),
-                        "recommendation": f"{signal_name} ({confidence:.0%} confidence, {position_size:.0%} size)",
+                        "position_size": position_data,
+                        "recommendation": f"{signal_name} ({confidence:.0%} confidence) | Size: {position_display}",
                     }
                 else:
                     result["strategies"][strategy_name] = {
                         "signal": "HOLD",
                         "confidence": 0.0,
-                        "position_size": 0.0,
+                        "position_size": {'fraction': 0.0, 'dollar_amount': 0.0},
                         "recommendation": "HOLD (no signal)",
                         "error": "No signal generated",
                     }
@@ -107,7 +109,7 @@ def get_daily_prediction(symbol: str, predict_only: bool = True) -> Dict:
                 result["strategies"][strategy_name] = {
                     "signal": "HOLD",
                     "confidence": 0.0,
-                    "position_size": 0.0,
+                    "position_size": {'fraction': 0.0, 'dollar_amount': 0.0},
                     "recommendation": "HOLD (error)",
                     "error": str(e),
                 }
@@ -160,81 +162,175 @@ def calculate_confidence(strategy_name: str, daily_feats: pd.DataFrame, signal_s
         return 0.5
 
 
-def calculate_position_size(confidence: float, signal: str, volatility: float = 1.0) -> float:
+def calculate_position_size(confidence: float, signal: str, volatility: float = 1.0, account_size: float = 100.0) -> Dict[str, float]:
     """
-    Calculate position size based on prediction confidence and signal.
+    Calculate position size using multiple methods and return sizing recommendations.
+    
+    Methods:
+    1. KELLY CRITERION: Optimal bet sizing for long-term growth
+       Kelly% = (win% * avg_win - loss% * avg_loss) / avg_win
+    2. VOLATILITY-ADJUSTED: Inverse volatility scaling (lower vol = bigger position)
+    3. CONFIDENCE-SCALED: Linear scaling based on prediction confidence
     
     Args:
         confidence: Prediction confidence (0.0-1.0)
         signal: Trading signal ("BUY", "SELL", "HOLD")
         volatility: Normalized volatility (default 1.0 = normal)
+        account_size: Account size in dollars (default $100)
     
     Returns:
-        Position size multiplier (0.0-1.0)
+        Dict with:
+            - 'fraction': Position size as % of account (0.0-1.0)
+            - 'dollar_amount': Position size in dollars (0.0-account_size)
+            - 'kelly': Kelly Criterion recommendation
+            - 'conservative': Half-Kelly (safer)
     """
     if signal == "HOLD" or confidence < 0.50:
-        return 0.0
+        return {
+            'fraction': 0.0,
+            'dollar_amount': 0.0,
+            'kelly': 0.0,
+            'conservative': 0.0,
+            'method': 'HOLD'
+        }
     
-    # Base sizing: scale linearly from confidence 0.50 (min) to 0.90 (max)
-    base_size = min(1.0, (confidence - 0.50) / 0.40)  # 0.50->0.0, 0.90->1.0
+    # === METHOD 1: KELLY CRITERION ===
+    # Assumptions: 55% win rate at confidence level, 1:1 reward/risk
+    win_rate = 0.50 + (confidence * 0.20)  # 0.50 confidence = 50% win rate, 0.90 = 70% win rate
+    loss_rate = 1.0 - win_rate
+    avg_win = 0.015  # 1.5% avg win per trade
+    avg_loss = 0.015  # 1.5% avg loss per trade
     
-    # Reduce size in high volatility
+    kelly_fraction = (win_rate * avg_win - loss_rate * avg_loss) / avg_win if avg_win > 0 else 0
+    kelly_fraction = max(0, min(1.0, kelly_fraction))  # Clamp to [0, 1]
+    
+    # === METHOD 2: VOLATILITY-ADJUSTED ===
+    # Higher volatility → smaller position
+    # Lower volatility → bigger position
+    base_size = min(1.0, (confidence - 0.50) / 0.40)  # 0.50→0.0, 0.90→1.0
     vol_adjusted = base_size / max(1.0, volatility)
+    vol_adjusted = min(1.0, vol_adjusted)
     
-    return min(1.0, vol_adjusted)
+    # === METHOD 3: CONFIDENCE-SCALED (Original) ===
+    confidence_scaled = min(1.0, (confidence - 0.50) / 0.40)
+    
+    # === RECOMMENDATION: Use Kelly with conservative cap ===
+    # Kelly can be aggressive, so use Kelly * 0.5 (Half-Kelly) for safety
+    position_fraction = min(kelly_fraction, 0.25)  # Cap at 25% of account per trade
+    conservative_fraction = position_fraction * 0.5  # Half-Kelly for more conservative approach
+    
+    return {
+        'fraction': position_fraction,
+        'dollar_amount': position_fraction * account_size,
+        'kelly': kelly_fraction,
+        'conservative': conservative_fraction,
+        'confidence': confidence,
+        'volatility': volatility,
+        'method': 'KELLY_CRITERION'
+    }
+
+
+def format_position_size(position_data: Dict[str, float]) -> str:
+    """Format position size for display with dollar amounts and percentages."""
+    if position_data['fraction'] == 0.0:
+        return "HOLD (0%)"
+    
+    frac_pct = position_data['fraction'] * 100
+    dollar = position_data['dollar_amount']
+    conservative = position_data['conservative']
+    conservative_dollar = conservative * (position_data.get('dollar_amount', 100) / position_data['fraction']) if position_data['fraction'] > 0 else 0
+    
+    return f"{frac_pct:.0f}% (${dollar:.2f} | Conservative: {conservative*100:.0f}% ${conservative_dollar:.2f})"
 
 
 def format_webhook_message(predictions: List[Dict]) -> str:
     """
-    Format predictions into a readable GitHub Actions webhook message.
-    Sorted by strategy and confidence. Includes position sizing and recommendations.
+    Format predictions into a detailed Discord embed-compatible message.
+    Organized by signal type with actionable sizing recommendations.
     """
-    # Aggregate predictions by strategy
-    by_strategy = {}
-
+    # Aggregate by signal type across all strategies
+    buy_signals = []
+    sell_signals = []
+    hold_signals = []
+    
     for pred in predictions:
         if pred.get("error"):
             continue
-
+        
+        symbol = pred.get("symbol", "?")
         for strategy, data in pred.get("strategies", {}).items():
-            if "error" in data:
+            if "error" in data or data.get("signal") == "HOLD":
                 continue
-
-            if strategy not in by_strategy:
-                by_strategy[strategy] = {"BUY": [], "HOLD": [], "SELL": []}
-
+            
             signal = data.get("signal", "HOLD")
             confidence = data.get("confidence", 0.0)
-            position_size = data.get("position_size", 0.0)
-            recommendation = data.get("recommendation", signal)
+            position_data = data.get("position_size", {})
+            dollar_amount = position_data.get("dollar_amount", 0.0) if isinstance(position_data, dict) else 0.0
             
-            by_strategy[strategy][signal].append(
-                (pred["symbol"], confidence, position_size, recommendation)
-            )
-
-    # Build message
-    lines = ["# Next Day Trading Recommendations\n"]
-    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
-
-    # Sort by strategy
-    for strategy in sorted(by_strategy.keys()):
-        lines.append(f"\n## {strategy.upper()}\n")
-
-        for signal_type in ["BUY", "SELL", "HOLD"]:
-            items = by_strategy[strategy][signal_type]
-            if not items:
-                continue
-
-            # Sort by confidence (highest first)
-            items.sort(key=lambda x: x[1], reverse=True)
-
-            lines.append(f"### {signal_type}")
-
-            for symbol, confidence, position_size, recommendation in items:
-                lines.append(f"- **{symbol}**: {recommendation}")
-
+            entry = {
+                'symbol': symbol,
+                'strategy': strategy.upper().replace('_', ' '),
+                'confidence': confidence,
+                'dollar': dollar_amount,
+                'kelly': position_data.get('kelly', 0.0) if isinstance(position_data, dict) else 0.0,
+                'recommendation': data.get("recommendation", "")
+            }
+            
+            if signal == "BUY":
+                buy_signals.append(entry)
+            elif signal == "SELL":
+                sell_signals.append(entry)
+            else:
+                hold_signals.append(entry)
+    
+    # Sort by confidence (highest first)
+    buy_signals.sort(key=lambda x: x['confidence'], reverse=True)
+    sell_signals.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    # Build Discord message
+    lines = []
+    lines.append("=== DAILY TRADING PREDICTIONS ===")
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append("")
+    
+    # Summary stats
+    total_signals = len(buy_signals) + len(sell_signals)
+    if total_signals > 0:
+        lines.append("--- SUMMARY ---")
+        lines.append(f"BUY Signals: {len(buy_signals)} [UP]")
+        lines.append(f"SELL Signals: {len(sell_signals)} [DOWN]")
+        lines.append(f"Total Capital Required (Aggressive): ${sum(s['dollar'] for s in buy_signals) + sum(s['dollar'] for s in sell_signals):.2f}")
+        lines.append("")
+    
+    # BUY signals
+    if buy_signals:
+        lines.append("--- BUY SIGNALS (Highest Confidence) ---")
+        lines.append("")
+        for entry in buy_signals[:10]:  # Top 10
+            lines.append(f"{entry['symbol']}")
+            lines.append(f"  Strategy: {entry['strategy']}")
+            lines.append(f"  Confidence: {entry['confidence']:.0%}")
+            lines.append(f"  Position Size: ${entry['dollar']:.2f} (Kelly: {entry['kelly']:.1%})")
             lines.append("")
-
+    
+    # SELL signals
+    if sell_signals:
+        lines.append("--- SELL SIGNALS (Highest Confidence) ---")
+        lines.append("")
+        for entry in sell_signals[:10]:  # Top 10
+            lines.append(f"{entry['symbol']}")
+            lines.append(f"  Strategy: {entry['strategy']}")
+            lines.append(f"  Confidence: {entry['confidence']:.0%}")
+            lines.append(f"  Position Size: ${entry['dollar']:.2f} (Kelly: {entry['kelly']:.1%})")
+            lines.append("")
+    
+    if total_signals == 0:
+        lines.append("--- No actionable signals today ---")
+        lines.append("All strategies recommend HOLD or have low confidence.")
+    
+    lines.append("---")
+    lines.append("Note: Use Conservative sizing (Half-Kelly) for risk-averse approach")
+    
     return "\n".join(lines)
 
 
