@@ -34,8 +34,7 @@ jobs:
             --webhook
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        continue-on-error: true
 
       - name: Log completion
         run: |
-          echo "✅ Daily trading predictions completed"
+          echo "[ok] Daily trading predictions completed at $(date)"
