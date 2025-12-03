@@ -1,12 +1,9 @@
 pandas
 numpy
 requests
-matplotlib
 yfinance
 scikit-learn
 scikit-optimize
 xgboost
 torch
 skorch
-gymnasium
-beautifulsoup4
