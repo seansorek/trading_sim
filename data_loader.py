@@ -29,11 +29,12 @@ def _add_spread(df: pd.DataFrame) -> pd.DataFrame:
     df["spread"] = np.maximum(df["close"] * 0.0002, 0.01)
     return df
 
-def _standardize(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure correct columns, sort, drop duplicates, US hours, add spread."""
+def _standardize(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
+    """Ensure correct columns, sort, drop duplicates, optional US hours, add spread."""
     df = df.sort_index().loc[~df.index.duplicated(keep="last")]
     df = _ensure_cols(df)
-    df = _filter_us_hours(df)
+    if intraday:
+        df = _filter_us_hours(df)
     df = df.ffill().bfill()  # Fill any gaps
     df = _add_spread(df)
     df.index.name = "timestamp"
@@ -43,43 +44,107 @@ def _standardize(df: pd.DataFrame) -> pd.DataFrame:
 def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd.DataFrame:
     """
     Fetch intraday bars from Yahoo Finance via yfinance.
-    NOTE: 1m data is often limited to ~7 days for free access and may be delayed or incomplete.
+    Automatically chunks large requests to work around yfinance API limits.
+    
+    Limits per interval (from current date, not end date):
+    - 1m: last 7 days only
+    - 5m, 15m, 30m: last 60 days only
+    - 60m, 90m: last 730 days
+    - 1d and above: years of history
+    
     Raises ValueError if no data is returned or if data is insufficient.
     """
     import yfinance as yf
     
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
     start_dt = pd.to_datetime(start)
     end_dt = pd.to_datetime(end)
+    now = datetime.now()
     
-    # yfinance has a 7-day limit for 1m data. We'll fetch in chunks if needed.
-    if interval == "1m" and (end_dt - start_dt).days > 7:
-        print(f"[info] Fetching 1m data for {symbol} in 7-day chunks due to yfinance API limits...")
+    # Determine maximum historical range based on interval
+    if interval == "1m":
+        max_history_days = 7
+        chunk_days = 6  # Fetch in 6-day chunks
+    elif interval in ["5m", "15m", "30m"]:
+        max_history_days = 60
+        chunk_days = 30  # Fetch in 30-day chunks
+    elif interval in ["60m", "90m"]:
+        max_history_days = 730
+        chunk_days = 180  # Fetch in 180-day chunks
+    else:
+        # Daily/weekly intervals - no practical limit
+        max_history_days = 3650
+        chunk_days = 730
+    
+    # Adjust start date if it's beyond the available history
+    # Yahoo's limit is from TODAY, not from end_dt
+    earliest_available = now - timedelta(days=max_history_days - 1)  # -1 for safety margin
+    if start_dt < earliest_available:
+        original_start = start_dt
+        start_dt = earliest_available
+        print(f"[warn] {interval} data for {symbol} only available for last {max_history_days} days from today")
+        print(f"      Adjusted start date: {original_start.date()} -> {start_dt.date()}")
+    
+    # Ensure end date is not in the future
+    if end_dt > now:
+        end_dt = now
+    
+    # Ensure we're not requesting future dates
+    if start_dt > now:
+        raise ValueError(f"Start date {start_dt.date()} is in the future")
+    
+    total_days = (end_dt - start_dt).days
+    
+    # For very recent data, don't chunk - just fetch directly
+    if total_days <= 0:
+        raise ValueError(f"Invalid date range: start {start_dt.date()} >= end {end_dt.date()}")
+    
+    # Use chunking if request is large OR if we want to be safe with API limits
+    if total_days > chunk_days:
+        print(f"[info] Fetching {interval} data for {symbol} in {chunk_days}-day chunks ({total_days} days total)...")
         all_dfs = []
         current_start = start_dt
+        chunk_num = 0
+        
         while current_start < end_dt:
-            chunk_end = min(current_start + timedelta(days=7), end_dt)
+            chunk_end = min(current_start + timedelta(days=chunk_days), end_dt)
+            chunk_num += 1
+            
             try:
                 ticker = yf.Ticker(symbol)
-                chunk_df = ticker.history(start=current_start, end=chunk_end, interval=interval, actions=False, prepost=False)
+                chunk_df = ticker.history(
+                    start=current_start.strftime("%Y-%m-%d"),
+                    end=chunk_end.strftime("%Y-%m-%d"),
+                    interval=interval,
+                    actions=False,
+                    prepost=False
+                )
+                
                 if not chunk_df.empty:
                     all_dfs.append(chunk_df)
+                    print(f"  Chunk {chunk_num}: {current_start.date()} to {chunk_end.date()} - {len(chunk_df)} bars")
+                else:
+                    print(f"  [warn] Chunk {chunk_num}: No data returned for {current_start.date()} to {chunk_end.date()}")
+                    
             except Exception as e:
-                print(f"[warn] Failed to fetch chunk for {symbol} from {current_start.date()} to {chunk_end.date()}: {e}")
-            current_start += timedelta(days=7)
+                print(f"  [error] Chunk {chunk_num} failed ({current_start.date()} to {chunk_end.date()}): {e}")
+            
+            current_start = chunk_end
         
         if not all_dfs:
             df = pd.DataFrame()
         else:
+            # Combine all chunks and remove duplicates
             df = pd.concat(all_dfs)
+            df = df[~df.index.duplicated(keep='first')]
+            df = df.sort_index()
+            print(f"  Combined {len(all_dfs)} chunks into {len(df)} total bars")
     else:
+        # Single request for small ranges
         ticker = yf.Ticker(symbol)
         df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
     
     # Check if empty
     if df.empty:
-        raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}). Symbol may be invalid or data unavailable.")
         raise ValueError(f"No data returned by yfinance for {symbol} in {start}–{end} ({interval}). Symbol may be invalid, data unavailable, or API limit exceeded.")
     
     # Check if we have sufficient data (at least 10 candles)
@@ -99,7 +164,9 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     
-    return _standardize(df)
+    # For daily/weekly/monthly intervals, do not filter intraday hours
+    is_intraday = interval.endswith('m') or interval.endswith('h')
+    return _standardize(df, intraday=is_intraday)
 
 def load_csv(path: str) -> pd.DataFrame:
     """

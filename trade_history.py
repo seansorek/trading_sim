@@ -77,7 +77,9 @@ def calculate_trade_stats() -> dict:
     df = pd.DataFrame(trades)
     
     # Parse timestamps
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Parse timestamps; enforce UTC to avoid mixed timezone warnings
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+    df = df.dropna(subset=['timestamp'])
     
     # Calculate round-trip PnL
     pnl_list = []

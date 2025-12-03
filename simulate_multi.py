@@ -21,7 +21,6 @@ Index:
 import os
 import json
 import argparse
-import shutil
 import sys
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -269,6 +268,8 @@ def process_symbol(symbol: str, strategies: list, args, expert_opinions: dict,
         symbol_results["meta"]["error"] = f"Failed to load data: {str(e)}"
         return symbol, symbol_results, logs
     
+    print(f"\n[info] Processing {symbol} ({len(df)} bars)")
+    
     # Features once per symbol
     feats = make_features(df)
 
@@ -329,7 +330,7 @@ def main():
     )
     parser.add_argument("--symbols", default="SPY,QQQ,AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,NVSN,IBM,DXCM,SQ,SHOP,ZM,DOCU,CRWD,OKTA,NET,ROKU,COIN,HOOD,LCID,PLTR",
                         help="Comma-separated list of symbols (e.g., 'SPY,AAPL,QQQ').")
-    parser.add_argument("--strategies", default="all",
+    parser.add_argument("--strategies", type=str, default='daily_logistic,daily_xgboost,daily_rnn,daily_dqn',
                         help="Comma-separated list of strategies to run per symbol, or 'all'.")
     parser.add_argument("--source", default="yfinance", choices=["yfinance", "csv", "alphavantage"],
                         help="Data source: yfinance, csv, or alphavantage.")
@@ -361,8 +362,7 @@ def main():
 
     # Determine number of workers (default: min(available CPUs, 8) for stability)
     if args.workers is None:
-        args.workers = min(multiprocessing.cpu_count(), 8)
-    
+        args.workers = min(multiprocessing.cpu_count(), 4)
     print(f"[info] Using {args.workers} worker processes for parallel processing")
 
     # Handle Alpha Vantage API key
@@ -448,6 +448,24 @@ def main():
     # Write combined multi-summary used by the dropdown dashboard
     with open("results/multi_summary.json", "w") as f:
         json.dump(multi_summary, f, indent=2)
+
+    # Create timestamped run results file
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_results = {
+        "timestamp": datetime.now().isoformat(),
+        "parameters": {
+            "symbols": symbols,
+            "strategies": strategies,
+            "interval": args.interval,
+            "start": args.start,
+            "end": args.end,
+            "workers": args.workers,
+        },
+        "results": multi_summary,
+    }
+    
+    with open(f"results/run_{run_timestamp}.json", "w") as f:
+        json.dump(run_results, f, indent=2)
 
     # Build a sorted recommendations summary for Discord
     recommendations_sorted = {}

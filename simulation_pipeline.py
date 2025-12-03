@@ -4,78 +4,25 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Dict
+import torch
 from base_strategy import BaseStrategy, StrategyConfig
+from daily_features import make_daily_features
+from dqn_agent import DQNAgent
+from data_loader import load_yfinance
 
 # Try to import ML strategies (optional)
 try:
-    from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy
+    from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy, DailyLogisticStrategy, DailyXGBoostStrategy, DailyRNNStrategy
     HAS_ML_STRATEGIES = True
 except ImportError as e:
-    print(f"[warning] ML strategies not loaded. Please verify scikit-learn and xgboost are installed. Error: {e}")
+    print(f"[warning] ML strategies not loaded. Please verify required ML libraries are installed. Error: {e}")
     HAS_ML_STRATEGIES = False
 
 np.random.seed(42)
 os.makedirs('data', exist_ok=True)
 os.makedirs('results', exist_ok=True)
-
-# 1) Synthetic intraday generator (US hours: 09:30–16:00)
-def generate_synthetic_intraday(start_price: float = 100.0, days: int = 10) -> pd.DataFrame:
-    minutes_per_day = 390
-    all_minutes = []
-    for d in range(days):
-        date = pd.Timestamp('2025-10-01') + pd.Timedelta(days=d)
-        day_minutes = pd.date_range(date + pd.Timedelta(hours=9, minutes=30),
-                                    date + pd.Timedelta(hours=16),
-                                    freq='1min', inclusive='left')
-        all_minutes.append(day_minutes)
-    idx = all_minutes[0]
-    for i in range(1, len(all_minutes)):
-        idx = idx.append(all_minutes[i])
-    df = pd.DataFrame(index=idx)
-
-    # Intraday patterns
-    minutes = np.arange(minutes_per_day)
-    vol_shape = 0.6 + 0.8 * (np.sin((minutes / minutes_per_day) * np.pi))**2
-    vol_shape = vol_shape / np.mean(vol_shape)
-    vol_daily = np.random.uniform(0.0004, 0.0012, size=days)
-    vol_series = np.concatenate([vol_daily[d] * vol_shape for d in range(days)])
-
-    # Price path
-    noise = np.random.normal(0, 1, size=len(df))
-    returns = vol_series * noise
-    mid = start_price * np.exp(np.cumsum(returns))
-
-    micro_noise = np.random.normal(0, 0.0005, size=len(df))
-    close = mid * (1 + micro_noise)
-    high = close * (1 + np.abs(np.random.normal(0, 0.0015, size=len(df))))
-    low  = close * (1 - np.abs(np.random.normal(0, 0.0015, size=len(df))))
-    open_ = np.concatenate([[start_price], close[:-1]])
-
-    vol_u = 0.6 + 0.8 * (np.sin((minutes / minutes_per_day) * np.pi))**2
-    vol_u = vol_u / np.mean(vol_u)
-    base_vol = np.random.uniform(1000, 5000, size=days)
-    volume = np.concatenate([
-        base_vol[d] * vol_u * (1 + np.random.normal(0, 0.2, size=minutes_per_day))
-        for d in range(days)
-    ]).astype(int)
-    volume = np.maximum(10, volume)
-
-    # Spread widens with volatility
-    spread_bps = 4 + 200 * vol_series
-    spread = (spread_bps / 1e4) * close
-
-    df['open']   = open_
-    df['high']   = high
-    df['low']    = low
-    df['close']  = close
-    df['volume'] = volume
-    df['spread'] = spread
-    df.index.name = 'timestamp'
-    df.to_csv('data/synthetic_intraday.csv')
-    return df
 
 # 2) Features
 def rsi(series: pd.Series, window: int = 14) -> pd.Series:
@@ -117,90 +64,150 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     return feats
 
 
-class MeanReversionStrategy(BaseStrategy):
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        ret = feats['ret_1m']
-        mu = ret.rolling(self.cfg.lookback).mean()
-        sd = ret.rolling(self.cfg.lookback).std().replace(0, np.nan)
-        # Calculate Z-score, filling NaNs from std=0 with 0 to avoid warnings
-        z = ((ret - mu) / sd).fillna(0)
-        sig = pd.Series(
-            np.where(z < -self.cfg.threshold, 1,
-                     np.where(z >  self.cfg.threshold, -1, 0)),
-            index=feats.index
-        )
-        
-        # Don't trade mean reversion in strong trends - it fails there
-        ma_trend = feats['ma_spread'] / (feats['ma_slow'] + 1e-6)
-        in_strong_trend = np.abs(ma_trend) > 0.02
-        sig[in_strong_trend] = 0
-        
-        # Apply holding period to reduce trading frequency
-        sig = self._apply_holding_period(sig)
-        return sig
+"""ML-only strategy registry and builder (non-ML strategies removed)."""
 
-class MomentumStrategy(BaseStrategy):
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        ma_spread = feats['ma_spread']
-        # Add volume confirmation - momentum with volume is stronger
-        vol_confirmed = feats['vol_z'] > 0.5  # Above-average volume
-        sig = pd.Series(
-            np.where((ma_spread > 0) & vol_confirmed, 1,
-                     np.where((ma_spread < 0) & vol_confirmed, -1, 0)),
-            index=feats.index
-        )
-        # Apply holding period to reduce trading frequency
-        sig = self._apply_holding_period(sig)
-        return sig
+# Import hybrid strategies
+try:
+    from hybrid_strategy import HybridDQNXGBoostStrategy, EnsembleWeightedStrategy
+    HAS_HYBRID = True
+except ImportError as e:
+    print(f"[warning] Hybrid strategies not loaded: {e}")
+    HAS_HYBRID = False
 
-class BreakoutStrategy(BaseStrategy):
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        price = df['close']
-        high_roll = price.rolling(self.cfg.lookback).max()
-        low_roll  = price.rolling(self.cfg.lookback).min()
-        sig = np.where(price > high_roll.shift(1), 1,
-                  np.where(price < low_roll.shift(1), -1, 0))
-        result = pd.Series(sig, index=price.index).fillna(0)
-        # Apply holding period to reduce trading frequency
-        result = self._apply_holding_period(result)
-        return result
-
-class RSIStrategy(BaseStrategy):
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        rsi = feats['rsi_14']
-        sig = pd.Series(
-            np.where(rsi < self.cfg.rsi_lower, 1,
-                     np.where(rsi > self.cfg.rsi_upper, -1, 0)),
-            index=feats.index
-        ).fillna(0)
-        # Apply holding period to reduce trading frequency
-        sig = self._apply_holding_period(sig)
-        return sig
-
-# ===== Strategy Registry & Builder =====
-
-STRATEGY_REGISTRY = {
-    "mean_reversion": MeanReversionStrategy,
-    "momentum":       MomentumStrategy,
-    "breakout":       BreakoutStrategy,
-    "rsi":            RSIStrategy,
-}
-
-# Add ML strategies if available
+STRATEGY_REGISTRY = {}
 if HAS_ML_STRATEGIES:
     STRATEGY_REGISTRY["ordinal_logistic"] = OrdinalLogisticStrategy
     STRATEGY_REGISTRY["xgboost"] = XGBoostStrategy
+    STRATEGY_REGISTRY["daily_logistic"] = DailyLogisticStrategy
+    STRATEGY_REGISTRY["daily_xgboost"] = DailyXGBoostStrategy
+    STRATEGY_REGISTRY["daily_rnn"] = DailyRNNStrategy
+    # DQN strategy will be added below as a local class
+
+if HAS_HYBRID:
+    STRATEGY_REGISTRY["hybrid_dqn_xgboost"] = HybridDQNXGBoostStrategy
+    STRATEGY_REGISTRY["ensemble_weighted"] = EnsembleWeightedStrategy
+
+class DailyDQNStrategy(BaseStrategy):
+    """
+    Uses a pre-trained DQN agent to choose daily actions (Hold/Long/Short)
+    based on a window of daily indicators. Includes confidence thresholding
+    to reduce overtrading and improve quality.
+    
+    Improvements for profitability:
+    - Higher confidence threshold to avoid weak signals
+    - Feature scaling to match training distribution
+    - Reduced trading frequency with stronger signal filtering
+    """
+    def __init__(self, cfg: StrategyConfig):
+        super().__init__(cfg)
+        self.model_path = os.environ.get('DQN_MODEL', getattr(cfg, 'model_path', 'models/dqn_agent.pt'))
+        self.window = int(os.environ.get('DQN_WINDOW', getattr(cfg, 'window', 20)))
+        # Confidence threshold - balance between signal quality and trading frequency
+        self.confidence_threshold = float(os.environ.get('DQN_CONFIDENCE', '8.0'))
+        # Q-value advantage threshold: best action must be this much better than hold
+        self.q_advantage_threshold = float(os.environ.get('DQN_Q_ADVANTAGE', '1.5'))
+        self.feature_scaler = {}  # Will be populated from training data statistics
+
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        try:
+            agent = DQNAgent.load(self.model_path)
+        except Exception as e:
+            print(f"[warn] Failed to load DQN agent from {self.model_path}: {e}. Will default to Hold.")
+            return pd.Series(0, index=df.index)
+
+        # Build daily features aligned to df
+        daily_feats = make_daily_features(df)
+        daily_feats = daily_feats.fillna(0.0)
+
+        # DQN was trained with ALL features including 'close' and 'fwd_ret_1d' excluded
+        feature_cols = [c for c in daily_feats.columns if c not in ["fwd_ret_1d"]]
+        
+        # Normalize features using training statistics if available
+        # This ensures the DQN sees features in the same distribution as training
+        if not self.feature_scaler:
+            for col in feature_cols:
+                mu = float(daily_feats[col].mean())
+                sigma = float(daily_feats[col].std() or 1.0)
+                self.feature_scaler[col] = (mu, sigma)
+        
+        # Apply normalization
+        daily_feats_normalized = daily_feats.copy()
+        for col in feature_cols:
+            if col in self.feature_scaler:
+                mu, sigma = self.feature_scaler[col]
+                daily_feats_normalized[col] = (daily_feats[col] - mu) / (sigma if sigma != 0 else 1.0)
+        
+        # Create rolling window states
+        signals = []
+        idxs = []
+        for i in range(self.window, len(daily_feats_normalized)):
+            frame = daily_feats_normalized.iloc[i-self.window:i]
+            state = frame[feature_cols].values.astype(np.float32).flatten()
+            
+            # Get Q-values for all actions to assess confidence
+            with torch.no_grad():
+                s_t = torch.from_numpy(state).float().unsqueeze(0)
+                q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
+            
+            # Get Q-values for all actions to assess confidence
+            with torch.no_grad():
+                s_t = torch.from_numpy(state).float().unsqueeze(0)
+                q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
+            
+            # Action-space: 0=Hold, 1=Long, 2=Short
+            q_hold = q_vals[0]
+            q_long = q_vals[1]
+            q_short = q_vals[2]
+            q_max = q_vals.max()
+            q_min = q_vals.min()
+            confidence = q_max - q_min
+            
+            sig = 0
+            
+            # Only trade if confident AND best action is significantly better than hold
+            if confidence >= self.confidence_threshold:
+                # Long signal: if long is best AND significantly better than hold
+                if q_long == q_max and q_long - q_hold > self.q_advantage_threshold:
+                    sig = 1
+                # Short signal: if short is best AND significantly better than hold
+                elif q_short == q_max and q_short - q_hold > self.q_advantage_threshold:
+                    sig = -1
+                # Otherwise hold (even if max confidence, protect against weak signals)
+                else:
+                    sig = 0
+            
+            signals.append(sig)
+            idxs.append(daily_feats.index[i])
+
+        if not signals:
+            return pd.Series(0, index=df.index)
+        ser = pd.Series(signals, index=pd.DatetimeIndex(idxs))
+        # Reindex to df and fill missing with 0 (Hold)
+        ser = ser.reindex(df.index).fillna(0).astype(int)
+        # Apply holding period to reduce reversals and transaction costs
+        return self._apply_holding_period(ser)
 
 def build_strategy_signal(strategy_name: str,
                           cfg: StrategyConfig,
                           feats: pd.DataFrame,
                           df: pd.DataFrame,
+                          predict_only: bool = True,
                           **kwargs) -> pd.Series:
     name = strategy_name.lower()
     if name not in STRATEGY_REGISTRY:
-        raise ValueError(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGY_REGISTRY.keys())}")
+        # Allow DQN strategy even if ML_STRATEGIES missing
+        if name == "daily_dqn":
+            STRATEGY_REGISTRY["daily_dqn"] = DailyDQNStrategy
+        else:
+            raise ValueError(f"Unknown strategy '{strategy_name}'. Available: {list(STRATEGY_REGISTRY.keys())}")
     strat_cls = STRATEGY_REGISTRY[name]
-    strat = strat_cls(cfg)
+    # For daily strategies, we don't rely on intraday features passed in
+    # Pass predict_only to ML strategies that support it
+    try:
+        strat = strat_cls(cfg, predict_only=predict_only)
+    except TypeError:
+        # Fallback for strategies that don't accept predict_only
+        strat = strat_cls(cfg)
     sig = strat.signal(feats, df)
     # Final sanity: ensure integer {-1,0,+1}
     sig = pd.Series(np.sign(sig).astype(int), index=sig.index)

@@ -46,3 +46,9 @@ simulation_output.log
 *.json
 *.png
 *.log
+
+# Exception: Keep pre-trained ML models
+!models/
+!models/*.pkl
+!models/metadata.json
+!models/README.md
