@@ -164,8 +164,35 @@ def predict_symbol(symbol: str, models: Dict) -> Dict:
         return result
 
 
+def calculate_position_size(confidence: float, signal: str, account_size: float = 100000.0) -> Dict:
+    """Calculate position size using Kelly Criterion."""
+    if signal == "HOLD" or confidence < 0.50:
+        return {'fraction': 0.0, 'dollar_amount': 0.0, 'shares': 0}
+    
+    # Kelly criterion: win_rate based on confidence
+    win_rate = 0.50 + (confidence * 0.20)  # 0.50 conf = 50% win, 0.90 conf = 70% win
+    loss_rate = 1.0 - win_rate
+    
+    # Assumptions: 1.5% avg win/loss per trade
+    avg_win = 0.015
+    avg_loss = 0.015
+    
+    kelly_fraction = (win_rate * avg_win - loss_rate * avg_loss) / avg_win if avg_win > 0 else 0
+    kelly_fraction = max(0, min(1.0, kelly_fraction))
+    
+    # Cap at 25% per trade for safety
+    position_fraction = min(kelly_fraction, 0.25)
+    dollar_amount = position_fraction * account_size
+    
+    return {
+        'fraction': position_fraction,
+        'dollar_amount': dollar_amount,
+        'shares': int(dollar_amount / 100)  # Estimate based on $100 share price
+    }
+
+
 def send_discord(predictions: list, webhook_url: str) -> bool:
-    """Send predictions to Discord webhook."""
+    """Send predictions to Discord webhook with position sizing."""
     if not webhook_url:
         print('[warn] No webhook URL provided')
         return False
@@ -185,28 +212,53 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         symbol = pred['symbol']
         price = pred.get('price', 'N/A')
         
-        # Get signals
+        # Get signals and confidence scores
         signals = []
+        confidence_scores = []
         for model_name, model_pred in pred.get('predictions', {}).items():
             if 'signal' in model_pred:
                 signals.append(model_pred['signal'])
+                confidence_scores.append(model_pred.get('confidence', 0))
         
         if not signals:
             continue
         
-        # Consensus
+        # Consensus and average confidence
         consensus = signals[0] if all(s == signals[0] for s in signals) else 'MIXED'
-        color = {'BUY': 0x00ff00, 'SELL': 0xff0000, 'HOLD': 0xffff00, 'MIXED': 0x808080}.get(consensus, 0x808080)
+        avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
         
+        # Calculate position size
+        pos_size = calculate_position_size(avg_confidence, consensus, account_size=100000.0)
+        
+        # Color coding
+        color_map = {
+            'BUY': 0x00ff00,
+            'SELL': 0xff0000,
+            'HOLD': 0xffff00,
+            'MIXED': 0x808080
+        }
+        color = color_map.get(consensus, 0x808080)
+        
+        # Build embed
         embed = {
             'title': f'{symbol}',
             'color': color,
             'fields': [
                 {'name': 'Signal', 'value': consensus, 'inline': True},
+                {'name': 'Confidence', 'value': f'{avg_confidence:.1%}', 'inline': True},
                 {'name': 'Price', 'value': f'${price}', 'inline': True},
             ]
         }
         
+        # Add position sizing
+        if consensus != 'MIXED' and pos_size['fraction'] > 0:
+            embed['fields'].extend([
+                {'name': 'Position %', 'value': f'{pos_size["fraction"]*100:.1f}%', 'inline': True},
+                {'name': 'Amount', 'value': f'${pos_size["dollar_amount"]:.0f}', 'inline': True},
+                {'name': 'Shares', 'value': str(pos_size['shares']), 'inline': True},
+            ])
+        
+        # Add per-model details
         for model_name, model_pred in pred.get('predictions', {}).items():
             if 'signal' in model_pred:
                 conf = model_pred.get('confidence', 0)
@@ -224,20 +276,22 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     
     payload = {
         'username': 'Trading Bot',
+        'content': f'**Daily Predictions** - {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}',
         'embeds': embeds
     }
     
     try:
         response = requests.post(webhook_url, json=payload, timeout=10)
-        if response.status_code == 204:
-            print(f'[ok] Discord: Posted {len(embeds)} embeds (HTTP 204)')
+        if response.status_code in [204, 200]:
+            print(f'[ok] Discord: Posted {len(embeds)} predictions (HTTP {response.status_code})')
             return True
         else:
             print(f'[warn] Discord: HTTP {response.status_code}')
+            if response.text:
+                print(f'      Response: {response.text[:200]}')
             return False
     except Exception as e:
         print(f'[error] Discord send failed: {e}')
-        return False
         return False
 
 
