@@ -167,6 +167,7 @@ def predict_symbol(symbol: str, models: Dict) -> Dict:
 def send_discord(predictions: list, webhook_url: str) -> bool:
     """Send predictions to Discord webhook."""
     if not webhook_url:
+        print('[warn] No webhook URL provided')
         return False
     
     try:
@@ -218,7 +219,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         embeds.append(embed)
     
     if not embeds:
-        print('[warn] No predictions to send')
+        print('[warn] No predictions to send to Discord')
         return False
     
     payload = {
@@ -228,9 +229,15 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     
     try:
         response = requests.post(webhook_url, json=payload, timeout=10)
-        return response.status_code == 204
+        if response.status_code == 204:
+            print(f'[ok] Discord: Posted {len(embeds)} embeds (HTTP 204)')
+            return True
+        else:
+            print(f'[warn] Discord: HTTP {response.status_code}')
+            return False
     except Exception as e:
         print(f'[error] Discord send failed: {e}')
+        return False
         return False
 
 
@@ -344,13 +351,15 @@ def main():
     
     print("="*50 + "\n")
     
-    # Send Discord
-    webhook = os.environ.get('WEBHOOK_URL')
-    if args.webhook and webhook:
+    # Send Discord (check both possible env var names)
+    webhook = os.environ.get('DISCORD_WEBHOOK_URL') or os.environ.get('WEBHOOK_URL')
+    if webhook:
         if send_discord(predictions, webhook):
             print('[ok] Sent to Discord')
         else:
-            print('[error] Discord send failed')
+            print('[warn] Discord send failed (webhook misconfigured?)')
+    elif args.webhook:
+        print('[warn] Discord flag set but no webhook URL in environment')
     
     # Save results
     with open('tomorrow_trades.json', 'w') as f:
