@@ -203,8 +203,10 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         print('[error] requests not installed')
         return False
     
-    # Build embeds
-    embeds = []
+    # Build embeds organized by strategy
+    embeds_by_strategy = {}
+    strategy_summary = {}
+    
     for pred in predictions:
         if 'error' in pred:
             continue
@@ -215,10 +217,12 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         # Get signals and confidence scores
         signals = []
         confidence_scores = []
+        model_details = {}
         for model_name, model_pred in pred.get('predictions', {}).items():
             if 'signal' in model_pred:
                 signals.append(model_pred['signal'])
                 confidence_scores.append(model_pred.get('confidence', 0))
+                model_details[model_name] = model_pred
         
         if not signals:
             continue
@@ -259,32 +263,78 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
             ])
         
         # Add per-model details
-        for model_name, model_pred in pred.get('predictions', {}).items():
-            if 'signal' in model_pred:
-                conf = model_pred.get('confidence', 0)
-                embed['fields'].append({
-                    'name': model_name,
-                    'value': f"{model_pred['signal']} ({conf:.1%})",
-                    'inline': True
-                })
+        for model_name in sorted(model_details.keys()):
+            model_pred = model_details[model_name]
+            conf = model_pred.get('confidence', 0)
+            embed['fields'].append({
+                'name': model_name,
+                'value': f"{model_pred['signal']} ({conf:.1%})",
+                'inline': True
+            })
+            
+            # Track strategy summary
+            if model_name not in strategy_summary:
+                strategy_summary[model_name] = {'BUY': 0, 'SELL': 0, 'HOLD': 0, 'MIXED': 0}
+            strategy_summary[model_name][model_pred['signal']] += 1
         
-        embeds.append(embed)
+        # Also track consensus for summary
+        if 'consensus' not in embeds_by_strategy:
+            embeds_by_strategy['consensus'] = []
+        embeds_by_strategy['consensus'].append(embed)
     
-    if not embeds:
+    if not embeds_by_strategy:
         print('[warn] No predictions to send to Discord')
         return False
+    
+    # Build summary message with strategy breakdown and position sizes
+    summary_lines = [f"**Daily Predictions** - {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"]
+    summary_lines.append("")
+    
+    # Summary by strategy with position sizes
+    total_positions = 0
+    total_amount = 0
+    for strategy in sorted(strategy_summary.keys()):
+        stats = strategy_summary[strategy]
+        total = sum(stats.values())
+        summary_lines.append(f"**{strategy}**")
+        summary_lines.append(f"  BUY: {stats['BUY']}/{total} | SELL: {stats['SELL']}/{total} | HOLD: {stats['HOLD']}/{total}")
+    
+    # Add position sizing summary
+    summary_lines.append("")
+    summary_lines.append("**Position Sizing Summary** (100K account)")
+    all_embeds = embeds_by_strategy.get('consensus', [])
+    for embed in all_embeds:
+        for field in embed['fields']:
+            if field['name'] == 'Amount' and field['value'] != '$0':
+                try:
+                    amount = float(field['value'].replace('$', '').replace(',', ''))
+                    total_amount += amount
+                    total_positions += 1
+                except:
+                    pass
+    
+    if total_positions > 0:
+        summary_lines.append(f"  Positions allocated: ${total_amount:,.0f}")
+        summary_lines.append(f"  Avg position size: ${total_amount/total_positions:,.0f}")
+    
+    summary_text = "\n".join(summary_lines)
     
     # Send embeds in batches of 10 (Discord limit)
     success = True
     batch_size = 10
+    embeds = embeds_by_strategy.get('consensus', [])
+    
     for i in range(0, len(embeds), batch_size):
         batch = embeds[i:i+batch_size]
         batch_num = (i // batch_size) + 1
         total_batches = (len(embeds) + batch_size - 1) // batch_size
         
+        # Add summary to first batch only
+        content = summary_text if batch_num == 1 else f"**Daily Predictions** - Batch {batch_num}/{total_batches}"
+        
         payload = {
             'username': 'Trading Bot',
-            'content': f'**Daily Predictions** - {datetime.now().strftime("%Y-%m-%d %H:%M UTC")} (Batch {batch_num}/{total_batches})',
+            'content': content,
             'embeds': batch
         }
         
