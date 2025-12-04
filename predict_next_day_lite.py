@@ -192,7 +192,7 @@ def calculate_position_size(confidence: float, signal: str, account_size: float 
 
 
 def send_discord(predictions: list, webhook_url: str) -> bool:
-    """Send predictions to Discord webhook with position sizing. Batches embeds in groups of 10."""
+    """Send predictions to Discord webhook organized by strategy with per-symbol position sizing."""
     if not webhook_url:
         print('[warn] No webhook URL provided')
         return False
@@ -203,9 +203,8 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         print('[error] requests not installed')
         return False
     
-    # Build embeds organized by strategy
-    embeds_by_strategy = {}
-    strategy_summary = {}
+    # Organize predictions by strategy
+    strategy_recommendations = {}  # {strategy: {signal: [(symbol, price, confidence, pos_size), ...]}}
     
     for pred in predictions:
         if 'error' in pred:
@@ -214,115 +213,143 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         symbol = pred['symbol']
         price = pred.get('price', 'N/A')
         
-        # Get signals and confidence scores
-        signals = []
-        confidence_scores = []
-        model_details = {}
+        # Get signals per strategy
         for model_name, model_pred in pred.get('predictions', {}).items():
-            if 'signal' in model_pred:
-                signals.append(model_pred['signal'])
-                confidence_scores.append(model_pred.get('confidence', 0))
-                model_details[model_name] = model_pred
-        
-        if not signals:
-            continue
-        
-        # Consensus and average confidence
-        consensus = signals[0] if all(s == signals[0] for s in signals) else 'MIXED'
-        avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
-        
-        # Calculate position size
-        pos_size = calculate_position_size(avg_confidence, consensus, account_size=100000.0)
-        
-        # Color coding
-        color_map = {
-            'BUY': 0x00ff00,
-            'SELL': 0xff0000,
-            'HOLD': 0xffff00,
-            'MIXED': 0x808080
-        }
-        color = color_map.get(consensus, 0x808080)
-        
-        # Build embed
-        embed = {
-            'title': f'{symbol}',
-            'color': color,
-            'fields': [
-                {'name': 'Signal', 'value': consensus, 'inline': True},
-                {'name': 'Confidence', 'value': f'{avg_confidence:.1%}', 'inline': True},
-                {'name': 'Price', 'value': f'${price}', 'inline': True},
-            ]
-        }
-        
-        # Add position sizing
-        if consensus != 'MIXED' and pos_size['fraction'] > 0:
-            embed['fields'].extend([
-                {'name': 'Position %', 'value': f'{pos_size["fraction"]*100:.1f}%', 'inline': True},
-                {'name': 'Amount', 'value': f'${pos_size["dollar_amount"]:.0f}', 'inline': True},
-                {'name': 'Shares', 'value': str(pos_size['shares']), 'inline': True},
-            ])
-        
-        # Add per-model details
-        for model_name in sorted(model_details.keys()):
-            model_pred = model_details[model_name]
-            conf = model_pred.get('confidence', 0)
-            embed['fields'].append({
-                'name': model_name,
-                'value': f"{model_pred['signal']} ({conf:.1%})",
-                'inline': True
-            })
+            if 'signal' not in model_pred:
+                continue
             
-            # Track strategy summary
-            if model_name not in strategy_summary:
-                strategy_summary[model_name] = {'BUY': 0, 'SELL': 0, 'HOLD': 0, 'MIXED': 0}
-            strategy_summary[model_name][model_pred['signal']] += 1
-        
-        # Also track consensus for summary
-        if 'consensus' not in embeds_by_strategy:
-            embeds_by_strategy['consensus'] = []
-        embeds_by_strategy['consensus'].append(embed)
+            signal = model_pred['signal']
+            confidence = model_pred.get('confidence', 0)
+            
+            # Calculate position size for this signal
+            pos_size = calculate_position_size(confidence, signal, account_size=100000.0)
+            
+            # Organize by strategy
+            if model_name not in strategy_recommendations:
+                strategy_recommendations[model_name] = {'BUY': [], 'SELL': [], 'HOLD': []}
+            
+            strategy_recommendations[model_name][signal].append({
+                'symbol': symbol,
+                'price': price,
+                'confidence': confidence,
+                'pos_size': pos_size
+            })
     
-    if not embeds_by_strategy:
+    if not strategy_recommendations:
         print('[warn] No predictions to send to Discord')
         return False
     
-    # Build summary message with strategy breakdown and position sizes
-    summary_lines = [f"**Daily Predictions** - {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"]
-    summary_lines.append("")
-    
-    # Summary by strategy with position sizes
+    # Build embeds organized by strategy with per-signal details
+    embeds = []
+    total_capital_allocated = 0
     total_positions = 0
-    total_amount = 0
-    for strategy in sorted(strategy_summary.keys()):
-        stats = strategy_summary[strategy]
-        total = sum(stats.values())
-        summary_lines.append(f"**{strategy}**")
-        summary_lines.append(f"  BUY: {stats['BUY']}/{total} | SELL: {stats['SELL']}/{total} | HOLD: {stats['HOLD']}/{total}")
     
-    # Add position sizing summary
+    for strategy in sorted(strategy_recommendations.keys()):
+        signals = strategy_recommendations[strategy]
+        
+        # Add BUY recommendations
+        if signals['BUY']:
+            embed = {
+                'title': f'{strategy.upper()} - BUY SIGNALS',
+                'color': 0x00ff00,
+                'fields': []
+            }
+            
+            for rec in sorted(signals['BUY'], key=lambda x: x['confidence'], reverse=True):
+                pos_fraction = rec['pos_size']['fraction']
+                pos_amount = rec['pos_size']['dollar_amount']
+                pos_shares = rec['pos_size']['shares']
+                
+                total_capital_allocated += pos_amount
+                total_positions += 1
+                
+                embed['fields'].append({
+                    'name': f"{rec['symbol']} @ ${rec['price']}",
+                    'value': (
+                        f"Conf: {rec['confidence']:.1%}\n"
+                        f"Position: {pos_fraction*100:.1f}% (${pos_amount:.0f}) - {pos_shares} shares"
+                    ),
+                    'inline': False
+                })
+            
+            embeds.append(embed)
+        
+        # Add SELL recommendations
+        if signals['SELL']:
+            embed = {
+                'title': f'{strategy.upper()} - SELL SIGNALS',
+                'color': 0xff0000,
+                'fields': []
+            }
+            
+            for rec in sorted(signals['SELL'], key=lambda x: x['confidence'], reverse=True):
+                pos_fraction = rec['pos_size']['fraction']
+                pos_amount = rec['pos_size']['dollar_amount']
+                pos_shares = rec['pos_size']['shares']
+                
+                total_capital_allocated += pos_amount
+                total_positions += 1
+                
+                embed['fields'].append({
+                    'name': f"{rec['symbol']} @ ${rec['price']}",
+                    'value': (
+                        f"Conf: {rec['confidence']:.1%}\n"
+                        f"Position: {pos_fraction*100:.1f}% (${pos_amount:.0f}) - {pos_shares} shares"
+                    ),
+                    'inline': False
+                })
+            
+            embeds.append(embed)
+        
+        # Add HOLD recommendations (optional, only if there are any)
+        if signals['HOLD']:
+            embed = {
+                'title': f'{strategy.upper()} - HOLD SIGNALS',
+                'color': 0xffff00,
+                'fields': []
+            }
+            
+            for rec in sorted(signals['HOLD'], key=lambda x: x['confidence'], reverse=True):
+                embed['fields'].append({
+                    'name': f"{rec['symbol']} @ ${rec['price']}",
+                    'value': f"Conf: {rec['confidence']:.1%}",
+                    'inline': False
+                })
+            
+            embeds.append(embed)
+    
+    if not embeds:
+        print('[warn] No embeds to send to Discord')
+        return False
+    
+    # Build summary message
+    summary_lines = [f"**Daily Trading Recommendations** - {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"]
     summary_lines.append("")
-    summary_lines.append("**Position Sizing Summary** (100K account)")
-    all_embeds = embeds_by_strategy.get('consensus', [])
-    for embed in all_embeds:
-        for field in embed['fields']:
-            if field['name'] == 'Amount' and field['value'] != '$0':
-                try:
-                    amount = float(field['value'].replace('$', '').replace(',', ''))
-                    total_amount += amount
-                    total_positions += 1
-                except:
-                    pass
+    summary_lines.append("**Summary by Strategy:**")
     
+    for strategy in sorted(strategy_recommendations.keys()):
+        signals = strategy_recommendations[strategy]
+        total = sum(len(recs) for recs in signals.values())
+        buy_count = len(signals['BUY'])
+        sell_count = len(signals['SELL'])
+        hold_count = len(signals['HOLD'])
+        
+        summary_lines.append(
+            f"**{strategy}**: {buy_count} BUY | {sell_count} SELL | {hold_count} HOLD"
+        )
+    
+    summary_lines.append("")
+    summary_lines.append("**Total Capital Allocation** (100K account)")
+    summary_lines.append(f"  Active Positions: {total_positions}")
+    summary_lines.append(f"  Total Allocated: ${total_capital_allocated:,.0f}")
     if total_positions > 0:
-        summary_lines.append(f"  Positions allocated: ${total_amount:,.0f}")
-        summary_lines.append(f"  Avg position size: ${total_amount/total_positions:,.0f}")
+        summary_lines.append(f"  Avg Position Size: ${total_capital_allocated/total_positions:,.0f}")
     
     summary_text = "\n".join(summary_lines)
     
     # Send embeds in batches of 10 (Discord limit)
     success = True
     batch_size = 10
-    embeds = embeds_by_strategy.get('consensus', [])
     
     for i in range(0, len(embeds), batch_size):
         batch = embeds[i:i+batch_size]
@@ -330,7 +357,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         total_batches = (len(embeds) + batch_size - 1) // batch_size
         
         # Add summary to first batch only
-        content = summary_text if batch_num == 1 else f"**Daily Predictions** - Batch {batch_num}/{total_batches}"
+        content = summary_text if batch_num == 1 else f"**Daily Trading Recommendations** - Batch {batch_num}/{total_batches}"
         
         payload = {
             'username': 'Trading Bot',
@@ -341,7 +368,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         try:
             response = requests.post(webhook_url, json=payload, timeout=10)
             if response.status_code in [204, 200]:
-                print(f'[ok] Discord Batch {batch_num}/{total_batches}: {len(batch)} predictions (HTTP {response.status_code})')
+                print(f'[ok] Discord Batch {batch_num}/{total_batches}: {len(batch)} embeds (HTTP {response.status_code})')
             else:
                 print(f'[warn] Discord Batch {batch_num}/{total_batches}: HTTP {response.status_code}')
                 if response.text:
