@@ -41,8 +41,6 @@ from simulation_pipeline import (
 )
 from data_loader import load_yfinance, load_csv, load_alpha_vantage
 import yfinance as yf
-from trade_history import append_trade, save_stats
-from ascii_charts import equity_curve_to_ascii, simple_metric_chart
 from datetime import datetime, timedelta
 
 def is_weekly_run():
@@ -206,10 +204,7 @@ def run_symbol_strategy(symbol: str,
     bt = Backtester(exec_cfg)
     res = bt.run(df, feats, signal, artifact_paths=artifacts)
 
-    # 3) Track historical trades
-    run_timestamp = datetime.now().isoformat()
-    if not res.trades.empty:
-        append_trade(symbol, strategy_name, res.trades, run_timestamp)
+    # 3) Track historical trades (results saved to results/ folder)
 
     # 4) Walk-forward (out-of-sample)
     wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
@@ -514,8 +509,7 @@ def main():
             print(f"{strat:<20} ${avg_pnl_dollar:>+12,.2f} {avg_pnl_pct:>+10.2f}% ${total_pnl_dollar:>+12,.2f} {total_trades:>13} {symbol_count:>9}")
     print("="*100 + "\n")
 
-    # Update historical trade statistics
-    trade_stats = save_stats()
+    # Trade statistics generated during backtest runs
     
     # Calculate current run statistics
     current_run_trades = sum(
@@ -536,11 +530,8 @@ def main():
     weekly_run = is_weekly_run()
     if weekly_run:
         print(f"[ok] Weekly Run - Full Trade History:")
-        print(f"     Total historical trades: {trade_stats.get('total_trades', 0)}")
-        print(f"     Overall win rate: {trade_stats.get('overall', {}).get('win_rate', 'N/A')}")
-        print(f"     Overall P&L: ${trade_stats.get('overall', {}).get('total_pnl', 0):.2f}")
-        print(f"     Current run trades: {current_run_trades}")
-        print(f"     Current run P&L: ${current_run_pnl:+,.2f}")
+        print(f"     Total trades in this run: {current_run_trades}")
+        print(f"     P&L for this run: ${current_run_pnl:+,.2f}")
     else:
         print(f"[ok] Current Run Statistics:")
         print(f"     Trades in this run: {current_run_trades}")

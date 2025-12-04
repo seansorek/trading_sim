@@ -192,7 +192,7 @@ def calculate_position_size(confidence: float, signal: str, account_size: float 
 
 
 def send_discord(predictions: list, webhook_url: str) -> bool:
-    """Send predictions to Discord webhook with position sizing."""
+    """Send predictions to Discord webhook with position sizing. Batches embeds in groups of 10."""
     if not webhook_url:
         print('[warn] No webhook URL provided')
         return False
@@ -274,25 +274,34 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         print('[warn] No predictions to send to Discord')
         return False
     
-    payload = {
-        'username': 'Trading Bot',
-        'content': f'**Daily Predictions** - {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}',
-        'embeds': embeds
-    }
+    # Send embeds in batches of 10 (Discord limit)
+    success = True
+    batch_size = 10
+    for i in range(0, len(embeds), batch_size):
+        batch = embeds[i:i+batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (len(embeds) + batch_size - 1) // batch_size
+        
+        payload = {
+            'username': 'Trading Bot',
+            'content': f'**Daily Predictions** - {datetime.now().strftime("%Y-%m-%d %H:%M UTC")} (Batch {batch_num}/{total_batches})',
+            'embeds': batch
+        }
+        
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            if response.status_code in [204, 200]:
+                print(f'[ok] Discord Batch {batch_num}/{total_batches}: {len(batch)} predictions (HTTP {response.status_code})')
+            else:
+                print(f'[warn] Discord Batch {batch_num}/{total_batches}: HTTP {response.status_code}')
+                if response.text:
+                    print(f'      Response: {response.text[:200]}')
+                success = False
+        except Exception as e:
+            print(f'[error] Discord Batch {batch_num}/{total_batches} failed: {e}')
+            success = False
     
-    try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        if response.status_code in [204, 200]:
-            print(f'[ok] Discord: Posted {len(embeds)} predictions (HTTP {response.status_code})')
-            return True
-        else:
-            print(f'[warn] Discord: HTTP {response.status_code}')
-            if response.text:
-                print(f'      Response: {response.text[:200]}')
-            return False
-    except Exception as e:
-        print(f'[error] Discord send failed: {e}')
-        return False
+    return success
 
 
 def main():
@@ -413,11 +422,6 @@ def main():
             print('[ok] Successfully sent predictions to Discord!')
         else:
             print('[error] Failed to send to Discord')
-    else:
-        if args.webhook:
-            print('[error] Discord flag set but DISCORD_WEBHOOK_URL environment variable not found')
-        else:
-            print('[info] Discord URL not configured (skipping Discord send)')
     
     # Save results
     with open('tomorrow_trades.json', 'w') as f:
