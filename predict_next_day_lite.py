@@ -276,9 +276,13 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
                     f"Pos: {pos_fraction*100:.1f}% (${pos_amount:,.0f}, {pos_shares} sh)"
                 )
             
+            description = '\n'.join(lines)
+            if len(description) > 4096:
+                description = description[:4093] + '...'
+            
             embed = {
                 'title': f'{display_name} - BUY SIGNALS ({len(buy_recs)})',
-                'description': '\n'.join(lines),
+                'description': description,
                 'color': 0x00ff00
             }
             embeds.append(embed)
@@ -302,9 +306,13 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
                     f"Pos: {pos_fraction*100:.1f}% (${pos_amount:,.0f}, {pos_shares} sh)"
                 )
             
+            description = '\n'.join(lines)
+            if len(description) > 4096:
+                description = description[:4093] + '...'
+            
             embed = {
                 'title': f'{display_name} - SELL SIGNALS ({len(sell_recs)})',
-                'description': '\n'.join(lines),
+                'description': description,
                 'color': 0xff0000
             }
             embeds.append(embed)
@@ -317,9 +325,13 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
             for rec in hold_recs:
                 lines.append(f"**{rec['symbol']}** ${rec['price']:.2f} | Conf: {rec['confidence']:.1%}")
             
+            description = '\n'.join(lines)
+            if len(description) > 4096:
+                description = description[:4093] + '...'
+            
             embed = {
                 'title': f'{display_name} - HOLD SIGNALS ({len(hold_recs)})',
-                'description': '\n'.join(lines),
+                'description': description,
                 'color': 0xffff00
             }
             embeds.append(embed)
