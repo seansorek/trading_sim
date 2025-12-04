@@ -4,3 +4,5 @@ requests
 yfinance
 scikit-learn
 xgboost
+torch
+skorch
