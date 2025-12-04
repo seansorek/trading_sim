@@ -247,6 +247,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         return False
     
     # Build embeds organized by strategy with per-signal details
+    # Use one compact embed per strategy/signal type
     embeds = []
     total_capital_allocated = 0
     total_positions = 0
@@ -257,13 +258,11 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         
         # Add BUY recommendations
         if signals['BUY']:
-            embed = {
-                'title': f'{display_name} - BUY SIGNALS',
-                'color': 0x00ff00,
-                'fields': []
-            }
+            buy_recs = sorted(signals['BUY'], key=lambda x: x['confidence'], reverse=True)
             
-            for rec in sorted(signals['BUY'], key=lambda x: x['confidence'], reverse=True):
+            # Build compact description with all symbols
+            lines = []
+            for rec in buy_recs:
                 pos_fraction = rec['pos_size']['fraction']
                 pos_amount = rec['pos_size']['dollar_amount']
                 pos_shares = rec['pos_size']['shares']
@@ -271,26 +270,25 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
                 total_capital_allocated += pos_amount
                 total_positions += 1
                 
-                embed['fields'].append({
-                    'name': f"{rec['symbol']} @ ${rec['price']}",
-                    'value': (
-                        f"Conf: {rec['confidence']:.1%}\n"
-                        f"Position: {pos_fraction*100:.1f}% (${pos_amount:.0f}) - {pos_shares} shares"
-                    ),
-                    'inline': False
-                })
+                lines.append(
+                    f"**{rec['symbol']}** ${rec['price']:.2f} | "
+                    f"Conf: {rec['confidence']:.1%} | "
+                    f"Pos: {pos_fraction*100:.1f}% (${pos_amount:,.0f}, {pos_shares} sh)"
+                )
             
+            embed = {
+                'title': f'{display_name} - BUY SIGNALS ({len(buy_recs)})',
+                'description': '\n'.join(lines),
+                'color': 0x00ff00
+            }
             embeds.append(embed)
         
         # Add SELL recommendations
         if signals['SELL']:
-            embed = {
-                'title': f'{display_name} - SELL SIGNALS',
-                'color': 0xff0000,
-                'fields': []
-            }
+            sell_recs = sorted(signals['SELL'], key=lambda x: x['confidence'], reverse=True)
             
-            for rec in sorted(signals['SELL'], key=lambda x: x['confidence'], reverse=True):
+            lines = []
+            for rec in sell_recs:
                 pos_fraction = rec['pos_size']['fraction']
                 pos_amount = rec['pos_size']['dollar_amount']
                 pos_shares = rec['pos_size']['shares']
@@ -298,32 +296,32 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
                 total_capital_allocated += pos_amount
                 total_positions += 1
                 
-                embed['fields'].append({
-                    'name': f"{rec['symbol']} @ ${rec['price']}",
-                    'value': (
-                        f"Conf: {rec['confidence']:.1%}\n"
-                        f"Position: {pos_fraction*100:.1f}% (${pos_amount:.0f}) - {pos_shares} shares"
-                    ),
-                    'inline': False
-                })
+                lines.append(
+                    f"**{rec['symbol']}** ${rec['price']:.2f} | "
+                    f"Conf: {rec['confidence']:.1%} | "
+                    f"Pos: {pos_fraction*100:.1f}% (${pos_amount:,.0f}, {pos_shares} sh)"
+                )
             
+            embed = {
+                'title': f'{display_name} - SELL SIGNALS ({len(sell_recs)})',
+                'description': '\n'.join(lines),
+                'color': 0xff0000
+            }
             embeds.append(embed)
         
-        # Add HOLD recommendations (optional, only if there are any)
+        # Add HOLD recommendations
         if signals['HOLD']:
+            hold_recs = sorted(signals['HOLD'], key=lambda x: x['confidence'], reverse=True)
+            
+            lines = []
+            for rec in hold_recs:
+                lines.append(f"**{rec['symbol']}** ${rec['price']:.2f} | Conf: {rec['confidence']:.1%}")
+            
             embed = {
-                'title': f'{display_name} - HOLD SIGNALS',
-                'color': 0xffff00,
-                'fields': []
+                'title': f'{display_name} - HOLD SIGNALS ({len(hold_recs)})',
+                'description': '\n'.join(lines),
+                'color': 0xffff00
             }
-            
-            for rec in sorted(signals['HOLD'], key=lambda x: x['confidence'], reverse=True):
-                embed['fields'].append({
-                    'name': f"{rec['symbol']} @ ${rec['price']}",
-                    'value': f"Conf: {rec['confidence']:.1%}",
-                    'inline': False
-                })
-            
             embeds.append(embed)
     
     if not embeds:
