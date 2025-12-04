@@ -360,6 +360,10 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     success = True
     batch_size = 10
     
+    print(f'[info] Sending {len(embeds)} embeds to Discord')
+    for idx, embed in enumerate(embeds):
+        print(f'  Embed {idx+1}: {embed["title"]} with {len(embed["fields"])} symbols')
+    
     for i in range(0, len(embeds), batch_size):
         batch = embeds[i:i+batch_size]
         batch_num = (i // batch_size) + 1
