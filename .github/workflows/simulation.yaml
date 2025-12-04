@@ -3,7 +3,10 @@ name: Daily Trading Predictions
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # Every day at 07:00 UTC
+    - cron: "0 6 * * *"   # Every day at 06:00 UTC
+  push:
+    branches:
+      - main
   workflow_dispatch:       # Manual trigger
 
 permissions:
