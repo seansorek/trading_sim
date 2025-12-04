@@ -203,6 +203,13 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         print('[error] requests not installed')
         return False
     
+    # Display name mapping for strategies
+    strategy_display_names = {
+        'dqn_agent': 'DQN Agent',
+        'ordinal_logistic': 'Ordinal Logistic',
+        'xgboost': 'XGBoost'
+    }
+    
     # Organize predictions by strategy
     strategy_recommendations = {}  # {strategy: {signal: [(symbol, price, confidence, pos_size), ...]}}
     
@@ -246,11 +253,12 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     
     for strategy in sorted(strategy_recommendations.keys()):
         signals = strategy_recommendations[strategy]
+        display_name = strategy_display_names.get(strategy, strategy)
         
         # Add BUY recommendations
         if signals['BUY']:
             embed = {
-                'title': f'{strategy.upper()} - BUY SIGNALS',
+                'title': f'{display_name} - BUY SIGNALS',
                 'color': 0x00ff00,
                 'fields': []
             }
@@ -277,7 +285,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         # Add SELL recommendations
         if signals['SELL']:
             embed = {
-                'title': f'{strategy.upper()} - SELL SIGNALS',
+                'title': f'{display_name} - SELL SIGNALS',
                 'color': 0xff0000,
                 'fields': []
             }
@@ -304,7 +312,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
         # Add HOLD recommendations (optional, only if there are any)
         if signals['HOLD']:
             embed = {
-                'title': f'{strategy.upper()} - HOLD SIGNALS',
+                'title': f'{display_name} - HOLD SIGNALS',
                 'color': 0xffff00,
                 'fields': []
             }
@@ -329,13 +337,14 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     
     for strategy in sorted(strategy_recommendations.keys()):
         signals = strategy_recommendations[strategy]
+        display_name = strategy_display_names.get(strategy, strategy)
         total = sum(len(recs) for recs in signals.values())
         buy_count = len(signals['BUY'])
         sell_count = len(signals['SELL'])
         hold_count = len(signals['HOLD'])
         
         summary_lines.append(
-            f"**{strategy}**: {buy_count} BUY | {sell_count} SELL | {hold_count} HOLD"
+            f"**{display_name}**: {buy_count} BUY | {sell_count} SELL | {hold_count} HOLD"
         )
     
     summary_lines.append("")
