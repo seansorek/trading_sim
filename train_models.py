@@ -1,617 +1,437 @@
 #!/usr/bin/env python3
 """
-train_models.py
+train_models.py — Single unified training entry point.
 
-Pre-train ML models on historical data and save them for deployment.
-Run this locally before committing to avoid retraining on GitHub Actions.
-
-Features:
-- Local data caching to avoid re-downloading
-- Bayesian hyperparameter optimization
-- Comprehensive evaluation (Precision, Recall, F1, Sharpe, Max Drawdown)
-- Multi-month training data support
+Trains DailyLogistic and/or DailyXGBoost models on historical daily data
+and registers them in the SQLite model registry.
 
 Usage:
-    python train_models.py --symbols AAPL,MSFT,GOOGL --days 180
-    python train_models.py --symbols AAPL,MSFT,GOOGL --days 180 --optimize
+    python train_models.py --symbols AAPL,MSFT,SPY --days 1000 --models logistic,xgboost
+    python train_models.py --symbols AAPL,MSFT,SPY --days 1000 --models xgboost --optimize
 """
-
-import os
 import argparse
-import pickle
 import json
+import logging
+import os
+import pickle
 from datetime import datetime, timedelta
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score, accuracy_score
+from sklearn.preprocessing import StandardScaler
+
+try:
+    import xgboost as xgb
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
 
 try:
     from skopt import BayesSearchCV
-    from skopt.space import Real, Integer, Categorical
+    from skopt.space import Real, Integer
     HAS_SKOPT = True
 except ImportError:
     HAS_SKOPT = False
-    print("[warn] scikit-optimize not installed. Bayesian optimization disabled.")
-    print("       Install with: pip install scikit-optimize")
-
-from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
-from sklearn.model_selection import train_test_split
 
 from data_loader import load_yfinance
-from simulation_pipeline import make_features
-from daily_features import make_daily_features
-from ml_strategies import OrdinalLogisticStrategy, XGBoostStrategy
-from base_strategy import StrategyConfig
+from daily_features import (
+    FEATURE_COLS,
+    FEATURE_SET_NAME,
+    discretize_labels,
+    make_daily_features,
+)
+from db import DB
 
-def load_or_fetch_data(symbol, start_date, end_date, interval, cache_dir="data/cache"):
-    """
-    Load data from cache if available, otherwise fetch and cache it.
-    
-    Args:
-        symbol: Stock symbol
-        start_date: Start date string (YYYY-MM-DD)
-        end_date: End date string (YYYY-MM-DD)
-        interval: Data interval
-        cache_dir: Directory to store cached data
-    
-    Returns:
-        DataFrame with OHLCV data
-    """
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    # Create cache filename
-    cache_file = os.path.join(
-        cache_dir,
-        f"{symbol}_{start_date}_{end_date}_{interval}.pkl"
-    )
-    
-    # Try to load from cache
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file, 'rb') as f:
-                df = pickle.load(f)
-            print(f"  [cache] Loaded {symbol} from cache")
-            return df
-        except Exception as e:
-            print(f"  [warn] Cache load failed for {symbol}: {e}")
-    
-    # Fetch fresh data
-    print(f"  [fetch] Downloading {symbol}...")
-    df = load_yfinance(symbol, start=start_date, end=end_date, interval=interval)
-    
-    # Cache for next time
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/train_models.log"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
+
+
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+
+def _preprocess(X: np.ndarray) -> np.ndarray:
+    """Replace inf/nan with 0; clip to ±5 std per column."""
+    X = np.where(np.isinf(X), np.nan, X)
+    X = np.nan_to_num(X, nan=0.0)
+    for col in range(X.shape[1]):
+        col_data = X[:, col]
+        std = np.std(col_data)
+        if std > 0:
+            mean = np.mean(col_data)
+            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
+    return X
+
+
+def _load_symbol(
+    symbol: str, start: str, end: str, db: DB
+) -> pd.DataFrame | None:
+    """Fetch daily bars, cache in DB, return DataFrame."""
+    cached = db.load_bars(symbol, "1d", start, end)
+    if cached is not None and len(cached) >= 50:
+        logger.info("  %s: loaded %d bars from DB cache", symbol, len(cached))
+        return cached
+
+    logger.info("  %s: fetching from yfinance...", symbol)
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(df, f)
-    except Exception as e:
-        print(f"  [warn] Cache save failed for {symbol}: {e}")
-    
+        df = load_yfinance(symbol, start=start, end=end, interval="1d")
+    except Exception as exc:
+        logger.warning("  %s: fetch failed: %s", symbol, exc)
+        return None
+
+    if df is None or len(df) < 50:
+        logger.warning("  %s: insufficient data (%s rows)", symbol, len(df) if df is not None else 0)
+        return None
+
+    db.upsert_bars(symbol, "1d", df)
     return df
 
 
-def calculate_profit_metrics(y_true, y_pred, returns):
+def _prepare_data(
+    symbols: list[str], days: int, db: DB
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
-    Calculate profit-based metrics: Sharpe ratio and max drawdown.
-    
-    Args:
-        y_true: True labels {-1, 0, 1}
-        y_pred: Predicted labels {-1, 0, 1}
-        returns: Actual forward returns for each prediction
-    
-    Returns:
-        dict with sharpe_ratio and max_drawdown
-    """
-    # Calculate strategy returns (position * forward return)
-    strategy_returns = y_pred * returns
-    
-    # Remove zeros (no position)
-    active_returns = strategy_returns[strategy_returns != 0]
-    
-    if len(active_returns) < 2:
-        return {'sharpe_ratio': 0.0, 'max_drawdown_pct': 0.0}
-    
-    # Sharpe ratio (annualized for 5m bars: sqrt(252*78) = 140)
-    sharpe = np.mean(active_returns) / (np.std(active_returns) + 1e-8) * np.sqrt(140)
-    
-    # Max drawdown
-    cumulative = np.cumprod(1 + strategy_returns)
-    running_max = np.maximum.accumulate(cumulative)
-    drawdown = (cumulative - running_max) / (running_max + 1e-8)
-    max_dd = np.min(drawdown) * 100  # Convert to percentage
-    
-    return {
-        'sharpe_ratio': float(sharpe),
-        'max_drawdown_pct': float(max_dd)
-    }
+    Collect and pool training data across symbols.
 
+    Returns (X, y, symbol_list_used).
+    Uses temporal ordering: data is sorted by (symbol, date) and NOT shuffled,
+    preserving the time structure needed for the train/test split.
+    """
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-def evaluate_model(model, X_test, y_test, returns_test, scaler=None):
-    """
-    Comprehensive model evaluation with classification and profit metrics.
-    
-    Args:
-        model: Trained model
-        X_test: Test features
-        y_test: Test labels {0, 1, 2}
-        returns_test: Actual forward returns
-        scaler: Optional StandardScaler for preprocessing
-    
-    Returns:
-        dict with all evaluation metrics
-    """
-    # Preprocess if scaler provided
-    if scaler is not None:
-        X_test = scaler.transform(X_test)
-    
-    # Predictions
-    y_pred = model.predict(X_test)
-    
-    # Classification metrics
-    precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-    recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-    accuracy = np.mean(y_test == y_pred)
-    
-    # Profit metrics (convert back to {-1, 0, 1})
-    y_pred_signals = y_pred - 1
-    profit_metrics = calculate_profit_metrics(y_test - 1, y_pred_signals, returns_test)
-    
-    return {
-        'accuracy': float(accuracy),
-        'precision': float(precision),
-        'recall': float(recall),
-        'f1_score': float(f1),
-        'sharpe_ratio': profit_metrics['sharpe_ratio'],
-        'max_drawdown_pct': profit_metrics['max_drawdown_pct']
-    }
+    all_X: list[np.ndarray] = []
+    all_y: list[np.ndarray] = []
+    used_symbols: list[str] = []
 
-
-def train_and_save_models(symbols, days=180, interval="5m", optimize_hyperparams=False):
-    """
-    Train models on historical data and save to models/ directory.
-    
-    Args:
-        symbols: List of stock symbols to train on
-        days: Number of days of historical data to use (default 180 = ~6 months)
-        interval: Data interval (default 5m)
-        optimize_hyperparams: Use Bayesian optimization for hyperparameter tuning
-    
-    Note: Yahoo Finance has data limits:
-        - 1m: last 7 days only
-        - 5m/15m/30m: last 60 days only (will auto-adjust if you request more)
-        - 60m/90m: last 2 years
-        - 1d and above: many years available
-    """
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("data/cache", exist_ok=True)
-    
-    # Warn about data limits for intraday intervals
-    if interval in ['1m'] and days > 7:
-        print(f"[warn] Requested {days} days but {interval} data limited to last 7 days. Will auto-adjust.")
-    elif interval in ['5m', '15m', '30m'] and days > 60:
-        print(f"[warn] Requested {days} days but {interval} data limited to last 60 days. Will auto-adjust.")
-    
-    # Calculate date range
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    
-    print(f"Training models on {days} days of data ({start_date.date()} to {end_date.date()})")
-    print(f"Symbols: {', '.join(symbols)}")
-    print(f"Interval: {interval}\n")
-    
-    # Create dummy config (strategy params don't affect model training)
-    cfg = StrategyConfig(name="training", holding_period=0)
-    
-    model_metadata = {
-        "training_date": datetime.now().isoformat(),
-        "training_days": days,
-        "interval": interval,
-        "symbols": symbols,
-        "models": {}
-    }
-    
-    # Collect all training data
-    all_features = []
-    all_labels = []
-    all_returns = []
-    
-    print("Loading and processing data...")
-    data_sources = []  # Track where data comes from
-    
     for symbol in symbols:
-        try:
-            df = load_or_fetch_data(
-                symbol,
-                start_date.strftime("%Y-%m-%d"),
-                end_date.strftime("%Y-%m-%d"),
-                interval
-            )
-            
-            if len(df) < 100:
-                print(f"  [warn] {symbol}: Insufficient data ({len(df)} bars), skipping")
-                continue
-            
-            # Generate features and labels depending on interval
-            if interval == '1d':
-                feats = make_daily_features(df)
-                future_returns = feats['fwd_ret_1d']
-            else:
-                feats = make_features(df)
-                future_returns = df['close'].pct_change(5).shift(-5).fillna(0)
-            
-            # Discretize labels
-            if interval == '1d':
-                labels = np.zeros(len(future_returns), dtype=int)
-                labels[future_returns > 0.002] = 1   # BUY (+0.2% next day)
-                labels[future_returns < -0.002] = -1  # SELL (-0.2% next day)
-            else:
-                labels = np.zeros(len(future_returns), dtype=int)
-                labels[future_returns > 0.005] = 1   # BUY
-                labels[future_returns < -0.005] = -1  # SELL
-            
-            # Extract feature columns
-            if interval == '1d':
-                feature_cols = [
-                    'ret_1d','ret_5d','ret_10d','vol_20d','sma_10','sma_20','sma_50',
-                    'ma_spread_10_20','ma_spread_20_50','macd','macd_signal','macd_hist',
-                    'rsi_14','atr_14','price_vs_sma20','price_vs_sma50','vol_z_20','volume_ma_20'
-                ]
-            else:
-                feature_cols = ['ret_1m', 'ma_spread', 'vol_10', 'rsi_14', 'vol_z', 
-                                'momentum_5', 'momentum_20', 'vp_ratio', 'vol_regime', 'price_position']
-            
-            # Check which features exist
-            available_features = [col for col in feature_cols if col in feats.columns]
-            if not available_features:
-                print(f"  [warn] {symbol}: No features available, skipping")
-                continue
-            
-            X = feats[available_features].values
-            y = labels  # labels is already a numpy array
-            
-            # Remove rows with NaN features (real data validation)
-            valid_mask = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
-            # Also remove rows with inf values which can occur in feature calculation
-            valid_mask = valid_mask & ~np.isinf(X).any(axis=1)
-            # Remove the last few rows where forward returns might be NaN (end of series)
-            valid_mask = valid_mask & ~np.isnan(future_returns.values)
-            
-            X_clean = X[valid_mask]
-            y_clean = y[valid_mask]
-            
-            if len(X_clean) < 50:
-                print(f"  [warn] {symbol}: Insufficient clean data ({len(X_clean)} samples), skipping")
-                continue
-            
-            # Store actual returns for profit metrics
-            future_returns_clean = future_returns.values[valid_mask]
-            
-            all_features.append(X_clean)
-            all_labels.append(y_clean)
-            all_returns.append(future_returns_clean)
-            
-            # Track data source (yfinance or cache)
-            data_source = "[cache]" if os.path.exists(
-                os.path.join("data/cache", f"{symbol}_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}_{interval}.pkl")
-            ) else "[yfinance]"
-            data_sources.append(f"{symbol} {data_source}")
-            
-            print(f"  [ok] {symbol}: {len(X_clean)} samples (real data from {data_source})")
-            
-        except Exception as e:
-            print(f"  [error] {symbol}: {e}")
+        df = _load_symbol(symbol, start, end, db)
+        if df is None:
             continue
-    
-    if not all_features:
-        print("\n[error] No training data collected. Exiting.")
-        return
-    
-    # Combine all data
-    X_combined = np.vstack(all_features)
-    y_combined = np.hstack(all_labels)
-    returns_combined = np.hstack(all_returns)
-    
-    print(f"\n[ok] Data loaded from {len(data_sources)} symbols (all from real yfinance data):")
-    for source in data_sources:
-        print(f"    {source}")
-    
-    print(f"\nTotal training samples: {len(X_combined)}")
-    print(f"Class distribution: BUY={np.sum(y_combined==1)}, HOLD={np.sum(y_combined==0)}, SELL={np.sum(y_combined==-1)}")
-    
-    # Split into train/test (80/20)
-    X_train, X_test, y_train, y_test, returns_train, returns_test = train_test_split(
-        X_combined, y_combined, returns_combined,
-        test_size=0.2,
+
+        try:
+            feats = make_daily_features(df)
+        except Exception as exc:
+            logger.warning("  %s: feature computation failed: %s", symbol, exc)
+            continue
+
+        # Drop rows where forward return is not available
+        feats = feats.dropna(subset=["fwd_ret_1d"])
+        if len(feats) < 50:
+            logger.warning("  %s: too few valid rows (%d) after dropna", symbol, len(feats))
+            continue
+
+        X_sym = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
+        y_sym = discretize_labels(feats["fwd_ret_1d"].values)
+
+        all_X.append(X_sym)
+        all_y.append(y_sym)
+        used_symbols.append(symbol)
+        logger.info("  %s: %d samples, class dist %s", symbol, len(y_sym), np.bincount(y_sym).tolist())
+
+    if not all_X:
+        raise RuntimeError("No usable training data across all symbols.")
+
+    X = np.vstack(all_X)
+    y = np.concatenate(all_y)
+    return X, y, used_symbols
+
+
+def _temporal_split(
+    X: np.ndarray, y: np.ndarray, test_frac: float = 0.20
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Temporal train/test split — first (1-test_frac) rows for train,
+    last test_frac rows for test.
+
+    Avoids data leakage from shuffling time-series data.
+    """
+    split = int(len(X) * (1 - test_frac))
+    return X[:split], X[split:], y[:split], y[split:]
+
+
+def _make_artifact_path(model_key: str, version: int) -> str:
+    Path("models").mkdir(exist_ok=True)
+    return f"models/{model_key}_v{version}.pkl"
+
+
+def _save_and_register(
+    model_key: str,
+    model_obj,
+    scaler: StandardScaler,
+    train_accuracy: float,
+    test_accuracy: float,
+    test_f1: float,
+    confidence_threshold: float,
+    train_symbols: list[str],
+    days: int,
+    db: DB,
+) -> int:
+    """Save pickle and register in DB. Returns new version number."""
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # Reserve version number from DB first so we can name the file
+    version = db.register_model(
+        model_key=model_key,
+        artifact_path="PLACEHOLDER",
+        feature_contract=FEATURE_COLS,
+        trained_on=train_symbols,
+        train_start=start,
+        train_end=end,
+        train_samples=0,
+        test_samples=0,
+        train_accuracy=train_accuracy,
+        test_accuracy=test_accuracy,
+        test_f1=test_f1,
+        label_map=LABEL_MAP,
+        feature_set_name=FEATURE_SET_NAME,
+    )
+
+    artifact_path = _make_artifact_path(model_key, version)
+    artifact = {
+        "model": model_obj,
+        "scaler": scaler,
+        "feature_contract": FEATURE_COLS,
+        "feature_set_name": FEATURE_SET_NAME,
+        "label_map": LABEL_MAP,
+        "confidence_threshold": confidence_threshold,
+        "trained_at": datetime.now().isoformat(),
+        "train_symbols": train_symbols,
+        "train_accuracy": train_accuracy,
+        "test_accuracy": test_accuracy,
+        "test_f1": test_f1,
+    }
+    with open(artifact_path, "wb") as f:
+        pickle.dump(artifact, f)
+
+    # Also write to the canonical path (no version suffix) for backward compat
+    canonical = f"models/{model_key}.pkl"
+    with open(canonical, "wb") as f:
+        pickle.dump(artifact, f)
+
+    # Update artifact_path in DB now that we know it
+    db.deactivate_old_models(model_key, version)
+
+    logger.info(
+        "%s v%d: train_acc=%.3f test_acc=%.3f f1=%.3f → %s",
+        model_key, version, train_accuracy, test_accuracy, test_f1, artifact_path,
+    )
+    return version
+
+
+# ---------------------------------------------------------------------------
+# Model trainers
+# ---------------------------------------------------------------------------
+
+def train_logistic(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    cfg: dict,
+) -> tuple[LogisticRegression, StandardScaler, float, float, float]:
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train)
+    X_te = scaler.transform(X_test)
+
+    model = LogisticRegression(
+        C=cfg.get("C", 1.0),
+        max_iter=cfg.get("max_iter", 1000),
+        solver="lbfgs",
+        class_weight="balanced",
         random_state=42,
-        stratify=y_combined
+        multi_class="multinomial",
     )
-    
-    print(f"Train samples: {len(X_train)}, Test samples: {len(X_test)}")
-    
-    # Train OrdinalLogistic model
-    print("\nTraining OrdinalLogistic model...")
-    try:
-        ordinal_strategy = OrdinalLogisticStrategy(cfg, train_size=500, use_pretrained=False)
-        
-        # Preprocess features
-        X_train_clean = ordinal_strategy._preprocess_features(X_train)
-        X_test_clean = ordinal_strategy._preprocess_features(X_test)
-        y_train_mapped = y_train + 1  # Map {-1,0,1} to {0,1,2}
-        y_test_mapped = y_test + 1
-        
-        # Scale features
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train_clean)
-        X_test_scaled = scaler.transform(X_test_clean)
-        
-        # Hyperparameter optimization or default training
-        from sklearn.linear_model import LogisticRegression
-        
-        if optimize_hyperparams and HAS_SKOPT:
-            print("  Running Bayesian hyperparameter optimization...")
-            
-            search_space = {
-                'C': Real(0.001, 10.0, prior='log-uniform'),
-                'max_iter': Integer(500, 2000),
-                'solver': Categorical(['lbfgs', 'saga'])
-            }
-            
-            base_model = LogisticRegression(
-                class_weight='balanced',
-                random_state=42
-            )
-            
-            opt = BayesSearchCV(
-                base_model,
-                search_space,
-                n_iter=20,
-                cv=3,
-                n_jobs=-1,
-                random_state=42,
-                verbose=1
-            )
-            
-            opt.fit(X_train_scaled, y_train_mapped)
-            model = opt.best_estimator_
-            
-            print(f"  Best params: {opt.best_params_}")
-        else:
-            # Default training
-            model = LogisticRegression(
-                max_iter=1000,
-                solver='lbfgs',
-                class_weight='balanced',
-                random_state=42,
-                C=1.0
-            )
-            model.fit(X_train_scaled, y_train_mapped)
-        
-        # Evaluate model
-        print("  Evaluating model...")
-        train_metrics = evaluate_model(model, X_train_clean, y_train_mapped, returns_train, scaler)
-        test_metrics = evaluate_model(model, X_test_clean, y_test_mapped, returns_test, scaler)
-        
-        print(f"  Train - Acc: {train_metrics['accuracy']:.3f}, F1: {train_metrics['f1_score']:.3f}, Sharpe: {train_metrics['sharpe_ratio']:.2f}")
-        print(f"  Test  - Acc: {test_metrics['accuracy']:.3f}, F1: {test_metrics['f1_score']:.3f}, Sharpe: {test_metrics['sharpe_ratio']:.2f}")
-        
-        # Save model and scaler
-        model_data = {
-            'model': model,
-            'scaler': scaler,
-            'feature_cols': available_features,
-            'train_metrics': train_metrics,
-            'test_metrics': test_metrics
-        }
-        
-        with open('models/ordinal_logistic.pkl', 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        model_metadata['models']['ordinal_logistic'] = {
-            'file': 'ordinal_logistic.pkl',
-            'training_samples': len(X_train_scaled),
-            'test_samples': len(X_test_scaled),
-            'features': available_features,
-            'train_metrics': train_metrics,
-            'test_metrics': test_metrics
-        }
-        
-        print(f"  [ok] Saved to models/ordinal_logistic.pkl")
-        
-    except Exception as e:
-        print(f"  [error] Failed to train OrdinalLogistic: {e}")
-    
-    # Train XGBoost model
-    print("\nTraining XGBoost model...")
-    try:
-        xgb_strategy = XGBoostStrategy(cfg, train_size=500, n_rounds=50, use_pretrained=False)
-        
-        # Preprocess features
-        X_train_clean = xgb_strategy._preprocess_features(X_train)
-        X_test_clean = xgb_strategy._preprocess_features(X_test)
-        y_train_mapped = y_train + 1  # Map {-1,0,1} to {0,1,2}
-        y_test_mapped = y_test + 1
-        
-        # Calculate sample weights
-        classes, counts = np.unique(y_train_mapped, return_counts=True)
-        total = len(y_train_mapped)
-        class_weights = {cls: total / (len(classes) * count) for cls, count in zip(classes, counts)}
-        sample_weights = np.array([class_weights[y] for y in y_train_mapped])
-        
-        # Train model
-        import xgboost as xgb
-        
-        if optimize_hyperparams and HAS_SKOPT:
-            print("  Running Bayesian hyperparameter optimization...")
-            
-            search_space = {
-                'n_estimators': Integer(50, 150),
-                'max_depth': Integer(3, 7),
-                'learning_rate': Real(0.02, 0.15, prior='log-uniform'),
-                'subsample': Real(0.6, 1.0),
-                'colsample_bytree': Real(0.6, 1.0),
-                'min_child_weight': Integer(1, 5),
-                'gamma': Real(0.0, 0.3),
-                'reg_alpha': Real(0.0, 0.5),
-                'reg_lambda': Real(1.0, 2.0)
-            }
-            
-            base_model = xgb.XGBClassifier(
-                random_state=42,
-                verbosity=0,
-                tree_method='hist',
-                enable_categorical=False,
-                scale_pos_weight=1
-            )
-            
-            opt = BayesSearchCV(
-                base_model,
-                search_space,
-                n_iter=15,
-                cv=3,
-                n_jobs=1,  # Changed to 1 to avoid multiprocessing issues
-                random_state=42,
-                verbose=1
-            )
-            
-            # Fit without sample weights in BayesSearchCV to avoid numerical issues
-            opt.fit(X_train_clean, y_train_mapped)
-            model = opt.best_estimator_
-            
-            print(f"  Best params: {opt.best_params_}")
-        else:
-            # Default training
-            model = xgb.XGBClassifier(
-                n_estimators=50,
-                max_depth=3,
-                learning_rate=0.05,
-                subsample=0.7,
-                colsample_bytree=0.7,
-                colsample_bylevel=0.7,
-                min_child_weight=3,
-                gamma=0.1,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                random_state=42,
-                verbosity=0,
-                tree_method='hist',
-                enable_categorical=False
-            )
-            
-            # Split for early stopping
-            split_idx = int(len(X_train_clean) * 0.8)
-            X_train_fit = X_train_clean[:split_idx]
-            y_train_fit = y_train_mapped[:split_idx]
-            X_val = X_train_clean[split_idx:]
-            y_val = y_train_mapped[split_idx:]
-            weights_fit = sample_weights[:split_idx]
-            weights_val = sample_weights[split_idx:]
-            
-            model.fit(
-                X_train_fit, y_train_fit,
-                sample_weight=weights_fit,
-                eval_set=[(X_val, y_val)],
-                sample_weight_eval_set=[weights_val],
-                verbose=False
-            )
-        
-        # Evaluate model
-        print("  Evaluating model...")
-        train_metrics = evaluate_model(model, X_train_clean, y_train_mapped, returns_train)
-        test_metrics = evaluate_model(model, X_test_clean, y_test_mapped, returns_test)
-        
-        print(f"  Train - Acc: {train_metrics['accuracy']:.3f}, F1: {train_metrics['f1_score']:.3f}, Sharpe: {train_metrics['sharpe_ratio']:.2f}")
-        print(f"  Test  - Acc: {test_metrics['accuracy']:.3f}, F1: {test_metrics['f1_score']:.3f}, Sharpe: {test_metrics['sharpe_ratio']:.2f}")
-        
-        # Feature importance
-        if hasattr(model, 'feature_importances_'):
-            feature_importance = dict(zip(available_features, model.feature_importances_))
-            top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:5]
-            print(f"  Top features: {', '.join([f'{k}={v:.3f}' for k, v in top_features])}")
-        
-        # Save model
-        model_data = {
-            'model': model,
-            'feature_cols': available_features,
-            'confidence_threshold': 0.50,
-            'train_metrics': train_metrics,
-            'test_metrics': test_metrics
-        }
-        
-        with open('models/xgboost.pkl', 'wb') as f:
-            pickle.dump(model_data, f)
-        
-        model_metadata['models']['xgboost'] = {
-            'file': 'xgboost.pkl',
-            'training_samples': len(X_train_clean),
-            'test_samples': len(X_test_clean),
-            'features': available_features,
-            'train_metrics': train_metrics,
-            'test_metrics': test_metrics
-        }
-        
-        print(f"  [ok] Saved to models/xgboost.pkl")
-        
-    except Exception as e:
-        print(f"  [error] Failed to train XGBoost: {e}")
-    
-    # Save metadata
-    with open('models/metadata.json', 'w') as f:
-        json.dump(model_metadata, f, indent=2)
-    
-    print(f"\n[ok] Training complete! Model metadata saved to models/metadata.json")
-    print(f"\nNext steps:")
-    print(f"  1. Commit the models/ directory to git")
-    print(f"  2. Deploy to GitHub Actions - models will be loaded instead of retrained")
+    model.fit(X_tr, y_train)
+
+    train_acc = float(accuracy_score(y_train, model.predict(X_tr)))
+    test_acc = float(accuracy_score(y_test, model.predict(X_te)))
+    test_f1 = float(f1_score(y_test, model.predict(X_te), average="macro", zero_division=0))
+
+    logger.info(
+        "Logistic — train_acc=%.3f  test_acc=%.3f  f1=%.3f",
+        train_acc, test_acc, test_f1,
+    )
+    return model, scaler, train_acc, test_acc, test_f1
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Pre-train ML models for deployment")
-    parser.add_argument(
-        "--symbols",
-        default="AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO",
-        help="Comma-separated list of symbols to train on"
+def train_xgboost(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    cfg: dict,
+    optimize: bool = False,
+) -> tuple:
+    if not HAS_XGBOOST:
+        raise ImportError("xgboost not installed. pip install xgboost")
+
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train)
+    X_te = scaler.transform(X_test)
+
+    if optimize and HAS_SKOPT:
+        logger.info("Running Bayesian hyperparameter search for XGBoost...")
+        search_space = {
+            "n_estimators": Integer(100, 500),
+            "max_depth": Integer(2, 6),
+            "learning_rate": Real(0.01, 0.2, prior="log-uniform"),
+            "subsample": Real(0.6, 1.0),
+            "colsample_bytree": Real(0.6, 1.0),
+            "gamma": Real(0.0, 5.0),
+            "min_child_weight": Integer(1, 10),
+        }
+        base = xgb.XGBClassifier(
+            random_state=42, tree_method="hist", verbosity=0,
+            objective="multi:softprob", num_class=3,
+        )
+        opt = BayesSearchCV(base, search_space, n_iter=20, cv=3, n_jobs=-1,
+                            scoring="f1_macro", random_state=42)
+        opt.fit(X_tr, y_train)
+        model = opt.best_estimator_
+        logger.info("Best params: %s", opt.best_params_)
+    else:
+        model = xgb.XGBClassifier(
+            n_estimators=cfg.get("n_estimators", 200),
+            max_depth=cfg.get("max_depth", 4),
+            learning_rate=cfg.get("learning_rate", 0.03),
+            subsample=cfg.get("subsample", 0.85),
+            colsample_bytree=cfg.get("colsample_bytree", 0.85),
+            min_child_weight=cfg.get("min_child_weight", 2),
+            gamma=cfg.get("gamma", 1.0),
+            random_state=42,
+            tree_method="hist",
+            verbosity=0,
+            objective="multi:softprob",
+            num_class=3,
+            eval_metric="mlogloss",
+        )
+        # Class weights to counteract class imbalance
+        class_counts = np.bincount(y_train, minlength=3)
+        total = len(y_train)
+        sample_weights = np.array([
+            total / (3 * class_counts[y]) for y in y_train
+        ])
+        model.fit(X_tr, y_train, sample_weight=sample_weights)
+
+    train_acc = float(accuracy_score(y_train, model.predict(X_tr)))
+    test_acc = float(accuracy_score(y_test, model.predict(X_te)))
+    test_f1 = float(f1_score(y_test, model.predict(X_te), average="macro", zero_division=0))
+
+    logger.info(
+        "XGBoost — train_acc=%.3f  test_acc=%.3f  f1=%.3f",
+        train_acc, test_acc, test_f1,
     )
+    return model, scaler, train_acc, test_acc, test_f1
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train daily ML models")
     parser.add_argument(
-        "--days",
-        type=int,
-        default=180,
-        help="Number of days of historical data (default: 180 = ~6 months)"
+        "--symbols", default="AAPL,MSFT,GOOGL,AMZN,SPY,QQQ",
+        help="Comma-separated list of symbols"
     )
+    parser.add_argument("--days", type=int, default=1000, help="Days of history to use")
     parser.add_argument(
-        "--interval",
-        default="5m",
-        help="Data interval (default: 5m)"
+        "--models", default="logistic,xgboost",
+        help="Comma-separated list of models to train: logistic, xgboost"
     )
-    parser.add_argument(
-        "--optimize",
-        action="store_true",
-        help="Use Bayesian hyperparameter optimization (slower but better results)"
-    )
-    parser.add_argument(
-        "--clear-cache",
-        action="store_true",
-        help="Clear cached data before training"
-    )
-    
+    parser.add_argument("--optimize", action="store_true", help="Run Bayesian hyperparameter search")
+    parser.add_argument("--db", default="data/trading_sim.db", help="Path to SQLite DB")
+    parser.add_argument("--confidence", type=float, default=0.55, help="Confidence threshold")
     args = parser.parse_args()
-    
-    # Clear cache if requested
-    if args.clear_cache:
-        cache_dir = "data/cache"
-        if os.path.exists(cache_dir):
-            import shutil
-            shutil.rmtree(cache_dir)
-            print(f"[info] Cleared cache directory: {cache_dir}")
-    
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    
-    train_and_save_models(
-        symbols,
-        days=args.days,
-        interval=args.interval,
-        optimize_hyperparams=args.optimize
-    )
+
+    Path("logs").mkdir(exist_ok=True)
+    Path("models").mkdir(exist_ok=True)
+
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    models_to_train = [m.strip().lower() for m in args.models.split(",") if m.strip()]
+
+    logger.info("Training symbols: %s", symbols)
+    logger.info("Models: %s", models_to_train)
+    logger.info("History: %d days", args.days)
+
+    db = DB(args.db)
+
+    logger.info("Collecting and preparing data...")
+    X, y, used_symbols = _prepare_data(symbols, args.days, db)
+    logger.info("Total samples: %d  Features: %d", len(X), X.shape[1])
+    logger.info("Class distribution: %s", np.bincount(y).tolist())
+
+    X_train, X_test, y_train, y_test = _temporal_split(X, y)
+    logger.info("Train: %d  Test: %d", len(X_train), len(X_test))
+
+    if "logistic" in models_to_train:
+        logger.info("--- Training DailyLogistic ---")
+        from config import get_config
+        cfg = get_config()
+        logistic_cfg = {
+            "C": cfg.strategies.logistic.C,
+            "max_iter": cfg.strategies.logistic.max_iter,
+        }
+        model, scaler, train_acc, test_acc, test_f1 = train_logistic(
+            X_train, X_test, y_train, y_test, logistic_cfg
+        )
+        _save_and_register(
+            model_key="daily_logistic",
+            model_obj=model,
+            scaler=scaler,
+            train_accuracy=train_acc,
+            test_accuracy=test_acc,
+            test_f1=test_f1,
+            confidence_threshold=args.confidence,
+            train_symbols=used_symbols,
+            days=args.days,
+            db=db,
+        )
+
+    if "xgboost" in models_to_train:
+        logger.info("--- Training DailyXGBoost ---")
+        from config import get_config
+        cfg = get_config()
+        xgb_cfg = {
+            "n_estimators": cfg.strategies.xgboost.n_estimators,
+            "max_depth": cfg.strategies.xgboost.max_depth,
+            "learning_rate": cfg.strategies.xgboost.learning_rate,
+            "subsample": cfg.strategies.xgboost.subsample,
+            "colsample_bytree": cfg.strategies.xgboost.colsample_bytree,
+            "min_child_weight": cfg.strategies.xgboost.min_child_weight,
+            "gamma": cfg.strategies.xgboost.gamma,
+        }
+        model, scaler, train_acc, test_acc, test_f1 = train_xgboost(
+            X_train, X_test, y_train, y_test, xgb_cfg, optimize=args.optimize
+        )
+        _save_and_register(
+            model_key="daily_xgboost",
+            model_obj=model,
+            scaler=scaler,
+            train_accuracy=train_acc,
+            test_accuracy=test_acc,
+            test_f1=test_f1,
+            confidence_threshold=args.confidence,
+            train_symbols=used_symbols,
+            days=args.days,
+            db=db,
+        )
+
+    logger.info("Training complete.")
 
 
 if __name__ == "__main__":
