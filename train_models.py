@@ -36,6 +36,13 @@ try:
 except ImportError:
     HAS_SKOPT = False
 
+try:
+    from rl_env import TradingEnv
+    from dqn_agent import DQNAgent, DQNConfig
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
 from data_loader import load_yfinance
 from daily_features import (
     FEATURE_COLS,
@@ -339,6 +346,92 @@ def train_xgboost(
 
 
 # ---------------------------------------------------------------------------
+# DQN trainer
+# ---------------------------------------------------------------------------
+
+_DQN_DEFAULT_SYMBOLS = (
+    "AAPL,SPY,MSFT,GOOGL,NVDA,TSLA,META,NFLX,AMD,INTC,"
+    "AVGO,ADBE,CSCO,CRM,DXCM,QQQ,IWM,GLD,USO,XLF,"
+    "XLV,XLE,XLY,XLI,COIN,RIOT,MARA,SOXL,TQQQ,UPRO"
+)
+
+
+def train_dqn(symbols, start, end, cfg_dqn, out_path, use_dueling=True, use_per=True):
+    """Train DQN agent using config-driven hyperparameters."""
+    print("\n" + "=" * 70)
+    print("DQN AGENT TRAINING - REAL DATA VERIFICATION")
+    print("=" * 70)
+    print(f"Training Period: {start} to {end}")
+    print(f"Data Source: yfinance (REAL MARKET DATA)")
+    print(f"Symbols: {len(symbols)}")
+    print(f"Interval: Daily (1d)")
+    print(f"Architecture: Dueling DQN with PER")
+    print("=" * 70 + "\n")
+
+    envs = [TradingEnv(sym, start=start, end=end, window=cfg_dqn.window) for sym in symbols]
+    state_dim = envs[0].observation_space_shape[0]
+    action_dim = envs[0].action_space_n
+
+    print(f"[info] Loaded {len(symbols)} symbols with real yfinance data")
+    print("\nData Verification:")
+    total_bars = 0
+    for env in envs:
+        info = env.get_data_info()
+        print(f"  [ok] {info['symbol']:6s}: {info['num_bars']:4d} bars from {info['date_range']} ({info['source']})")
+        total_bars += info['num_bars']
+    print(f"\n[ok] Total bars loaded: {total_bars:,}")
+    print(f"\n[info] Training Enhanced DQN with Dueling={use_dueling}, PER={use_per}")
+    print(f"[info] State dim: {state_dim}, Action dim: {action_dim}")
+    print(f"[info] Episodes: {cfg_dqn.episodes}, Steps/ep: {cfg_dqn.steps_per_episode}\n")
+
+    cfg = DQNConfig(
+        gamma=cfg_dqn.gamma,
+        lr=cfg_dqn.lr,
+        batch_size=cfg_dqn.batch_size,
+        buffer_size=cfg_dqn.buffer_size,
+        start_epsilon=cfg_dqn.epsilon_start,
+        end_epsilon=cfg_dqn.epsilon_end,
+        epsilon_decay_steps=cfg_dqn.epsilon_decay_steps,
+        target_update_interval=cfg_dqn.target_update_interval,
+        hidden=cfg_dqn.hidden,
+        device="cpu",
+        use_dueling=use_dueling,
+        use_per=use_per,
+        per_alpha=0.6,
+        per_beta=0.4,
+    )
+    agent = DQNAgent(state_dim, action_dim, cfg)
+
+    global_step = 0
+    episode_rewards = []
+
+    for ep in range(cfg_dqn.episodes):
+        ep_reward = 0.0
+        for env in envs:
+            s = env.reset()
+            for t in range(cfg_dqn.steps_per_episode):
+                a = agent.act(s)
+                s2, r, done, info = env.step(a)
+                agent.push(s, a, r, s2, done)
+                agent.learn()
+                s = s2
+                ep_reward += r
+                global_step += 1
+                if done:
+                    break
+
+        episode_rewards.append(ep_reward)
+        if (ep + 1) % 5 == 0 or ep == 0:
+            avg = np.mean(episode_rewards[-5:]) if len(episode_rewards) >= 5 else ep_reward
+            epsilon = agent._current_epsilon()
+            print(f"[ep {ep+1:3d}] Reward: {ep_reward:7.2f} | Avg(5): {avg:7.2f} | Epsilon: {epsilon:.4f} | Buffer: {len(agent.buffer)}")
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    agent.save(out_path)
+    logger.info("Saved DQN agent to %s (final reward: %.2f)", out_path, episode_rewards[-1])
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -351,11 +444,18 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=1000, help="Days of history to use")
     parser.add_argument(
         "--models", default="logistic,xgboost",
-        help="Comma-separated list of models to train: logistic, xgboost"
+        help="Comma-separated list of models to train: logistic, xgboost, dqn"
     )
     parser.add_argument("--optimize", action="store_true", help="Run Bayesian hyperparameter search")
     parser.add_argument("--db", default="data/trading_sim.db", help="Path to SQLite DB")
     parser.add_argument("--confidence", type=float, default=0.55, help="Confidence threshold")
+    # DQN-specific args
+    parser.add_argument("--dqn-symbols", default=_DQN_DEFAULT_SYMBOLS, help="Symbols for DQN training")
+    parser.add_argument("--dqn-start", default="2024-01-01", help="DQN training start date")
+    parser.add_argument("--dqn-end", default="2025-12-02", help="DQN training end date")
+    parser.add_argument("--dqn-out", default="models/dqn_agent.pt", help="DQN model output path")
+    parser.add_argument("--no-dueling", action="store_true", help="Disable Dueling architecture")
+    parser.add_argument("--no-per", action="store_true", help="Disable Prioritized Experience Replay")
     args = parser.parse_args()
 
     Path("logs").mkdir(exist_ok=True)
@@ -430,6 +530,23 @@ def main() -> None:
             days=args.days,
             db=db,
         )
+
+    if "dqn" in models_to_train:
+        if not HAS_TORCH:
+            logger.error("PyTorch / rl_env not available — skipping DQN (pip install torch)")
+        else:
+            from config import get_config
+            cfg = get_config()
+            dqn_symbols = [s.strip().upper() for s in args.dqn_symbols.split(",") if s.strip()]
+            train_dqn(
+                dqn_symbols,
+                args.dqn_start,
+                args.dqn_end,
+                cfg.strategies.dqn,
+                args.dqn_out,
+                use_dueling=not args.no_dueling,
+                use_per=not args.no_per,
+            )
 
     logger.info("Training complete.")
 

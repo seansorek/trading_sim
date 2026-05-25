@@ -55,11 +55,11 @@ class DQNCfg:
     gamma: float = 0.99
     lr: float = 0.0005
     batch_size: int = 64
-    buffer_size: int = 200_000
+    buffer_size: int = 500_000
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 100_000
-    target_update_interval: int = 2500
+    epsilon_decay_steps: int = 200_000
+    target_update_interval: int = 5000
     episodes: int = 30
     steps_per_episode: int = 500
     q_advantage_threshold: float = 1.0
