@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from config import get_config
 from data_loader import load_yfinance
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
@@ -114,11 +115,12 @@ def predict_symbol(
     models: dict,
     db: Optional[DB] = None,
     dqn_window: int = 20,
+    history_days: int = 1000,
 ) -> dict:
     result: dict = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
 
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=1000)
+    start_date = end_date - timedelta(days=history_days)
 
     try:
         df = load_yfinance(
@@ -341,13 +343,22 @@ def main() -> None:
     random.seed(42)
     torch.manual_seed(42)
 
+    cfg = get_config()
+
     parser = argparse.ArgumentParser(description="Predict next-day signals")
-    parser.add_argument("--symbols", default="AAPL,SPY,MSFT,GOOGL,NVDA")
+    parser.add_argument(
+        "--symbols", default=None,
+        help="Comma-separated symbols (default: prediction.symbols from config/default.yaml)"
+    )
     parser.add_argument("--db", default="data/trading_sim.db")
     parser.add_argument("--output", default="tomorrow_trades.json")
     args = parser.parse_args()
 
-    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    symbols = (
+        [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if args.symbols
+        else cfg.prediction.symbols
+    )
 
     db: Optional[DB] = None
     try:
@@ -361,7 +372,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Predicting for %d symbols using %d models...", len(symbols), len(models))
-    predictions = [predict_symbol(s, models, db=db) for s in symbols]
+    predictions = [predict_symbol(s, models, db=db, history_days=cfg.data.history_days) for s in symbols]
 
     # Summary
     print("\n" + "=" * 50)
