@@ -52,3 +52,4 @@ simulation_output.log
 !models/*.pkl
 !models/metadata.json
 !models/README.md
+logs/
