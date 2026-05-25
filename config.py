@@ -97,8 +97,14 @@ class DiscordCfg:
 
 
 @dataclass
+class PredictionCfg:
+    symbols: list[str] = field(default_factory=lambda: ["AAPL", "SPY", "MSFT", "GOOGL", "NVDA"])
+
+
+@dataclass
 class AppConfig:
     symbols: list[str] = field(default_factory=lambda: ["AAPL", "MSFT", "GOOGL", "SPY", "QQQ"])
+    prediction: PredictionCfg = field(default_factory=PredictionCfg)
     data: DataCfg = field(default_factory=DataCfg)
     execution: ExecutionCfg = field(default_factory=ExecutionCfg)
     strategies: StrategiesCfg = field(default_factory=StrategiesCfg)
@@ -129,9 +135,16 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
     strat_raw = raw.get("strategies", {})
     paths_raw = raw.get("paths", {})
     discord_raw = raw.get("discord", {})
+    prediction_raw = raw.get("prediction", {})
 
     return AppConfig(
         symbols=raw.get("symbols", AppConfig.__dataclass_fields__["symbols"].default_factory()),
+        prediction=PredictionCfg(
+            symbols=prediction_raw.get(
+                "symbols",
+                PredictionCfg.__dataclass_fields__["symbols"].default_factory(),
+            )
+        ),
         data=DataCfg(**{k: v for k, v in data_raw.items() if k in DataCfg.__dataclass_fields__}),
         execution=ExecutionCfg(**{k: v for k, v in exec_raw.items() if k in ExecutionCfg.__dataclass_fields__}),
         strategies=StrategiesCfg(

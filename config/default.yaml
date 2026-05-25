@@ -1,6 +1,6 @@
 # Trading simulator configuration
 
-# Default universe of symbols for daily predictions and backtests.
+# Symbol universe for model training and backtesting (keep this focused).
 symbols:
   - AAPL
   - MSFT
@@ -12,6 +12,41 @@ symbols:
   - SPY
   - QQQ
   - IWM
+
+# Symbol universe for the daily prediction job and Discord notifications.
+# Edit this list to change what gets sent to Discord — no workflow YAML edit needed.
+prediction:
+  symbols:
+    - AAPL
+    - SPY
+    - MSFT
+    - GOOGL
+    - NVDA
+    - TSLA
+    - META
+    - NFLX
+    - AMD
+    - INTC
+    - AVGO
+    - ADBE
+    - CSCO
+    - CRM
+    - DXCM
+    - QQQ
+    - IWM
+    - GLD
+    - USO
+    - XLF
+    - XLV
+    - XLE
+    - XLY
+    - XLI
+    - COIN
+    - RIOT
+    - MARA
+    - SOXL
+    - TQQQ
+    - UPRO
 
 # Data fetching defaults.
 data:

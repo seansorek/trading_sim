@@ -1,80 +1,49 @@
 # Pre-trained ML Models
 
-This directory contains pre-trained machine learning models for the trading simulator.
+This directory contains pre-trained models committed to the repo so GitHub Actions can load them without retraining on every run.
 
 ## Files
 
-- `ordinal_logistic.pkl` - Trained LogisticRegression model with StandardScaler
-- `xgboost.pkl` - Trained XGBoost classifier
-- `metadata.json` - Model training metadata (date, symbols, features, accuracy)
+- `daily_logistic.pkl` — Trained LogisticRegression model + StandardScaler + feature contract
+- `daily_logistic_v<N>.pkl` — Versioned snapshots (canonical path is always `daily_logistic.pkl`)
+- `daily_xgboost.pkl` — Trained XGBoost classifier + StandardScaler + feature contract
+- `daily_xgboost_v<N>.pkl` — Versioned snapshots
+- `dqn_agent.pt` — PyTorch DQN agent (optional; trained separately via `train_dqn.py`)
 
-## Usage
+Each pickle contains: `model`, `scaler`, `feature_contract`, `confidence_threshold`, `label_map`, `trained_at`, `train_symbols`, and accuracy metrics.
 
-### Training Models
+## Model details
 
-To train models on historical data:
+### Daily Logistic (`daily_logistic.pkl`)
+- **Algorithm**: `sklearn.linear_model.LogisticRegression` (multinomial, balanced class weights)
+- **Features**: 28 daily features defined in `daily_features.FEATURE_COLS`
+- **Labels**: `SELL=0, HOLD=1, BUY=2` (forward 1-day return thresholds: ±0.2%)
+- **Normalization**: `StandardScaler` (fit on training data, stored in pickle)
+- **Confidence threshold**: Default 0.55; stored in pickle, read by `predict_next_day_lite.py`
+
+### Daily XGBoost (`daily_xgboost.pkl`)
+- **Algorithm**: `xgboost.XGBClassifier` (`multi:softprob`, 3-class)
+- **Features**: Same 28 features as logistic
+- **Labels**: Same as logistic — `SELL=0, HOLD=1, BUY=2`
+- **Hyperparameters**: Set in `config/default.yaml → strategies.xgboost`
+- **Class weighting**: Sample weights computed per run to counteract imbalance
+
+### DQN (`dqn_agent.pt`)
+- **Algorithm**: PyTorch DQN with target network and experience replay
+- **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)
+- **State**: Rolling window of last 20 days × 28 features (flattened)
+- **Trained via**: `train_dqn.py`
+
+## Updating models
 
 ```bash
-# Train on default symbols (SPY, QQQ, AAPL, MSFT, etc.) with 60 days of data
-python train_models.py
+# Retrain locally (uses symbols + hyperparameters from config/default.yaml)
+python train_models.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 1000
 
-# Train on specific symbols with custom timeframe
-python train_models.py --symbols AAPL,MSFT,NVDA,TSLA --days 90
-
-# Train on different interval
-python train_models.py --interval 1m --days 14
+# Commit the updated canonical pickles
+git add models/daily_logistic.pkl models/daily_xgboost.pkl
+git commit -m "Retrain models"
+git push
 ```
 
-### Using Pre-trained Models
-
-Models are automatically loaded when running simulations:
-
-```bash
-# Pre-trained models used by default (no retraining)
-python simulate_multi.py --strategies ordinal_logistic,xgboost
-
-# Force retraining from scratch (disable pre-trained models)
-# Requires code modification: set use_pretrained=False in strategy init
-```
-
-### Model Deployment
-
-1. Train models locally with sufficient data:
-   ```bash
-   python train_models.py --days 60
-   ```
-
-2. Commit trained models to git:
-   ```bash
-   git add models/
-   git commit -m "Update pre-trained ML models"
-   git push
-   ```
-
-3. GitHub Actions will load these models instead of retraining
-
-## Model Details
-
-### Ordinal Logistic Regression
-- **Algorithm**: sklearn.linear_model.LogisticRegression
-- **Features**: ret_1m, ma_spread, vol_10, rsi_14, vol_z, momentum_5, momentum_20, vp_ratio, vol_regime, price_position
-- **Classes**: 3-class (BUY=1, HOLD=0, SELL=-1)
-- **Normalization**: StandardScaler
-- **Label Threshold**: ±0.5% for 5m bars
-
-### XGBoost
-- **Algorithm**: xgboost.XGBClassifier
-- **Features**: Same as ordinal logistic
-- **Classes**: 3-class (BUY=1, HOLD=0, SELL=-1)
-- **Hyperparameters**: max_depth=3, lr=0.05, n_estimators=50
-- **Confidence Threshold**: 50% minimum probability to trade
-- **Label Threshold**: ±0.5% for 5m bars
-
-## Retraining Schedule
-
-Retrain models periodically as market conditions change:
-- **Weekly**: For active trading with frequent market shifts
-- **Monthly**: For stable market conditions
-- **After major events**: Market crashes, regime changes, etc.
-
-Check model performance in `results/` to determine if retraining is needed.
+The next GitHub Actions run will pick up the new files automatically.
