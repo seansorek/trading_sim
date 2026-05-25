@@ -126,23 +126,32 @@ def test_pickle_feature_contract_matches_constant():
     if not pkl_files:
         pytest.skip("No .pkl files in models/ — run train_models.py first")
 
+    checked = 0
     for pkl_path in pkl_files:
         with open(pkl_path, "rb") as f:
             try:
                 data = pickle.load(f)
             except Exception:
-                continue  # Skip unreadable pickles
+                continue  # unreadable pickle — skip
 
-        if "feature_contract" not in data:
-            pytest.skip(
-                f"{pkl_path.name} is in old format (missing 'feature_contract' key). "
-                "Retrain with updated train_models.py."
+        if not isinstance(data, dict) or "feature_contract" not in data:
+            # Old-format model; warn but keep checking the rest.
+            import warnings
+            warnings.warn(
+                f"{pkl_path.name} is in old format (missing 'feature_contract'). "
+                "Retrain with train_models.py.",
+                stacklevel=2,
             )
+            continue
 
         assert data["feature_contract"] == FEATURE_COLS, (
             f"{pkl_path.name}: feature_contract does not match FEATURE_COLS. "
             "Retrain the model."
         )
+        checked += 1
+
+    if checked == 0:
+        pytest.skip("No new-format models found. Run train_models.py to generate them.")
 
 
 def test_normalized_cumsum_features_are_bounded():

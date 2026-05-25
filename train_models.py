@@ -50,7 +50,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/train_models.log"),
+        logging.FileHandler("logs/train_models.log", encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -226,7 +226,7 @@ def _save_and_register(
     db.deactivate_old_models(model_key, version)
 
     logger.info(
-        "%s v%d: train_acc=%.3f test_acc=%.3f f1=%.3f → %s",
+        "%s v%d: train_acc=%.3f test_acc=%.3f f1=%.3f -> %s",
         model_key, version, train_accuracy, test_accuracy, test_f1, artifact_path,
     )
     return version
