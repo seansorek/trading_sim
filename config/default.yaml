@@ -1,0 +1,82 @@
+# Trading simulator configuration
+
+# Default universe of symbols for daily predictions and backtests.
+symbols:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - META
+  - TSLA
+  - SPY
+  - QQQ
+  - IWM
+
+# Data fetching defaults.
+data:
+  source: yfinance        # yfinance | csv
+  interval: "1d"          # Daily bars only in v2.
+  history_days: 1000      # How many days of history to load per symbol.
+  cache_dir: data/cache
+  database_path: data/trading_sim.db
+
+# Backtest execution model.
+execution:
+  start_cash: 100000.0
+  commission_per_share: 0.00005
+  slippage_bps: 1.0
+  max_position_pct: 0.05       # 5% of equity per trade.
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.10
+  daily_loss_limit_pct: 0.05
+  holding_period_days: 5       # Minimum bars between position changes.
+
+# Per-strategy thresholds and hyperparameters.
+strategies:
+  logistic:
+    confidence_threshold: 0.55
+    pos_threshold: 0.002
+    neg_threshold: -0.002
+    C: 1.0
+    max_iter: 1000
+  xgboost:
+    confidence_threshold: 0.55
+    pos_threshold: 0.002
+    neg_threshold: -0.002
+    n_estimators: 200
+    max_depth: 4
+    learning_rate: 0.03
+    subsample: 0.85
+    colsample_bytree: 0.85
+    min_child_weight: 2
+    gamma: 1.0
+  dqn:
+    window: 20
+    hidden: 256
+    gamma: 0.99
+    lr: 0.0005
+    batch_size: 64
+    buffer_size: 200000
+    epsilon_start: 1.0
+    epsilon_end: 0.05
+    epsilon_decay_steps: 100000
+    target_update_interval: 2500
+    episodes: 30
+    steps_per_episode: 500
+    q_advantage_threshold: 1.0
+    confidence_threshold: 2.0
+    transaction_cost_bps: 5.0
+  hybrid:
+    # Hybrid combines logistic + xgboost + dqn with majority voting.
+    require_agreement: 2  # Number of models that must agree for BUY/SELL.
+
+# Output paths (relative to project root).
+paths:
+  models_dir: models_output
+  results_dir: results_output
+
+# Discord webhook (optional). Reads DISCORD_WEBHOOK_URL env var if not set.
+discord:
+  enabled: true
+  username: "Trading Sim"
