@@ -19,36 +19,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from daily_features import FEATURE_COLS, FEATURE_SET_NAME, make_daily_features
 
 
-# Hard-coded expected list — if this test fails, you changed FEATURE_COLS
+# Hard-coded expected list — if this test fails, you changed FEATURE_COLS.
+# All features must be dimensionless/normalized (no raw price or volume units).
 _EXPECTED_FEATURE_COLS = [
     "ret_1d",
     "ret_5d",
     "ret_10d",
     "vol_20d",
-    "ma_spread_10_20",
-    "ma_spread_20_50",
+    "ma_spread_10_20",   # (sma10 - sma20) / close
+    "ma_spread_20_50",   # (sma20 - sma50) / close
     "macd",
     "macd_signal",
     "macd_hist",
     "rsi_14",
-    "atr_14",
     "price_vs_sma20",
     "price_vs_sma50",
     "vol_z_20",
-    "volume_ma_20",
-    "bb_upper",
-    "bb_lower",
-    "bb_width",
+    "bb_width",          # (bb_upper - bb_lower) / close
     "bb_position",
     "stoch_k",
     "stoch_d",
     "williams_r",
-    "momentum_10",
     "roc_12",
     "atr_normalized",
     "vpt_normalized",
     "ad_normalized",
     "obv_normalized",
+    "ret_1d_vs_spy",
+    "ret_5d_vs_spy",
 ]
 
 
@@ -106,6 +104,12 @@ def test_no_raw_smas_in_feature_cols():
     assert "sma_10" not in FEATURE_COLS
     assert "sma_20" not in FEATURE_COLS
     assert "sma_50" not in FEATURE_COLS
+
+
+def test_no_raw_price_or_volume_features():
+    """Features in raw dollar or volume units break cross-symbol comparability."""
+    for banned in ("bb_upper", "bb_lower", "atr_14", "momentum_10", "volume_ma_20"):
+        assert banned not in FEATURE_COLS, f"{banned} is in raw units and must not be in FEATURE_COLS"
 
 
 def test_feature_cols_length():

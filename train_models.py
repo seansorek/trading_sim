@@ -108,20 +108,28 @@ def _load_symbol(
 
 def _prepare_data(
     symbols: list[str], days: int, db: DB
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """
-    Collect and pool training data across symbols.
+    Collect training data across symbols with per-symbol temporal splits.
 
-    Returns (X, y, symbol_list_used).
-    Uses temporal ordering: data is sorted by (symbol, date) and NOT shuffled,
-    preserving the time structure needed for the train/test split.
+    Each symbol is split 80/20 by time independently before pooling, so the
+    test set contains truly held-out future data for every symbol.
+
+    Returns (X_train, y_train, X_test, y_test, symbol_list_used).
     """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    all_X: list[np.ndarray] = []
-    all_y: list[np.ndarray] = []
+    train_Xs: list[np.ndarray] = []
+    train_ys: list[np.ndarray] = []
+    test_Xs: list[np.ndarray] = []
+    test_ys: list[np.ndarray] = []
     used_symbols: list[str] = []
+
+    # Load SPY once for market-relative features; warn but continue if unavailable
+    spy_df = _load_symbol("SPY", start, end, db)
+    if spy_df is None:
+        logger.warning("Could not load SPY data — ret_*_vs_spy features will be 0")
 
     for symbol in symbols:
         df = _load_symbol(symbol, start, end, db)
@@ -129,44 +137,45 @@ def _prepare_data(
             continue
 
         try:
-            feats = make_daily_features(df)
+            spy_arg = spy_df if symbol != "SPY" else None
+            feats = make_daily_features(df, spy_df=spy_arg)
         except Exception as exc:
             logger.warning("  %s: feature computation failed: %s", symbol, exc)
             continue
 
-        # Drop rows where forward return is not available
+        # Drop the last 3 rows where fwd_ret_1d is NaN (3-day horizon)
         feats = feats.dropna(subset=["fwd_ret_1d"])
         if len(feats) < 50:
             logger.warning("  %s: too few valid rows (%d) after dropna", symbol, len(feats))
             continue
 
-        X_sym = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
-        y_sym = discretize_labels(feats["fwd_ret_1d"].values)
+        X_sym = feats[FEATURE_COLS].values.astype(np.float32)
 
-        all_X.append(X_sym)
-        all_y.append(y_sym)
+        # Volatility-adjusted thresholds: 0.5σ bands scaled for 3-day horizon
+        vol = feats["vol_20d"].values
+        pos_thr = vol * np.sqrt(3) * 0.5
+        y_sym = discretize_labels(feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr)
+
+        split = int(len(X_sym) * 0.8)
+        X_tr = _preprocess(X_sym[:split].copy())
+        X_te = _preprocess(X_sym[split:].copy())
+
+        train_Xs.append(X_tr); train_ys.append(y_sym[:split])
+        test_Xs.append(X_te);  test_ys.append(y_sym[split:])
         used_symbols.append(symbol)
-        logger.info("  %s: %d samples, class dist %s", symbol, len(y_sym), np.bincount(y_sym).tolist())
+        logger.info(
+            "  %s: %d samples (train=%d test=%d), class dist %s",
+            symbol, len(y_sym), split, len(y_sym) - split, np.bincount(y_sym).tolist(),
+        )
 
-    if not all_X:
+    if not train_Xs:
         raise RuntimeError("No usable training data across all symbols.")
 
-    X = np.vstack(all_X)
-    y = np.concatenate(all_y)
-    return X, y, used_symbols
-
-
-def _temporal_split(
-    X: np.ndarray, y: np.ndarray, test_frac: float = 0.20
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Temporal train/test split — first (1-test_frac) rows for train,
-    last test_frac rows for test.
-
-    Avoids data leakage from shuffling time-series data.
-    """
-    split = int(len(X) * (1 - test_frac))
-    return X[:split], X[split:], y[:split], y[split:]
+    X_train = np.vstack(train_Xs)
+    y_train = np.concatenate(train_ys)
+    X_test  = np.vstack(test_Xs)
+    y_test  = np.concatenate(test_ys)
+    return X_train, y_train, X_test, y_test, used_symbols
 
 
 def _make_artifact_path(model_key: str, version: int) -> str:
@@ -471,12 +480,13 @@ def main() -> None:
     db = DB(args.db)
 
     logger.info("Collecting and preparing data...")
-    X, y, used_symbols = _prepare_data(symbols, args.days, db)
-    logger.info("Total samples: %d  Features: %d", len(X), X.shape[1])
-    logger.info("Class distribution: %s", np.bincount(y).tolist())
-
-    X_train, X_test, y_train, y_test = _temporal_split(X, y)
-    logger.info("Train: %d  Test: %d", len(X_train), len(X_test))
+    X_train, y_train, X_test, y_test, used_symbols = _prepare_data(symbols, args.days, db)
+    logger.info(
+        "Total samples: %d  Features: %d  Train: %d  Test: %d",
+        len(X_train) + len(X_test), X_train.shape[1], len(X_train), len(X_test),
+    )
+    logger.info("Train class distribution: %s", np.bincount(y_train).tolist())
+    logger.info("Test class distribution: %s", np.bincount(y_test).tolist())
 
     if "logistic" in models_to_train:
         logger.info("--- Training DailyLogistic ---")
