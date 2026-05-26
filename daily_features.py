@@ -11,40 +11,38 @@ import pandas as pd
 
 # Version string stored alongside model pickles. Bump when FEATURE_COLS changes;
 # old models become explicitly incompatible.
-FEATURE_SET_NAME: str = "daily_v1"
+FEATURE_SET_NAME: str = "daily_v3"
 
 # Canonical feature order — the contract between training and prediction.
-# Raw cumsum columns (vpt, ad_line) are excluded: they are non-stationary.
-# Raw SMAs (sma_10, sma_20, sma_50) excluded; keep ratio/spread derivatives only.
+# All features are dimensionless/normalized so they are comparable across symbols
+# at different price levels.  Raw price-unit columns (bb_upper, bb_lower, atr_14,
+# momentum_10, volume_ma_20) and the raw SMA levels are excluded.
 FEATURE_COLS: list[str] = [
     "ret_1d",
     "ret_5d",
     "ret_10d",
     "vol_20d",
-    "ma_spread_10_20",
-    "ma_spread_20_50",
+    "ma_spread_10_20",   # (sma10 - sma20) / close — normalized
+    "ma_spread_20_50",   # (sma20 - sma50) / close — normalized
     "macd",
     "macd_signal",
     "macd_hist",
     "rsi_14",
-    "atr_14",
     "price_vs_sma20",
     "price_vs_sma50",
     "vol_z_20",
-    "volume_ma_20",
-    "bb_upper",
-    "bb_lower",
-    "bb_width",
+    "bb_width",          # (bb_upper - bb_lower) / close — normalized
     "bb_position",
     "stoch_k",
     "stoch_d",
     "williams_r",
-    "momentum_10",
     "roc_12",
     "atr_normalized",
     "vpt_normalized",
     "ad_normalized",
     "obv_normalized",
+    "ret_1d_vs_spy",     # symbol ret_1d minus SPY ret_1d (market-relative alpha, 1d)
+    "ret_5d_vs_spy",     # symbol ret_5d minus SPY ret_5d (market-relative alpha, 5d)
 ]
 
 
@@ -89,9 +87,16 @@ def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     return tr.rolling(window).mean()
 
 
-def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
+def make_daily_features(
+    df: pd.DataFrame,
+    spy_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     Build features from daily OHLCV data.
+
+    spy_df: optional SPY DataFrame used to compute market-relative features
+    (ret_1d_vs_spy, ret_5d_vs_spy).  Pass None for backtesting fallback — those
+    features will be 0.0 so the column contract is always satisfied.
 
     Returns a DataFrame with all columns in FEATURE_COLS plus auxiliary
     columns 'close' and 'fwd_ret_1d' (not part of the model input).
@@ -105,14 +110,23 @@ def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     feats["ret_10d"] = df["close"].pct_change(10)
     feats["vol_20d"] = df["close"].pct_change().rolling(20).std()
 
+    if spy_df is not None:
+        spy_ret_1d = spy_df["close"].pct_change(1).reindex(df.index)
+        spy_ret_5d = spy_df["close"].pct_change(5).reindex(df.index)
+        feats["ret_1d_vs_spy"] = feats["ret_1d"] - spy_ret_1d
+        feats["ret_5d_vs_spy"] = feats["ret_5d"] - spy_ret_5d
+    else:
+        feats["ret_1d_vs_spy"] = 0.0
+        feats["ret_5d_vs_spy"] = 0.0
+
     sma_10 = df["close"].rolling(10).mean()
     sma_20 = df["close"].rolling(20).mean()
     sma_50 = df["close"].rolling(50).mean()
     ema_12 = _safe_ema(df["close"], 12)
     ema_26 = _safe_ema(df["close"], 26)
 
-    feats["ma_spread_10_20"] = sma_10 - sma_20
-    feats["ma_spread_20_50"] = sma_20 - sma_50
+    feats["ma_spread_10_20"] = (sma_10 - sma_20) / (df["close"] + 1e-12)
+    feats["ma_spread_20_50"] = (sma_20 - sma_50) / (df["close"] + 1e-12)
 
     macd = ema_12 - ema_26
     signal = _safe_ema(macd, 9)
@@ -121,7 +135,6 @@ def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     feats["macd_hist"] = macd - signal
 
     feats["rsi_14"] = _rsi(df["close"], 14)
-    feats["atr_14"] = _atr(df, 14)
 
     feats["price_vs_sma20"] = (df["close"] - sma_20) / (sma_20 + 1e-12)
     feats["price_vs_sma50"] = (df["close"] - sma_50) / (sma_50 + 1e-12)
@@ -129,14 +142,14 @@ def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
     feats["vol_z_20"] = (df["volume"] - df["volume"].rolling(20).mean()) / (
         df["volume"].rolling(20).std() + 1e-12
     )
-    feats["volume_ma_20"] = df["volume"].rolling(20).mean()
 
     bb_mid = df["close"].rolling(20).mean()
     bb_std_dev = df["close"].rolling(20).std()
-    feats["bb_upper"] = bb_mid + (bb_std_dev * 2)
-    feats["bb_lower"] = bb_mid - (bb_std_dev * 2)
-    feats["bb_width"] = feats["bb_upper"] - feats["bb_lower"]
-    feats["bb_position"] = (df["close"] - feats["bb_lower"]) / (feats["bb_width"] + 1e-12)
+    _bb_upper = bb_mid + (bb_std_dev * 2)
+    _bb_lower = bb_mid - (bb_std_dev * 2)
+    _bb_width = _bb_upper - _bb_lower
+    feats["bb_width"] = _bb_width / (df["close"] + 1e-12)
+    feats["bb_position"] = (df["close"] - _bb_lower) / (_bb_width + 1e-12)
 
     lowest_low = df["low"].rolling(14).min()
     highest_high = df["high"].rolling(14).max()
@@ -145,7 +158,6 @@ def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
 
     feats["williams_r"] = -100.0 * (highest_high - df["close"]) / (highest_high - lowest_low + 1e-12)
 
-    feats["momentum_10"] = df["close"].diff(10)
     feats["roc_12"] = (df["close"] - df["close"].shift(12)) / (df["close"].shift(12) + 1e-12)
     feats["atr_normalized"] = _atr(df, 14) / (df["close"] + 1e-12)
 
@@ -169,8 +181,13 @@ def make_daily_features(df: pd.DataFrame) -> pd.DataFrame:
         obv_raw.rolling(20).std() + 1e-12
     )
 
-    feats["fwd_ret_1d"] = df["close"].pct_change(1).shift(-1)
+    # 3-day forward return: less noisy than 1-day, aligns with the 5-day holding period
+    feats["fwd_ret_1d"] = (df["close"].shift(-3) / df["close"]) - 1
 
     feats = feats.replace([np.inf, -np.inf], np.nan)
-    feats = feats.fillna(0.0)
+    # Drop warmup rows where rolling indicators are still NaN.
+    # fwd_ret_1d is intentionally kept NaN for the last row so training code
+    # can remove it with dropna(subset=["fwd_ret_1d"]).
+    feats = feats.dropna(subset=FEATURE_COLS)
+    feats[FEATURE_COLS] = feats[FEATURE_COLS].fillna(0.0)
     return feats

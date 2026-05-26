@@ -4,6 +4,7 @@ pyyaml>=6.0
 yfinance>=0.2.40
 scikit-learn>=1.4
 xgboost>=2.0
+scikit-optimize>=0.9
 torch>=2.2
 requests>=2.31
 

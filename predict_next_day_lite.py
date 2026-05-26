@@ -116,6 +116,7 @@ def predict_symbol(
     db: Optional[DB] = None,
     dqn_window: int = 20,
     history_days: int = 1000,
+    spy_df=None,
 ) -> dict:
     result: dict = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
 
@@ -138,7 +139,8 @@ def predict_symbol(
         return result
 
     try:
-        feats = make_daily_features(df)
+        spy_arg = spy_df if symbol != "SPY" else None
+        feats = make_daily_features(df, spy_df=spy_arg)
     except Exception as exc:
         result["error"] = f"Feature computation failed: {exc}"
         return result
@@ -371,8 +373,25 @@ def main() -> None:
         logger.error("No trained models found. Run train_models.py first.")
         sys.exit(1)
 
+    # Load SPY once for market-relative features
+    spy_df = None
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=cfg.data.history_days)
+        spy_df = load_yfinance(
+            "SPY",
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            interval="1d",
+        )
+    except Exception as exc:
+        logger.warning("Could not load SPY data for relative features: %s", exc)
+
     logger.info("Predicting for %d symbols using %d models...", len(symbols), len(models))
-    predictions = [predict_symbol(s, models, db=db, history_days=cfg.data.history_days) for s in symbols]
+    predictions = [
+        predict_symbol(s, models, db=db, history_days=cfg.data.history_days, spy_df=spy_df)
+        for s in symbols
+    ]
 
     # Summary
     print("\n" + "=" * 50)
