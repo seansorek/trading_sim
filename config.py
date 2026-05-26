@@ -68,6 +68,33 @@ class DQNCfg:
 
 
 @dataclass
+class OptimizeLogisticBounds:
+    C: list = field(default_factory=lambda: [0.001, 100.0])
+    penalty: list = field(default_factory=lambda: ["l1", "l2"])
+
+
+@dataclass
+class OptimizeXGBoostBounds:
+    n_estimators: list = field(default_factory=lambda: [100, 600])
+    max_depth: list = field(default_factory=lambda: [2, 7])
+    learning_rate: list = field(default_factory=lambda: [0.005, 0.3])
+    subsample: list = field(default_factory=lambda: [0.5, 1.0])
+    colsample_bytree: list = field(default_factory=lambda: [0.5, 1.0])
+    gamma: list = field(default_factory=lambda: [0.0, 5.0])
+    min_child_weight: list = field(default_factory=lambda: [1, 10])
+    reg_alpha: list = field(default_factory=lambda: [0.0, 2.0])
+    reg_lambda: list = field(default_factory=lambda: [0.5, 10.0])
+
+
+@dataclass
+class OptimizeCfg:
+    n_iter: int = 25
+    cv: int = 3
+    logistic: OptimizeLogisticBounds = field(default_factory=OptimizeLogisticBounds)
+    xgboost: OptimizeXGBoostBounds = field(default_factory=OptimizeXGBoostBounds)
+
+
+@dataclass
 class StrategiesCfg:
     logistic: LogisticCfg = field(default_factory=LogisticCfg)
     xgboost: XGBoostCfg = field(default_factory=XGBoostCfg)
@@ -108,6 +135,7 @@ class AppConfig:
     data: DataCfg = field(default_factory=DataCfg)
     execution: ExecutionCfg = field(default_factory=ExecutionCfg)
     strategies: StrategiesCfg = field(default_factory=StrategiesCfg)
+    optimize: OptimizeCfg = field(default_factory=OptimizeCfg)
     paths: PathsCfg = field(default_factory=PathsCfg)
     discord: DiscordCfg = field(default_factory=DiscordCfg)
 
@@ -133,6 +161,7 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
     data_raw = raw.get("data", {})
     exec_raw = raw.get("execution", {})
     strat_raw = raw.get("strategies", {})
+    opt_raw = raw.get("optimize", {})
     paths_raw = raw.get("paths", {})
     discord_raw = raw.get("discord", {})
     prediction_raw = raw.get("prediction", {})
@@ -151,6 +180,12 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
             logistic=LogisticCfg(**{k: v for k, v in strat_raw.get("logistic", {}).items() if k in LogisticCfg.__dataclass_fields__}),
             xgboost=XGBoostCfg(**{k: v for k, v in strat_raw.get("xgboost", {}).items() if k in XGBoostCfg.__dataclass_fields__}),
             dqn=DQNCfg(**{k: v for k, v in strat_raw.get("dqn", {}).items() if k in DQNCfg.__dataclass_fields__}),
+        ),
+        optimize=OptimizeCfg(
+            n_iter=opt_raw.get("n_iter", 25),
+            cv=opt_raw.get("cv", 3),
+            logistic=OptimizeLogisticBounds(**{k: v for k, v in opt_raw.get("logistic", {}).items() if k in OptimizeLogisticBounds.__dataclass_fields__}),
+            xgboost=OptimizeXGBoostBounds(**{k: v for k, v in opt_raw.get("xgboost", {}).items() if k in OptimizeXGBoostBounds.__dataclass_fields__}),
         ),
         paths=PathsCfg(**{k: v for k, v in paths_raw.items() if k in PathsCfg.__dataclass_fields__}),
         discord=DiscordCfg(

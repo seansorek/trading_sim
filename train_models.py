@@ -31,7 +31,7 @@ except ImportError:
 
 try:
     from skopt import BayesSearchCV
-    from skopt.space import Real, Integer
+    from skopt.space import Categorical, Integer, Real
     HAS_SKOPT = True
 except ImportError:
     HAS_SKOPT = False
@@ -258,20 +258,60 @@ def train_logistic(
     y_train: np.ndarray,
     y_test: np.ndarray,
     cfg: dict,
+    optimize: bool = False,
+    opt_cfg=None,
 ) -> tuple[LogisticRegression, StandardScaler, float, float, float]:
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(X_train)
     X_te = scaler.transform(X_test)
 
-    model = LogisticRegression(
-        C=cfg.get("C", 1.0),
-        max_iter=cfg.get("max_iter", 1000),
-        solver="lbfgs",
-        class_weight="balanced",
-        random_state=42,
-        multi_class="multinomial",
-    )
-    model.fit(X_tr, y_train)
+    if optimize and HAS_SKOPT and opt_cfg is not None:
+        logger.info("Running Bayesian hyperparameter search for Logistic Regression...")
+        ol = opt_cfg.logistic
+        search_space = {
+            "C": Real(ol.C[0], ol.C[1], prior="log-uniform"),
+            "penalty": Categorical(ol.penalty),
+        }
+        # saga is the only solver that supports both l1 and l2 with multinomial
+        base = LogisticRegression(
+            solver="saga",
+            class_weight="balanced",
+            multi_class="multinomial",
+            max_iter=2000,
+            random_state=42,
+        )
+        opt = BayesSearchCV(
+            base, search_space,
+            n_iter=opt_cfg.n_iter,
+            cv=opt_cfg.cv,
+            scoring="f1_macro",
+            n_jobs=-1,
+            random_state=42,
+        )
+        opt.fit(X_tr, y_train)
+        best_params = dict(opt.best_params_)
+        logger.info("[Logistic] Best params: %s", best_params)
+        model = LogisticRegression(
+            **best_params,
+            solver="saga",
+            class_weight="balanced",
+            multi_class="multinomial",
+            max_iter=2000,
+            random_state=42,
+        )
+        model.fit(X_tr, y_train)
+    else:
+        if optimize and not HAS_SKOPT:
+            logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")
+        model = LogisticRegression(
+            C=cfg.get("C", 1.0),
+            max_iter=cfg.get("max_iter", 1000),
+            solver="lbfgs",
+            class_weight="balanced",
+            random_state=42,
+            multi_class="multinomial",
+        )
+        model.fit(X_tr, y_train)
 
     train_acc = float(accuracy_score(y_train, model.predict(X_tr)))
     test_acc = float(accuracy_score(y_test, model.predict(X_te)))
@@ -291,6 +331,7 @@ def train_xgboost(
     y_test: np.ndarray,
     cfg: dict,
     optimize: bool = False,
+    opt_cfg=None,
 ) -> tuple:
     if not HAS_XGBOOST:
         raise ImportError("xgboost not installed. pip install xgboost")
@@ -299,26 +340,32 @@ def train_xgboost(
     X_tr = scaler.fit_transform(X_train)
     X_te = scaler.transform(X_test)
 
-    if optimize and HAS_SKOPT:
+    if optimize and not HAS_SKOPT:
+        logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")
+
+    if optimize and HAS_SKOPT and opt_cfg is not None:
         logger.info("Running Bayesian hyperparameter search for XGBoost...")
+        ox = opt_cfg.xgboost
         search_space = {
-            "n_estimators": Integer(100, 500),
-            "max_depth": Integer(2, 6),
-            "learning_rate": Real(0.01, 0.2, prior="log-uniform"),
-            "subsample": Real(0.6, 1.0),
-            "colsample_bytree": Real(0.6, 1.0),
-            "gamma": Real(0.0, 5.0),
-            "min_child_weight": Integer(1, 10),
+            "n_estimators": Integer(ox.n_estimators[0], ox.n_estimators[1]),
+            "max_depth": Integer(ox.max_depth[0], ox.max_depth[1]),
+            "learning_rate": Real(ox.learning_rate[0], ox.learning_rate[1], prior="log-uniform"),
+            "subsample": Real(ox.subsample[0], ox.subsample[1]),
+            "colsample_bytree": Real(ox.colsample_bytree[0], ox.colsample_bytree[1]),
+            "gamma": Real(ox.gamma[0], ox.gamma[1]),
+            "min_child_weight": Integer(ox.min_child_weight[0], ox.min_child_weight[1]),
+            "reg_alpha": Real(ox.reg_alpha[0], ox.reg_alpha[1]),
+            "reg_lambda": Real(ox.reg_lambda[0], ox.reg_lambda[1]),
         }
         base = xgb.XGBClassifier(
             random_state=42, tree_method="hist", verbosity=0,
             objective="multi:softprob", num_class=3,
         )
-        opt = BayesSearchCV(base, search_space, n_iter=20, cv=3, n_jobs=-1,
-                            scoring="f1_macro", random_state=42)
+        opt = BayesSearchCV(base, search_space, n_iter=opt_cfg.n_iter, cv=opt_cfg.cv,
+                            n_jobs=-1, scoring="f1_macro", random_state=42)
         opt.fit(X_tr, y_train)
         model = opt.best_estimator_
-        logger.info("Best params: %s", opt.best_params_)
+        logger.info("[XGBoost] Best params: %s", dict(opt.best_params_))
     else:
         model = xgb.XGBClassifier(
             n_estimators=cfg.get("n_estimators", 200),
@@ -497,7 +544,8 @@ def main() -> None:
             "max_iter": cfg.strategies.logistic.max_iter,
         }
         model, scaler, train_acc, test_acc, test_f1 = train_logistic(
-            X_train, X_test, y_train, y_test, logistic_cfg
+            X_train, X_test, y_train, y_test, logistic_cfg,
+            optimize=args.optimize, opt_cfg=cfg.optimize,
         )
         _save_and_register(
             model_key="daily_logistic",
@@ -526,7 +574,8 @@ def main() -> None:
             "gamma": cfg.strategies.xgboost.gamma,
         }
         model, scaler, train_acc, test_acc, test_f1 = train_xgboost(
-            X_train, X_test, y_train, y_test, xgb_cfg, optimize=args.optimize
+            X_train, X_test, y_train, y_test, xgb_cfg,
+            optimize=args.optimize, opt_cfg=cfg.optimize,
         )
         _save_and_register(
             model_key="daily_xgboost",

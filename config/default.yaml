@@ -106,6 +106,26 @@ strategies:
     # Hybrid combines logistic + xgboost + dqn with majority voting.
     require_agreement: 2  # Number of models that must agree for BUY/SELL.
 
+# Bayesian hyperparameter search settings (used when --optimize is passed to train_models.py).
+optimize:
+  n_iter: 25          # Bayesian search iterations per model
+  cv: 3               # Cross-validation folds
+
+  logistic:
+    C: [0.001, 100.0]       # log-uniform range for regularization strength
+    penalty: [l1, l2]
+
+  xgboost:
+    n_estimators: [100, 600]
+    max_depth: [2, 7]
+    learning_rate: [0.005, 0.3]   # log-uniform
+    subsample: [0.5, 1.0]
+    colsample_bytree: [0.5, 1.0]
+    gamma: [0.0, 5.0]
+    min_child_weight: [1, 10]
+    reg_alpha: [0.0, 2.0]         # L1 regularization
+    reg_lambda: [0.5, 10.0]       # L2 regularization
+
 # Output paths (relative to project root).
 paths:
   models_dir: models_output
