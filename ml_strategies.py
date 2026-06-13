@@ -167,7 +167,7 @@ class DailyLogisticStrategy(BaseStrategy):
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
-        return self._apply_holding_period(pd.Series(signals, index=df.index))
+        return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 
 
 class DailyXGBoostStrategy(BaseStrategy):
@@ -239,7 +239,7 @@ class DailyXGBoostStrategy(BaseStrategy):
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
-        return self._apply_holding_period(pd.Series(signals, index=df.index))
+        return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 
 
 # ---------------------------------------------------------------------------

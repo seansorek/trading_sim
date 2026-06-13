@@ -15,6 +15,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from data_loader import load_yfinance
 from simulation_pipeline import (
@@ -28,6 +29,7 @@ from simulation_pipeline import (
     walk_forward_backtest,
 )
 
+Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -151,7 +153,6 @@ def process_symbol(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    from pathlib import Path
     Path("logs").mkdir(exist_ok=True)
     Path("results").mkdir(exist_ok=True)
 
