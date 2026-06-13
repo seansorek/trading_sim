@@ -108,7 +108,7 @@ class DailyDQNStrategy(BaseStrategy):
             return pd.Series(0, index=df.index)
 
         daily_feats = make_daily_features(df).fillna(0.0)
-        feature_cols = [c for c in daily_feats.columns if c != "fwd_ret_1d"]
+        feature_cols = FEATURE_COLS
 
         # Fit per-run normalizer from available data
         scaler_stats: dict = {}
