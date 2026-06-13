@@ -241,7 +241,7 @@ class VolumeAdjustedExecutionPrice:
             return impact_bps / 10000
         else:
             # Minimal impact for normal orders
-            return 0.001  # 1 bp minimum
+            return 0.001  # 10 bps minimum
     
     @staticmethod
     def apply_slippage(price: float, slippage_pct: float, direction: int) -> float:

@@ -195,6 +195,8 @@ def _save_and_register(
     train_symbols: list[str],
     days: int,
     db: DB,
+    train_samples: int = 0,
+    test_samples: int = 0,
 ) -> int:
     """Save pickle and register in DB. Returns new version number."""
     end = datetime.now().strftime("%Y-%m-%d")
@@ -208,8 +210,8 @@ def _save_and_register(
         trained_on=train_symbols,
         train_start=start,
         train_end=end,
-        train_samples=0,
-        test_samples=0,
+        train_samples=train_samples,
+        test_samples=test_samples,
         train_accuracy=train_accuracy,
         test_accuracy=test_accuracy,
         test_f1=test_f1,
@@ -559,6 +561,8 @@ def main() -> None:
             train_symbols=used_symbols,
             days=args.days,
             db=db,
+            train_samples=len(X_train),
+            test_samples=len(X_test),
         )
 
     if "xgboost" in models_to_train:
@@ -589,6 +593,8 @@ def main() -> None:
             train_symbols=used_symbols,
             days=args.days,
             db=db,
+            train_samples=len(X_train),
+            test_samples=len(X_test),
         )
 
     if "dqn" in models_to_train:
