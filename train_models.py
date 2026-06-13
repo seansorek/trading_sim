@@ -241,7 +241,7 @@ def _save_and_register(
     with open(canonical, "wb") as f:
         pickle.dump(artifact, f)
 
-    # Update artifact_path in DB now that we know it
+    db.update_artifact_path(model_key, version, artifact_path)
     db.deactivate_old_models(model_key, version)
 
     logger.info(
