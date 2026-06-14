@@ -291,6 +291,14 @@ class DB:
             )
         return next_version
 
+    def update_artifact_path(self, model_key: str, version: int, artifact_path: str) -> None:
+        """Update the artifact_path for a specific model version after the file is saved."""
+        with self._lock, self._connect() as con:
+            con.execute(
+                "UPDATE model_registry SET artifact_path=? WHERE model_key=? AND version=?",
+                (artifact_path, model_key, version),
+            )
+
     def deactivate_old_models(self, model_key: str, keep_version: int) -> None:
         """Mark all versions of model_key except keep_version as inactive."""
         with self._lock, self._connect() as con:

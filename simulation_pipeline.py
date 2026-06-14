@@ -194,6 +194,7 @@ class ExecutionConfig:
     take_profit_pct: float = 0.10
     daily_loss_limit_pct: float = 0.05
     max_position_pct: float = 0.05
+    holding_period_days: int = 0
 
 
 @dataclass
@@ -422,7 +423,7 @@ class Backtester:
                     commission_per_share=self.exec_cfg.commission_per_share,
                     slippage_bps=self.exec_cfg.slippage_bps,
                     stop_loss_pct=self.exec_cfg.stop_loss_pct,
-                    holding_period=self.exec_cfg.start_cash,  # placeholder
+                    holding_period=self.exec_cfg.holding_period_days,
                 )
                 if not trades_df.empty:
                     trades_for_db = trades_df.reset_index().rename(columns={"ts": "ts"})
