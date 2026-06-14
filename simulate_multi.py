@@ -82,9 +82,19 @@ def run_symbol_strategy(
     if strategy_name.startswith("daily_"):
         wf_metrics = {"skipped": True, "reason": "daily strategy"}
     else:
-        wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
+        wf = walk_forward_backtest(
+            df, feats, train_days=3, test_days=1,
+            artifact_paths={
+                "equity_curve_csv": f"{artifact_base}_wf_equity_curve.csv",
+                "trade_log_csv": f"{artifact_base}_wf_trade_log.csv",
+                "metrics_json": f"{artifact_base}_wf_metrics.json",
+            },
+        )
         wf_metrics = wf.metrics
-    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
+    mc = monte_carlo_stress(
+        df, feats, signal, n_runs=n_mc_runs,
+        out_csv=f"{artifact_base}_monte_carlo_stats.csv",
+    )
 
     return {
         "metrics": res.metrics,
