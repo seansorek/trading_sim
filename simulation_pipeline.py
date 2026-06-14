@@ -503,7 +503,7 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]
         "hit_rate": float(hit_rate),
         "profit_factor": float(gross_profit / gross_loss)
         if gross_loss > 0
-        else float("inf"),
+        else None,
     }
 
 
