@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Optional, List
 
-from daily_features import make_daily_features
+from daily_features import make_daily_features, FEATURE_COLS
 from data_loader import load_yfinance
 
 
@@ -37,7 +37,7 @@ class TradingEnv:
         # Drop rows needing forward return to avoid peeking
         feats = feats.dropna(subset=["fwd_ret_1d"]).copy()
         self.df = feats
-        self.features = [c for c in feats.columns if c not in ["ticker", "date", "fwd_ret_1d"]]
+        self.features = FEATURE_COLS
 
         if len(self.df) < self.window + 2:
             raise ValueError(f"Insufficient data for env: {symbol} has {len(self.df)} bars")
