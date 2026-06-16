@@ -275,11 +275,17 @@ class Backtester:
         trade_log: list[dict] = []
         daily_start_cash = cash
         current_day = df.index[0].date() if len(df) > 0 else None
+        prev_close: Optional[float] = None
 
         for ts, row in df.iterrows():
             if ts.date() != current_day:
                 current_day = ts.date()
-                daily_start_cash = cash
+                # Use closing equity from the previous bar (cash + position * prior close)
+                # so the daily loss limit measures a full day's loss, not just intrabar.
+                if prev_close is not None:
+                    daily_start_cash = cash + position * prev_close
+                else:
+                    daily_start_cash = cash
 
             mid = float(row["close"])
             if mid <= 0:
@@ -379,6 +385,7 @@ class Backtester:
             equity = cash + position * mid
             equity_curve.append(equity)
             timestamps.append(ts)
+            prev_close = mid
 
         equity_series = pd.Series(
             equity_curve, index=pd.DatetimeIndex(timestamps), name="equity"
@@ -558,17 +565,20 @@ def monte_carlo_stress(
     feats: pd.DataFrame,
     signal: pd.Series,
     n_runs: int = 50,
+    exec_cfg: Optional[ExecutionConfig] = None,
 ) -> pd.DataFrame:
+    if exec_cfg is None:
+        exec_cfg = ExecutionConfig()
     rng = np.random.default_rng(42)
     stats = []
     for _ in range(n_runs):
-        exec_cfg = ExecutionConfig(
-            commission_per_share=0.0005,
+        sim_cfg = ExecutionConfig(
+            commission_per_share=exec_cfg.commission_per_share,
             slippage_bps=max(0.5, float(rng.normal(2.0, 1.0))),
             stop_loss_pct=float(np.clip(rng.normal(0.03, 0.01), 0.01, 0.06)),
             daily_loss_limit_pct=float(np.clip(rng.normal(0.02, 0.005), 0.01, 0.05)),
         )
-        bt = Backtester(exec_cfg)
+        bt = Backtester(sim_cfg)
         res = bt.run(df, feats, signal)
         stats.append(res.metrics)
 
