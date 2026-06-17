@@ -480,9 +480,13 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]
                     * min(abs(pos), t["shares"])
                 )
                 pnl_list.append(float(pnl))
+                prev_pos = pos
                 pos += side * t["shares"]
                 if pos == 0:
                     entry_price = None
+                elif np.sign(pos) != np.sign(prev_pos):
+                    # Position crossed zero — start tracking the new leg
+                    entry_price = t["fill_price"]
         if pnl_list:
             pnl_arr = np.array(pnl_list)
             gross_profit = float(pnl_arr[pnl_arr > 0].sum())

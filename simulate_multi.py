@@ -76,12 +76,19 @@ def run_symbol_strategy(
         strategy=strategy_name,
     )
 
-    wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
+    # walk_forward_backtest uses intraday features (_COLS) not present in daily
+    # OHLCV data, so it produces an all-flat signal for daily strategies.
+    # Skip it for daily_ strategies to avoid silently returning meaningless metrics.
+    if strategy_name.startswith("daily_"):
+        wf_metrics = {"skipped": True, "reason": "daily strategy"}
+    else:
+        wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
+        wf_metrics = wf.metrics
     mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
 
     return {
         "metrics": res.metrics,
-        "wf_metrics": wf.metrics,
+        "wf_metrics": wf_metrics,
         "mc_mean": mc.mean().to_dict() if not mc.empty else {},
         "mc_std": mc.std().to_dict() if not mc.empty else {},
         "config": cfg.__dict__,
