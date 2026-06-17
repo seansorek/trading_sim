@@ -385,3 +385,60 @@ def test_run_symbol_strategy_wf_skipped_flag():
     assert result["wf_metrics"].get("skipped") is True, (
         f"Expected wf_metrics['skipped']=True for daily strategy, got: {result['wf_metrics']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo stress test uses configured commission (#28)
+# ---------------------------------------------------------------------------
+
+def test_monte_carlo_uses_configured_commission():
+    """monte_carlo_stress should use the base_exec_cfg's commission, not a hardcoded value."""
+    from unittest.mock import patch
+    from simulation_pipeline import monte_carlo_stress
+
+    df = _make_df(30)
+    signal = pd.Series(1, index=df.index)  # always long
+
+    custom_commission = 0.00005  # the correct configured value
+    base_cfg = ExecutionConfig(commission_per_share=custom_commission)
+
+    captured_cfgs = []
+    original_init = Backtester.__init__
+
+    def spy_init(self, exec_cfg):
+        captured_cfgs.append(exec_cfg.commission_per_share)
+        original_init(self, exec_cfg)
+
+    with patch.object(Backtester, "__init__", spy_init):
+        monte_carlo_stress(df, df, signal, n_runs=5, base_exec_cfg=base_cfg)
+
+    # Every MC run should use the configured commission, not the old hardcoded 0.0005
+    for comm in captured_cfgs:
+        assert comm == custom_commission, (
+            f"MC used commission {comm}, expected {custom_commission}"
+        )
+
+
+def test_monte_carlo_default_commission_matches_execution_config_default():
+    """When no base_exec_cfg is passed, commission should match ExecutionConfig default (0.00005)."""
+    from unittest.mock import patch
+    from simulation_pipeline import monte_carlo_stress
+
+    df = _make_df(30)
+    signal = pd.Series(1, index=df.index)
+
+    captured_cfgs = []
+    original_init = Backtester.__init__
+
+    def spy_init(self, exec_cfg):
+        captured_cfgs.append(exec_cfg.commission_per_share)
+        original_init(self, exec_cfg)
+
+    with patch.object(Backtester, "__init__", spy_init):
+        monte_carlo_stress(df, df, signal, n_runs=3)
+
+    default_commission = ExecutionConfig().commission_per_share
+    for comm in captured_cfgs:
+        assert comm == default_commission, (
+            f"MC used commission {comm}, expected default {default_commission}"
+        )

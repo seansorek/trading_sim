@@ -562,12 +562,15 @@ def monte_carlo_stress(
     feats: pd.DataFrame,
     signal: pd.Series,
     n_runs: int = 50,
+    base_exec_cfg: ExecutionConfig | None = None,
 ) -> pd.DataFrame:
+    if base_exec_cfg is None:
+        base_exec_cfg = ExecutionConfig()
     rng = np.random.default_rng(42)
     stats = []
     for _ in range(n_runs):
         exec_cfg = ExecutionConfig(
-            commission_per_share=0.0005,
+            commission_per_share=base_exec_cfg.commission_per_share,
             slippage_bps=max(0.5, float(rng.normal(2.0, 1.0))),
             stop_loss_pct=float(np.clip(rng.normal(0.03, 0.01), 0.01, 0.06)),
             daily_loss_limit_pct=float(np.clip(rng.normal(0.02, 0.005), 0.01, 0.05)),
