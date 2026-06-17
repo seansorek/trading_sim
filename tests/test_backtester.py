@@ -541,3 +541,57 @@ def test_forced_exit_allows_reentry_after_signal_returns_to_flat():
         f"Expected re-entry after cooldown reset, but only found "
         f"{len(signal_entries)} signal entries"
     )
+
+
+# ---------------------------------------------------------------------------
+# Daily loss limit on daily bars (#27)
+# ---------------------------------------------------------------------------
+
+def test_daily_loss_limit_fires_on_daily_bars():
+    """On daily bars (one bar per calendar day), the daily loss limit should
+    compare against the *previous bar's closing equity*, not the current bar's
+    opening cash — otherwise it's a no-op because every bar resets the baseline.
+
+    We use max_position_pct=1.0 so the position is large enough that a 8% price
+    drop causes a portfolio-level loss exceeding the 5% daily limit."""
+    n = 10
+    # Price drops 8% on bar 2 (from 100 to 92)
+    prices = [100.0, 100.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0]
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY from bar 0, hold forever
+    signal = pd.Series(1, index=df.index)
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,        # wide stop-loss, won't trigger
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.05,  # 5% daily loss limit
+        max_position_pct=1.0,      # full portfolio in one position
+        max_position=10_000,       # allow large position
+    )
+    result = _run(signal, df, cfg)
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+
+    # The daily loss limit should fire because the 8% price drop on a fully-invested
+    # portfolio exceeds the 5% threshold.
+    # With the old bug (resetting baseline per calendar day on daily data),
+    # it would never fire because each bar saw cash == daily_start_cash.
+    daily_limit_exits = trades[trades["exit_reason"] == "daily_limit"]
+    assert len(daily_limit_exits) >= 1, (
+        "Daily loss limit did not fire on an 8% price drop with a 5% threshold "
+        "and full portfolio investment. This suggests the baseline is still "
+        "resetting per calendar day."
+    )

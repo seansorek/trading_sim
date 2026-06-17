@@ -273,15 +273,16 @@ class Backtester:
         equity_curve: list[float] = []
         timestamps: list = []
         trade_log: list[dict] = []
-        daily_start_cash = cash
+        # Use previous bar's closing equity as baseline for daily loss limit.
+        # This avoids the issue where daily_start_cash resets every bar on daily data,
+        # making the loss limit a no-op.
+        prev_bar_equity = cash
         current_day = df.index[0].date() if len(df) > 0 else None
         # Cooldown: after a forced exit, suppress re-entry until signal returns to flat
         forced_exit_active = False
 
         for ts, row in df.iterrows():
-            if ts.date() != current_day:
-                current_day = ts.date()
-                daily_start_cash = cash
+            current_day = ts.date()
 
             mid = float(row["close"])
             if mid <= 0:
@@ -365,9 +366,9 @@ class Backtester:
                 avg_entry_price = None
                 forced_exit_active = True
 
-            # Daily loss limit
+            # Daily loss limit (baseline = previous bar's closing equity)
             equity = cash + position * mid
-            if equity < daily_start_cash * (1 - self.exec_cfg.daily_loss_limit_pct):
+            if equity < prev_bar_equity * (1 - self.exec_cfg.daily_loss_limit_pct):
                 if position != 0:
                     side = int(-np.sign(position))
                     fill_price = mid + side * (spr / 2 + slippage)
@@ -390,6 +391,7 @@ class Backtester:
             equity = cash + position * mid
             equity_curve.append(equity)
             timestamps.append(ts)
+            prev_bar_equity = equity
 
         equity_series = pd.Series(
             equity_curve, index=pd.DatetimeIndex(timestamps), name="equity"
