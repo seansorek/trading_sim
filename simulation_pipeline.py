@@ -273,16 +273,19 @@ class Backtester:
         equity_curve: list[float] = []
         timestamps: list = []
         trade_log: list[dict] = []
-        # Use previous bar's closing equity as baseline for daily loss limit.
-        # This avoids the issue where daily_start_cash resets every bar on daily data,
-        # making the loss limit a no-op.
-        prev_bar_equity = cash
+        daily_start_cash = cash
         current_day = df.index[0].date() if len(df) > 0 else None
+        prev_close: Optional[float] = None
         # Cooldown: after a forced exit, suppress re-entry until signal returns to flat
         forced_exit_active = False
 
         for ts, row in df.iterrows():
-            current_day = ts.date()
+            if ts.date() != current_day:
+                current_day = ts.date()
+                if prev_close is not None:
+                    daily_start_cash = cash + position * prev_close
+                else:
+                    daily_start_cash = cash
 
             mid = float(row["close"])
             if mid <= 0:
@@ -366,9 +369,9 @@ class Backtester:
                 avg_entry_price = None
                 forced_exit_active = True
 
-            # Daily loss limit (baseline = previous bar's closing equity)
+            # Daily loss limit (baseline = mark-to-market equity at day boundary)
             equity = cash + position * mid
-            if equity < prev_bar_equity * (1 - self.exec_cfg.daily_loss_limit_pct):
+            if equity < daily_start_cash * (1 - self.exec_cfg.daily_loss_limit_pct):
                 if position != 0:
                     side = int(-np.sign(position))
                     fill_price = mid + side * (spr / 2 + slippage)
@@ -391,7 +394,7 @@ class Backtester:
             equity = cash + position * mid
             equity_curve.append(equity)
             timestamps.append(ts)
-            prev_bar_equity = equity
+            prev_close = mid
 
         equity_series = pd.Series(
             equity_curve, index=pd.DatetimeIndex(timestamps), name="equity"
