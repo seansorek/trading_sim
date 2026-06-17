@@ -46,7 +46,7 @@ class BaseStrategy:
             new_signal = sig_array[loc]
             if new_signal == 0:
                 continue
-            if loc > last_trade_loc + self.cfg.holding_period:
+            if loc >= last_trade_loc + self.cfg.holding_period:
                 result[loc] = new_signal
                 last_trade_loc = loc
                 current_position = new_signal

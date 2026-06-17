@@ -385,3 +385,45 @@ def test_run_symbol_strategy_wf_skipped_flag():
     assert result["wf_metrics"].get("skipped") is True, (
         f"Expected wf_metrics['skipped']=True for daily strategy, got: {result['wf_metrics']}"
     )
+
+
+class TestDailyDQNStrategyThresholds:
+    """DailyDQNStrategy should use config values, not hardcoded defaults (#33)."""
+
+    def test_uses_config_thresholds_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("DQN_CONFIDENCE", raising=False)
+        monkeypatch.delenv("DQN_Q_ADVANTAGE", raising=False)
+
+        from base_strategy import StrategyConfig
+        from simulation_pipeline import DailyDQNStrategy
+
+        cfg = StrategyConfig(name="daily_dqn")
+        cfg.confidence_threshold = 2.0
+        cfg.q_advantage_threshold = 1.0
+        cfg.model_path = "models/dqn_agent.pt"
+        cfg.window = 20
+
+        strat = DailyDQNStrategy(cfg)
+        assert strat.confidence_threshold == 2.0, (
+            f"Expected 2.0 from config, got {strat.confidence_threshold}"
+        )
+        assert strat.q_advantage_threshold == 1.0, (
+            f"Expected 1.0 from config, got {strat.q_advantage_threshold}"
+        )
+
+    def test_env_var_overrides_config(self, monkeypatch):
+        monkeypatch.setenv("DQN_CONFIDENCE", "5.0")
+        monkeypatch.setenv("DQN_Q_ADVANTAGE", "3.0")
+
+        from base_strategy import StrategyConfig
+        from simulation_pipeline import DailyDQNStrategy
+
+        cfg = StrategyConfig(name="daily_dqn")
+        cfg.confidence_threshold = 2.0
+        cfg.q_advantage_threshold = 1.0
+        cfg.model_path = "models/dqn_agent.pt"
+        cfg.window = 20
+
+        strat = DailyDQNStrategy(cfg)
+        assert strat.confidence_threshold == 5.0
+        assert strat.q_advantage_threshold == 3.0
