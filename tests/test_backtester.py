@@ -442,3 +442,102 @@ def test_monte_carlo_default_commission_matches_execution_config_default():
         assert comm == default_commission, (
             f"MC used commission {comm}, expected default {default_commission}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Cooldown after forced exits (#31)
+# ---------------------------------------------------------------------------
+
+def test_stop_loss_exit_suppresses_immediate_reentry():
+    """After a stop-loss exit, signal should NOT re-enter on the very next bar
+    if the signal is still active (non-zero). Re-entry only happens after
+    the signal returns to flat (0/HOLD)."""
+    n = 20
+    # Price drops sharply at bar 5 to trigger stop-loss, then recovers
+    prices = [100.0] * 5 + [90.0] + [95.0] * 14
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY from bar 3 onward (never goes flat)
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[3:] = 1
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.05,   # 5% stop-loss triggers on the drop to 90
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    result = _run(signal, df, cfg)
+
+    # After the stop-loss exit, there should be no immediate re-entry on bar 6+
+    # because signal never goes back to 0. Count trades with exit_reason="stop_loss"
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+    stop_exits = trades[trades["exit_reason"] == "stop_loss"]
+    signal_entries_after_stop = trades[
+        (trades["exit_reason"] == "signal") & (trades.index > stop_exits.index.max())
+    ] if not stop_exits.empty else pd.DataFrame()
+
+    # No signal-driven re-entries should happen after the stop-loss because
+    # the signal never returns to flat
+    assert len(signal_entries_after_stop) == 0, (
+        f"Expected no re-entries after stop-loss without signal returning to flat, "
+        f"but found {len(signal_entries_after_stop)} entries"
+    )
+
+
+def test_forced_exit_allows_reentry_after_signal_returns_to_flat():
+    """After forced exit and signal returning to 0, a new entry should be allowed."""
+    n = 20
+    prices = [100.0] * 5 + [90.0] + [95.0] * 14
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY at bar 3, stop-loss fires at bar 5 (price drops to 90),
+    # then signal goes flat at bar 8, then BUY again at bar 10
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[3:8] = 1   # BUY up to bar 7
+    signal.iloc[8:10] = 0  # flat (cooldown reset)
+    signal.iloc[10:] = 1   # BUY again
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.05,
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    result = _run(signal, df, cfg)
+
+    # After signal returns to flat and then back to BUY, we should see a new entry
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+    signal_entries = trades[trades["exit_reason"] == "signal"]
+
+    # Should have at least 2 signal entries: initial entry + re-entry after cooldown
+    assert len(signal_entries) >= 2, (
+        f"Expected re-entry after cooldown reset, but only found "
+        f"{len(signal_entries)} signal entries"
+    )

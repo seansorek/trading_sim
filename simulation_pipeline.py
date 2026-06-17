@@ -275,6 +275,8 @@ class Backtester:
         trade_log: list[dict] = []
         daily_start_cash = cash
         current_day = df.index[0].date() if len(df) > 0 else None
+        # Cooldown: after a forced exit, suppress re-entry until signal returns to flat
+        forced_exit_active = False
 
         for ts, row in df.iterrows():
             if ts.date() != current_day:
@@ -293,6 +295,13 @@ class Backtester:
             slippage = (self.exec_cfg.slippage_bps / 1e4) * mid
 
             desired = int(signal.loc[ts])
+
+            # Cooldown logic: after forced exit, wait for signal to return to flat
+            if forced_exit_active:
+                if desired == 0:
+                    forced_exit_active = False
+                else:
+                    desired = 0  # suppress re-entry
 
             notional = self.exec_cfg.start_cash * self.exec_cfg.max_position_pct
             shares = int(notional / mid) if mid > 0 else 0
@@ -354,6 +363,7 @@ class Backtester:
                 })
                 position = 0
                 avg_entry_price = None
+                forced_exit_active = True
 
             # Daily loss limit
             equity = cash + position * mid
@@ -375,6 +385,7 @@ class Backtester:
                     })
                     position = 0
                     avg_entry_price = None
+                    forced_exit_active = True
 
             equity = cash + position * mid
             equity_curve.append(equity)
