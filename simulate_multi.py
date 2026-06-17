@@ -77,7 +77,7 @@ def run_symbol_strategy(
     )
 
     wf = walk_forward_backtest(df, feats, train_days=3, test_days=1)
-    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs)
+    mc = monte_carlo_stress(df, feats, signal, n_runs=n_mc_runs, exec_cfg=exec_cfg)
 
     return {
         "metrics": res.metrics,
