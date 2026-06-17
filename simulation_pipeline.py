@@ -578,7 +578,7 @@ def monte_carlo_stress(
     feats: pd.DataFrame,
     signal: pd.Series,
     n_runs: int = 50,
-    base_exec_cfg: ExecutionConfig | None = None,
+    base_exec_cfg: Optional[ExecutionConfig] = None,
 ) -> pd.DataFrame:
     if base_exec_cfg is None:
         base_exec_cfg = ExecutionConfig()
