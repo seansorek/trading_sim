@@ -374,3 +374,35 @@ class TestPredictSymbolDQN:
 
         p = result["predictions"]["daily_dqn"]
         assert p["signal"] == "SELL"
+
+    def test_dqn_confidence_is_normalized_to_unit_interval(self):
+        """DQN confidence in prediction output must be in [0, 1], not raw Q-spread."""
+        # Large Q-spread: raw confidence = 10.0 - 0.2 = 9.8 (unbounded)
+        # Normalized: clip((9.8 + 1.0) / 2.0, 0, 1) = 1.0
+        models = self._make_dqn_models([0.5, 10.0, 0.2])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_dqn"]
+        assert 0.0 <= p["confidence"] <= 1.0, (
+            f"DQN confidence should be in [0, 1], got {p['confidence']}"
+        )
+        assert abs(p["confidence"] - 1.0) < 1e-6
+
+    def test_dqn_confidence_small_spread_normalized(self):
+        """Small Q-spread normalizes to a value strictly between 0 and 1."""
+        # Q-values: Hold=1.0, Long=1.3, Short=0.9
+        # raw confidence = 0.4, normalized = clip((0.4 + 1.0) / 2.0, 0, 1) = 0.7
+        models = self._make_dqn_models([1.0, 1.3, 0.9])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_dqn"]
+        assert 0.0 <= p["confidence"] <= 1.0
+        assert abs(p["confidence"] - 0.7) < 1e-6

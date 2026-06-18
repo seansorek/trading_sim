@@ -224,11 +224,16 @@ def predict_symbol(
 
             # Apply the same gating logic used by DailyDQNStrategy in backtests
             cfg = get_config()
-            signal, confidence = gate_dqn_signal(
+            signal, raw_confidence = gate_dqn_signal(
                 q_vals,
                 confidence_threshold=cfg.strategies.dqn.confidence_threshold,
                 q_advantage_threshold=cfg.strategies.dqn.q_advantage_threshold,
             )
+
+            # Normalize raw Q-spread to [0, 1] for downstream consumers
+            # (Discord messages, tomorrow_trades.json).  The old inline DQN
+            # code used:  np.clip((q_margin + 1) / 2, 0, 1)
+            confidence = float(np.clip((raw_confidence + 1.0) / 2.0, 0.0, 1.0))
 
             result["predictions"]["daily_dqn"] = {
                 "signal": signal,
