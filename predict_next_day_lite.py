@@ -26,6 +26,7 @@ from config import get_config
 from data_loader import load_yfinance
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
+from dqn_signal import gate_dqn_signal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -221,14 +222,13 @@ def predict_symbol(
                 s_t = torch.from_numpy(state).float().unsqueeze(0)
                 q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
 
-            # Action space: 0=Hold, 1=Long, 2=Short
-            pred = int(np.argmax(q_vals))
-            action_to_signal = {0: "HOLD", 1: "BUY", 2: "SELL"}
-            signal = action_to_signal[pred]
-
-            sorted_q = np.sort(q_vals)
-            q_margin = float(sorted_q[-1] - sorted_q[-2])
-            confidence = float(np.clip((q_margin + 1.0) / 2.0, 0.0, 1.0))
+            # Apply the same gating logic used by DailyDQNStrategy in backtests
+            cfg = get_config()
+            signal, confidence = gate_dqn_signal(
+                q_vals,
+                confidence_threshold=cfg.strategies.dqn.confidence_threshold,
+                q_advantage_threshold=cfg.strategies.dqn.q_advantage_threshold,
+            )
 
             result["predictions"]["daily_dqn"] = {
                 "signal": signal,

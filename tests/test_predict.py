@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from daily_features import FEATURE_COLS
+from dqn_signal import gate_dqn_signal
 from predict_next_day_lite import _load_pkl, predict_symbol, send_discord
 
 
@@ -245,3 +246,131 @@ class TestSendDiscord:
 
         # No valid predictions → no embeds → returns False
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# gate_dqn_signal  (shared helper)
+# ---------------------------------------------------------------------------
+
+class TestGateDqnSignal:
+    """Tests for the shared DQN signal gating function."""
+
+    def test_low_advantage_returns_hold_even_if_argmax_is_buy(self):
+        """When Q-values are close together (below thresholds), signal must be HOLD."""
+        # q_vals: [Hold=1.0, Long=1.3, Short=0.9]
+        # q_max - q_min = 0.4, below confidence_threshold=2.0
+        q_vals = np.array([1.0, 1.3, 0.9])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "HOLD"
+        assert abs(confidence - 0.4) < 1e-6
+
+    def test_low_advantage_returns_hold_even_if_argmax_is_sell(self):
+        """When Q-values are close together, SELL argmax still produces HOLD."""
+        # q_vals: [Hold=1.0, Long=0.8, Short=1.2]
+        q_vals = np.array([1.0, 0.8, 1.2])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "HOLD"
+
+    def test_high_advantage_buy_signal(self):
+        """When Q-Long clearly dominates, signal should be BUY."""
+        # q_vals: [Hold=0.5, Long=5.0, Short=0.2]
+        # confidence = 5.0 - 0.2 = 4.8 >= 2.0
+        # q_long - q_hold = 4.5 > 1.0
+        q_vals = np.array([0.5, 5.0, 0.2])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "BUY"
+        assert abs(confidence - 4.8) < 1e-6
+
+    def test_high_advantage_sell_signal(self):
+        """When Q-Short clearly dominates, signal should be SELL."""
+        # q_vals: [Hold=0.5, Long=0.2, Short=5.0]
+        q_vals = np.array([0.5, 0.2, 5.0])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "SELL"
+
+    def test_confidence_met_but_advantage_over_hold_too_small(self):
+        """Overall spread is large but best action barely beats Hold => HOLD."""
+        # q_vals: [Hold=3.0, Long=3.5, Short=0.0]
+        # confidence = 3.5 - 0.0 = 3.5 >= 2.0
+        # q_long - q_hold = 0.5 < 1.0  (below q_advantage_threshold)
+        q_vals = np.array([3.0, 3.5, 0.0])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "HOLD"
+        assert abs(confidence - 3.5) < 1e-6
+
+    def test_hold_is_best_action(self):
+        """When Hold has the highest Q-value, signal is HOLD regardless."""
+        q_vals = np.array([10.0, 3.0, 2.0])
+        signal, confidence = gate_dqn_signal(
+            q_vals, confidence_threshold=2.0, q_advantage_threshold=1.0
+        )
+        assert signal == "HOLD"
+
+
+# ---------------------------------------------------------------------------
+# predict_symbol with DQN model
+# ---------------------------------------------------------------------------
+
+class TestPredictSymbolDQN:
+    """Test that predict_symbol applies DQN gating correctly end-to-end."""
+
+    def _make_dqn_models(self, q_values):
+        """Build a models dict with a mock DQN agent returning given Q-values."""
+        import torch
+
+        q_tensor = torch.tensor([q_values], dtype=torch.float32)
+        q_network = MagicMock()
+        q_network.return_value = q_tensor
+
+        agent = MagicMock()
+        agent.q = q_network
+        return {"daily_dqn": agent}
+
+    def test_dqn_low_advantage_produces_hold(self):
+        """DQN prediction with low Q-advantage should produce HOLD."""
+        # Q-values close together: Hold=1.0, Long=1.3, Short=0.9
+        models = self._make_dqn_models([1.0, 1.3, 0.9])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_dqn"]
+        assert p["signal"] == "HOLD"
+
+    def test_dqn_high_advantage_produces_buy(self):
+        """DQN prediction with high Q-advantage for Long should produce BUY."""
+        # Q-values with clear Long advantage: Hold=0.5, Long=10.0, Short=0.2
+        models = self._make_dqn_models([0.5, 10.0, 0.2])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_dqn"]
+        assert p["signal"] == "BUY"
+
+    def test_dqn_high_advantage_produces_sell(self):
+        """DQN prediction with high Q-advantage for Short should produce SELL."""
+        # Q-values with clear Short advantage: Hold=0.5, Long=0.2, Short=10.0
+        models = self._make_dqn_models([0.5, 0.2, 10.0])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_dqn"]
+        assert p["signal"] == "SELL"

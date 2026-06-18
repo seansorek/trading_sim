@@ -15,6 +15,7 @@ import torch
 from base_strategy import BaseStrategy, StrategyConfig
 from daily_features import FEATURE_COLS, make_daily_features
 from dqn_agent import DQNAgent
+from dqn_signal import gate_dqn_signal
 from data_loader import load_yfinance
 
 logger = logging.getLogger(__name__)
@@ -134,16 +135,12 @@ class DailyDQNStrategy(BaseStrategy):
                 s_t = torch.from_numpy(state).float().unsqueeze(0)
                 q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
 
-            q_hold, q_long, q_short = q_vals[0], q_vals[1], q_vals[2]
-            q_max, q_min = q_vals.max(), q_vals.min()
-            confidence = q_max - q_min
-
-            sig = 0
-            if confidence >= self.confidence_threshold:
-                if q_long == q_max and q_long - q_hold > self.q_advantage_threshold:
-                    sig = 1
-                elif q_short == q_max and q_short - q_hold > self.q_advantage_threshold:
-                    sig = -1
+            signal_str, _confidence = gate_dqn_signal(
+                q_vals,
+                confidence_threshold=self.confidence_threshold,
+                q_advantage_threshold=self.q_advantage_threshold,
+            )
+            sig = {"BUY": 1, "SELL": -1, "HOLD": 0}[signal_str]
 
             signals.append(sig)
             idxs.append(daily_feats.index[i])
