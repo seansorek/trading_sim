@@ -473,11 +473,23 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]
             if pos == 0:
                 pos = side * t["shares"]
                 entry_price = t["fill_price"]
+            elif np.sign(side) == np.sign(pos):
+                # Same-direction add (scale-in): update entry to weighted avg, no PnL
+                old_shares = abs(pos)
+                new_shares = t["shares"]
+                total_shares = old_shares + new_shares
+                entry_price = (
+                    (entry_price * old_shares + t["fill_price"] * new_shares)
+                    / total_shares
+                )
+                pos += side * t["shares"]
             else:
+                # Opposite-direction: realize PnL on the portion reduced/closed
+                closed_shares = min(abs(pos), t["shares"])
                 pnl = (
                     (t["fill_price"] - entry_price)
                     * np.sign(pos)
-                    * min(abs(pos), t["shares"])
+                    * closed_shares
                 )
                 pnl_list.append(float(pnl))
                 prev_pos = pos

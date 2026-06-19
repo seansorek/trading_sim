@@ -146,8 +146,9 @@ class DailyLogisticStrategy(BaseStrategy):
         if self.model is not None and self.scaler is not None:
             X_scaled = self.scaler.transform(X)
             probs = self.model.predict_proba(X_scaled)
-            # label_map: {0:SELL, 1:HOLD, 2:BUY}; argmax-1 maps to {-1,0,1}
-            preds = np.argmax(probs, axis=1)
+            # Map through model.classes_ instead of assuming column i == class i
+            classes = self.model.classes_
+            preds = classes[np.argmax(probs, axis=1)]
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1  # {0,1,2} -> {-1,0,1}
         else:
@@ -163,7 +164,8 @@ class DailyLogisticStrategy(BaseStrategy):
             )
             model.fit(X_scaled[mask], y[mask])
             probs = model.predict_proba(X_scaled)
-            preds = np.argmax(probs, axis=1)
+            classes = model.classes_
+            preds = classes[np.argmax(probs, axis=1)]
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
@@ -211,7 +213,8 @@ class DailyXGBoostStrategy(BaseStrategy):
         if self.model is not None and self.scaler is not None:
             X_scaled = self.scaler.transform(X)
             probs = self.model.predict_proba(X_scaled)
-            preds = np.argmax(probs, axis=1)
+            classes = self.model.classes_
+            preds = classes[np.argmax(probs, axis=1)]
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
         else:
@@ -235,7 +238,8 @@ class DailyXGBoostStrategy(BaseStrategy):
             )
             model.fit(X_scaled[mask], y[mask])
             probs = model.predict_proba(X_scaled)
-            preds = np.argmax(probs, axis=1)
+            classes = model.classes_
+            preds = classes[np.argmax(probs, axis=1)]
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
