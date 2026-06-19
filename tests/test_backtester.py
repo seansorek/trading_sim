@@ -414,3 +414,66 @@ def test_walk_forward_artifact_paths_are_scoped(tmp_path):
     }
     walk_forward_backtest(df, df, train_days=5, test_days=1, artifact_paths=paths)
     assert (tmp_path / "wf_metrics.json").exists(), "walk_forward did not write metrics json to custom path"
+
+
+# ---------------------------------------------------------------------------
+# Issue #41 — compute_metrics must not book P&L on same-direction scale-ins
+# ---------------------------------------------------------------------------
+
+def test_compute_metrics_scale_in_no_intermediate_pnl():
+    """
+    BUY, BUY, SELL-all: there should be exactly one round-trip P&L booked
+    (when the position is closed), computed against the share-weighted average
+    entry price.
+
+    Sequence:
+      1. BUY 10 @ 100  → pos = +10, entry = 100
+      2. BUY 10 @ 110  → pos = +20, entry = (100*10+110*10)/20 = 105 (scale-in, no PnL)
+      3. SELL 20 @ 120  → close all, PnL = (120 - 105) * 20 = 300
+
+    Only 1 round-trip P&L should be booked, and it should be positive.
+    """
+    from simulation_pipeline import compute_metrics
+
+    idx = pd.date_range("2024-01-02", periods=10, freq="B", tz="UTC")
+    equity = pd.Series(100_000.0 + np.zeros(10), index=idx)
+    trades = _make_trades([
+        ("BUY",  10, 100.0),  # open long
+        ("BUY",  10, 110.0),  # scale-in
+        ("SELL", 20, 120.0),  # close all
+    ])
+    metrics = compute_metrics(equity, trades)
+
+    assert metrics["n_round_trades"] == 1, (
+        f"Expected exactly 1 round-trip (close only), got {metrics['n_round_trades']}. "
+        "Scale-in should not book intermediate P&L."
+    )
+    assert metrics["hit_rate"] == pytest.approx(1.0), (
+        f"Expected hit_rate=1.0 (the single close is profitable), got {metrics['hit_rate']}"
+    )
+
+
+def test_compute_metrics_scale_in_weighted_average_entry():
+    """
+    Verify that the PnL from the close uses the weighted-average entry price.
+
+    BUY 10 @ 100, BUY 10 @ 120, SELL 20 @ 110.
+    Weighted entry = (100*10 + 120*10) / 20 = 110.
+    PnL = (110 - 110) * 20 = 0 → neither a win nor a loss.
+    """
+    from simulation_pipeline import compute_metrics
+
+    idx = pd.date_range("2024-01-02", periods=10, freq="B", tz="UTC")
+    equity = pd.Series(100_000.0 + np.zeros(10), index=idx)
+    trades = _make_trades([
+        ("BUY",  10, 100.0),
+        ("BUY",  10, 120.0),
+        ("SELL", 20, 110.0),
+    ])
+    metrics = compute_metrics(equity, trades)
+
+    assert metrics["n_round_trades"] == 1
+    # hit_rate = 0.0 because the only trade has PnL = 0 (not > 0)
+    assert metrics["hit_rate"] == pytest.approx(0.0), (
+        f"Expected hit_rate=0.0 (PnL is exactly zero, not a win), got {metrics['hit_rate']}"
+    )
