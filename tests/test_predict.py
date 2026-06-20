@@ -110,6 +110,7 @@ class TestPredictSymbol:
         scaler.transform.side_effect = lambda x: x
         clf = MagicMock()
         clf.predict_proba.return_value = np.array([proba])
+        clf.classes_ = np.array(list(range(len(proba))))
         return {
             "daily_logistic": {
                 "model": clf,
@@ -406,3 +407,73 @@ class TestPredictSymbolDQN:
         p = result["predictions"]["daily_dqn"]
         assert 0.0 <= p["confidence"] <= 1.0
         assert abs(p["confidence"] - 0.7) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Issue #42 — predict_proba column index vs model.classes_
+# ---------------------------------------------------------------------------
+
+class TestPredictProbaClassMapping:
+    """Verify that predict_symbol maps through model.classes_ instead of
+    assuming column i == class i."""
+
+    def _build_models_with_classes(self, proba: list, classes: list) -> dict:
+        """Build a mock model dict whose model.classes_ may differ from [0,1,2]."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([proba])
+        clf.classes_ = np.array(classes)
+        return {
+            "daily_logistic": {
+                "model": clf,
+                "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS),
+                "confidence_threshold": 0.0,  # disable threshold for clarity
+            }
+        }
+
+    def test_missing_hold_class_maps_correctly(self):
+        """If training data had no HOLD (class 1), classes_ = [0, 2].
+        Column 0 = class 0 (SELL), column 1 = class 2 (BUY).
+        With proba [0.3, 0.7], argmax=1 should map to class 2 → BUY, not HOLD."""
+        models = self._build_models_with_classes([0.3, 0.7], [0, 2])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_logistic"]
+        assert p["signal"] == "BUY", (
+            f"With classes_=[0,2] and argmax=1, signal should be BUY, got {p['signal']}"
+        )
+
+    def test_missing_sell_class_maps_correctly(self):
+        """classes_ = [1, 2] (no SELL). Column 0 = HOLD, column 1 = BUY.
+        With proba [0.8, 0.2], argmax=0 should map to class 1 → HOLD."""
+        models = self._build_models_with_classes([0.8, 0.2], [1, 2])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_logistic"]
+        assert p["signal"] == "HOLD", (
+            f"With classes_=[1,2] and argmax=0, signal should be HOLD, got {p['signal']}"
+        )
+
+    def test_full_classes_still_works(self):
+        """Sanity check: with classes_ = [0,1,2], the fix should not break anything."""
+        models = self._build_models_with_classes([0.1, 0.2, 0.7], [0, 1, 2])
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_logistic"]
+        assert p["signal"] == "BUY", (
+            f"With classes_=[0,1,2] and argmax=2, signal should be BUY, got {p['signal']}"
+        )
