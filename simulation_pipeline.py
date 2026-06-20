@@ -97,8 +97,8 @@ class DailyDQNStrategy(BaseStrategy):
             "DQN_MODEL", getattr(cfg, "model_path", "models/dqn_agent.pt")
         )
         self.window = int(os.environ.get("DQN_WINDOW", getattr(cfg, "window", 20)))
-        self.confidence_threshold = float(os.environ.get("DQN_CONFIDENCE", "8.0"))
-        self.q_advantage_threshold = float(os.environ.get("DQN_Q_ADVANTAGE", "1.5"))
+        self.confidence_threshold = float(os.environ.get("DQN_CONFIDENCE", getattr(cfg, "confidence_threshold", 2.0)))
+        self.q_advantage_threshold = float(os.environ.get("DQN_Q_ADVANTAGE", getattr(cfg, "q_advantage_threshold", 1.0)))
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         try:
