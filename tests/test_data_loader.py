@@ -196,3 +196,63 @@ def test_load_yfinance_rejects_gapped_data_from_failed_chunks(mock_ticker):
 
     with pytest.raises(ValueError, match="gap"):
         load_yfinance("FAKE", "2022-06-01", "2026-06-15", interval="1d")
+
+
+# ---------------------------------------------------------------------------
+# Issue #40 — load_csv must not drop daily bars with midnight timestamps
+# ---------------------------------------------------------------------------
+
+def test_load_csv_daily_bars_not_dropped(tmpdir):
+    """
+    Daily bars have midnight-UTC timestamps that fall outside 09:30-16:00 ET.
+    With the default intraday=True, _standardize's _filter_us_hours drops every
+    row. load_csv must detect daily intervals and skip the intraday filter.
+    """
+    n = 20
+    dates = pd.date_range("2024-01-02", periods=n, freq="B")  # business days, midnight
+    data = {
+        "timestamp": dates,
+        "open": np.arange(100.0, 100.0 + n),
+        "high": np.arange(101.0, 101.0 + n),
+        "low": np.arange(99.0, 99.0 + n),
+        "close": np.arange(100.5, 100.5 + n),
+        "volume": np.full(n, 1_000_000),
+    }
+    csv_path = tmpdir.join("daily_bars.csv")
+    pd.DataFrame(data).to_csv(str(csv_path), index=False)
+
+    df = load_csv(str(csv_path), interval="1d")
+
+    assert len(df) == n, (
+        f"Expected {n} daily bars, got {len(df)}. "
+        "load_csv likely applied intraday US-hours filter to daily data."
+    )
+    for col in ["open", "high", "low", "close", "volume"]:
+        assert col in df.columns
+
+
+def test_load_csv_intraday_still_filters(tmpdir):
+    """
+    When interval indicates intraday (e.g. '5m'), load_csv should still apply
+    the US-hours filter via _standardize(intraday=True).
+    """
+    # Create bars with timestamps outside US hours (e.g., 03:00 UTC)
+    n = 10
+    dates = pd.date_range("2024-01-02 03:00:00", periods=n, freq="5min")
+    data = {
+        "timestamp": dates,
+        "open": np.full(n, 100.0),
+        "high": np.full(n, 101.0),
+        "low": np.full(n, 99.0),
+        "close": np.full(n, 100.5),
+        "volume": np.full(n, 1_000_000),
+    }
+    csv_path = tmpdir.join("intraday_bars.csv")
+    pd.DataFrame(data).to_csv(str(csv_path), index=False)
+
+    df = load_csv(str(csv_path), interval="5m")
+
+    # 03:00 UTC is outside 09:30-16:00 ET, so all bars should be filtered out
+    assert len(df) == 0, (
+        f"Expected 0 bars after US-hours filter for 03:00 UTC data, got {len(df)}"
+    )

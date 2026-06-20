@@ -196,16 +196,24 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
     is_intraday = interval.endswith('m') or interval.endswith('h')
     return _standardize(df, intraday=is_intraday)
 
-def load_csv(path: str) -> pd.DataFrame:
+def load_csv(path: str, interval: str = "1d") -> pd.DataFrame:
     """
-    Load intraday bars from a local CSV with columns:
+    Load bars from a local CSV with columns:
     timestamp, open, high, low, close, volume
+
+    Args:
+        path: Path to the CSV file.
+        interval: Bar interval (e.g. "1d", "5m", "1h"). Used to determine
+                  whether to apply intraday US-hours filtering. Daily and
+                  weekly bars skip the filter to avoid dropping rows with
+                  midnight timestamps.
     """
     df = pd.read_csv(path, parse_dates=["timestamp"]).set_index("timestamp")
     # Assume timestamp is UTC if naive; localize to UTC then convert
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
-    return _standardize(df)
+    is_intraday = interval.endswith("m") or interval.endswith("h")
+    return _standardize(df, intraday=is_intraday)
 
 # --- Optional: Alpha Vantage (intraday 1min/5min/15min); requires API key ---
 def load_alpha_vantage(symbol: str, api_key: str, interval: str = "5min", outputsize: str = "full") -> pd.DataFrame:

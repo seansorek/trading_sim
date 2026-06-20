@@ -163,7 +163,8 @@ def predict_symbol(
             pred_idx = int(np.argmax(prob))
             confidence = float(prob[pred_idx])
             threshold = data.get("confidence_threshold", 0.55)
-            signal = _SIGNAL_NAMES[pred_idx]
+            pred_class = int(data["model"].classes_[pred_idx])
+            signal = _SIGNAL_NAMES[pred_class]
             if signal != "HOLD" and confidence < threshold:
                 signal = "HOLD"
             result["predictions"]["daily_logistic"] = {
@@ -189,7 +190,8 @@ def predict_symbol(
             pred_idx = int(np.argmax(prob))
             confidence = float(prob[pred_idx])
             threshold = data.get("confidence_threshold", 0.55)
-            signal = _SIGNAL_NAMES[pred_idx]
+            pred_class = int(data["model"].classes_[pred_idx])
+            signal = _SIGNAL_NAMES[pred_class]
             if signal != "HOLD" and confidence < threshold:
                 signal = "HOLD"
             result["predictions"]["daily_xgboost"] = {
