@@ -16,7 +16,8 @@ from data_loader import (
     _standardize,
     _ensure_cols,
     _filter_us_hours,
-    _add_spread
+    _add_spread,
+    _check_trading_day_gaps,
 )
 
 @pytest.fixture
@@ -126,6 +127,75 @@ def test_load_csv(sample_dataframe, tmpdir):
         assert col in df.columns
     assert df.index.tz is not None  # load_csv always produces tz-aware index
     assert (df['spread'] >= 0.01).all()
+
+
+# ---------------------------------------------------------------------------
+# Gap detection in chunked fetches (#32)
+# ---------------------------------------------------------------------------
+
+def test_check_trading_day_gaps_raises_on_large_gap():
+    """_check_trading_day_gaps should raise ValueError when a gap exceeds the threshold."""
+    # Create a DataFrame with a 10-day gap (way over the 5-day default)
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04",
+                            "2024-01-18", "2024-01-19"])  # 14-day gap
+    df = pd.DataFrame({"close": [100.0] * 5}, index=dates)
+
+    with pytest.raises(ValueError, match="gap"):
+        _check_trading_day_gaps(df, max_gap_days=5, symbol="TEST")
+
+
+def test_check_trading_day_gaps_passes_on_small_gap():
+    """Normal weekend-sized gaps (2-3 days) should not raise."""
+    dates = pd.bdate_range("2024-01-02", periods=20)  # business days only
+    df = pd.DataFrame({"close": [100.0] * 20}, index=dates)
+
+    # Should not raise — weekends create 2-day gaps at most
+    _check_trading_day_gaps(df, max_gap_days=5, symbol="TEST")
+
+
+@patch('yfinance.Ticker')
+def test_load_yfinance_rejects_gapped_data_from_failed_chunks(mock_ticker):
+    """When a middle chunk fails, load_yfinance should raise due to the gap."""
+    # Use 1d interval (chunk_days=730). Total range must exceed 730 days
+    # to trigger chunking: ~3 years.
+
+    # Build chunk 1 data: first 2 years
+    dates_1 = pd.bdate_range("2022-06-01", "2023-06-01", freq="B")
+    chunk1 = pd.DataFrame({
+        "Open": [100.0] * len(dates_1),
+        "High": [101.0] * len(dates_1),
+        "Low": [99.0] * len(dates_1),
+        "Close": [100.0] * len(dates_1),
+        "Volume": [1000000] * len(dates_1),
+    }, index=dates_1)
+
+    # Build chunk 3 data: last year (big gap from chunk 1 because chunk 2 fails)
+    dates_3 = pd.bdate_range("2025-06-01", "2026-06-01", freq="B")
+    chunk3 = pd.DataFrame({
+        "Open": [100.0] * len(dates_3),
+        "High": [101.0] * len(dates_3),
+        "Low": [99.0] * len(dates_3),
+        "Close": [100.0] * len(dates_3),
+        "Volume": [1000000] * len(dates_3),
+    }, index=dates_3)
+
+    call_count = [0]
+
+    def mock_history(**kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return chunk1
+        elif call_count[0] == 2:
+            raise ConnectionError("simulated failure")
+        else:
+            return chunk3
+
+    mock_instance = MagicMock()
+    mock_instance.history.side_effect = mock_history
+    mock_ticker.return_value = mock_instance
+
+    with pytest.raises(ValueError, match="gap"):
+        load_yfinance("FAKE", "2022-06-01", "2026-06-15", interval="1d")
 
 
 # ---------------------------------------------------------------------------

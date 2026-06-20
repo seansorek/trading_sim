@@ -93,6 +93,7 @@ def run_symbol_strategy(
         wf_metrics = wf.metrics
     mc = monte_carlo_stress(
         df, feats, signal, n_runs=n_mc_runs,
+        base_exec_cfg=exec_cfg,
         out_csv=f"{artifact_base}_monte_carlo_stats.csv",
     )
 

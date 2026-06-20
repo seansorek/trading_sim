@@ -388,6 +388,216 @@ def test_run_symbol_strategy_wf_skipped_flag():
 
 
 # ---------------------------------------------------------------------------
+# Monte Carlo stress test uses configured commission (#28)
+# ---------------------------------------------------------------------------
+
+def test_monte_carlo_uses_configured_commission():
+    """monte_carlo_stress should use the base_exec_cfg's commission, not a hardcoded value."""
+    from unittest.mock import patch
+    from simulation_pipeline import monte_carlo_stress
+
+    df = _make_df(30)
+    signal = pd.Series(1, index=df.index)  # always long
+
+    custom_commission = 0.00005  # the correct configured value
+    base_cfg = ExecutionConfig(commission_per_share=custom_commission)
+
+    captured_cfgs = []
+    original_init = Backtester.__init__
+
+    def spy_init(self, exec_cfg):
+        captured_cfgs.append(exec_cfg.commission_per_share)
+        original_init(self, exec_cfg)
+
+    with patch.object(Backtester, "__init__", spy_init):
+        monte_carlo_stress(df, df, signal, n_runs=5, base_exec_cfg=base_cfg)
+
+    # Every MC run should use the configured commission, not the old hardcoded 0.0005
+    for comm in captured_cfgs:
+        assert comm == custom_commission, (
+            f"MC used commission {comm}, expected {custom_commission}"
+        )
+
+
+def test_monte_carlo_default_commission_matches_execution_config_default():
+    """When no base_exec_cfg is passed, commission should match ExecutionConfig default (0.00005)."""
+    from unittest.mock import patch
+    from simulation_pipeline import monte_carlo_stress
+
+    df = _make_df(30)
+    signal = pd.Series(1, index=df.index)
+
+    captured_cfgs = []
+    original_init = Backtester.__init__
+
+    def spy_init(self, exec_cfg):
+        captured_cfgs.append(exec_cfg.commission_per_share)
+        original_init(self, exec_cfg)
+
+    with patch.object(Backtester, "__init__", spy_init):
+        monte_carlo_stress(df, df, signal, n_runs=3)
+
+    default_commission = ExecutionConfig().commission_per_share
+    for comm in captured_cfgs:
+        assert comm == default_commission, (
+            f"MC used commission {comm}, expected default {default_commission}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cooldown after forced exits (#31)
+# ---------------------------------------------------------------------------
+
+def test_stop_loss_exit_suppresses_immediate_reentry():
+    """After a stop-loss exit, signal should NOT re-enter on the very next bar
+    if the signal is still active (non-zero). Re-entry only happens after
+    the signal returns to flat (0/HOLD)."""
+    n = 20
+    # Price drops sharply at bar 5 to trigger stop-loss, then recovers
+    prices = [100.0] * 5 + [90.0] + [95.0] * 14
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY from bar 3 onward (never goes flat)
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[3:] = 1
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.05,   # 5% stop-loss triggers on the drop to 90
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    result = _run(signal, df, cfg)
+
+    # After the stop-loss exit, there should be no immediate re-entry on bar 6+
+    # because signal never goes back to 0. Count trades with exit_reason="stop_loss"
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+    stop_exits = trades[trades["exit_reason"] == "stop_loss"]
+    signal_entries_after_stop = trades[
+        (trades["exit_reason"] == "signal") & (trades.index > stop_exits.index.max())
+    ] if not stop_exits.empty else pd.DataFrame()
+
+    # No signal-driven re-entries should happen after the stop-loss because
+    # the signal never returns to flat
+    assert len(signal_entries_after_stop) == 0, (
+        f"Expected no re-entries after stop-loss without signal returning to flat, "
+        f"but found {len(signal_entries_after_stop)} entries"
+    )
+
+
+def test_forced_exit_allows_reentry_after_signal_returns_to_flat():
+    """After forced exit and signal returning to 0, a new entry should be allowed."""
+    n = 20
+    prices = [100.0] * 5 + [90.0] + [95.0] * 14
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY at bar 3, stop-loss fires at bar 5 (price drops to 90),
+    # then signal goes flat at bar 8, then BUY again at bar 10
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[3:8] = 1   # BUY up to bar 7
+    signal.iloc[8:10] = 0  # flat (cooldown reset)
+    signal.iloc[10:] = 1   # BUY again
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.05,
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    result = _run(signal, df, cfg)
+
+    # After signal returns to flat and then back to BUY, we should see a new entry
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+    signal_entries = trades[trades["exit_reason"] == "signal"]
+
+    # Should have at least 2 signal entries: initial entry + re-entry after cooldown
+    assert len(signal_entries) >= 2, (
+        f"Expected re-entry after cooldown reset, but only found "
+        f"{len(signal_entries)} signal entries"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Daily loss limit on daily bars (#27)
+# ---------------------------------------------------------------------------
+
+def test_daily_loss_limit_fires_on_daily_bars():
+    """On daily bars (one bar per calendar day), the daily loss limit should
+    compare against the *previous bar's closing equity*, not the current bar's
+    opening cash — otherwise it's a no-op because every bar resets the baseline.
+
+    We use max_position_pct=1.0 so the position is large enough that a 8% price
+    drop causes a portfolio-level loss exceeding the 5% daily limit."""
+    n = 10
+    # Price drops 8% on bar 2 (from 100 to 92)
+    prices = [100.0, 100.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0]
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    # Signal: BUY from bar 0, hold forever
+    signal = pd.Series(1, index=df.index)
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,        # wide stop-loss, won't trigger
+        take_profit_pct=0.50,
+        daily_loss_limit_pct=0.05,  # 5% daily loss limit
+        max_position_pct=1.0,      # full portfolio in one position
+        max_position=10_000,       # allow large position
+    )
+    result = _run(signal, df, cfg)
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+
+    # The daily loss limit should fire because the 8% price drop on a fully-invested
+    # portfolio exceeds the 5% threshold.
+    # With the old bug (resetting baseline per calendar day on daily data),
+    # it would never fire because each bar saw cash == daily_start_cash.
+    daily_limit_exits = trades[trades["exit_reason"] == "daily_limit"]
+    assert len(daily_limit_exits) >= 1, (
+        "Daily loss limit did not fire on an 8% price drop with a 5% threshold "
+        "and full portfolio investment. This suggests the baseline is still "
+        "resetting per calendar day."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scoped artifact paths — regression test for issue #17
 # ---------------------------------------------------------------------------
 

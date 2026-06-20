@@ -65,6 +65,10 @@ logger = logging.getLogger(__name__)
 
 LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
 
+# Maximum number of business days the cached data's latest bar can lag behind
+# the requested end date before we consider the cache stale and re-fetch.
+_STALE_TOLERANCE_BDAYS = 4
+
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -86,11 +90,30 @@ def _preprocess(X: np.ndarray) -> np.ndarray:
 def _load_symbol(
     symbol: str, start: str, end: str, db: DB
 ) -> pd.DataFrame | None:
-    """Fetch daily bars, cache in DB, return DataFrame."""
+    """Fetch daily bars, cache in DB, return DataFrame.
+
+    A recency check ensures we don't silently train on stale data: if the
+    cache's most recent bar is more than ``_STALE_TOLERANCE_BDAYS`` business
+    days before the requested *end* date, the cache is considered stale and
+    data is re-fetched from yfinance.
+    """
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
-        logger.info("  %s: loaded %d bars from DB cache", symbol, len(cached))
-        return cached
+        # Freshness check: reject cache if the latest bar is too far from `end`
+        end_dt = pd.to_datetime(end)
+        latest_bar = cached.index.max()
+        # Normalize both to tz-naive dates for comparison
+        latest_date = latest_bar.tz_localize(None) if latest_bar.tzinfo else latest_bar
+        end_date = end_dt.tz_localize(None) if end_dt.tzinfo else end_dt
+        stale_cutoff = end_date - pd.tseries.offsets.BDay(_STALE_TOLERANCE_BDAYS)
+        if latest_date >= stale_cutoff:
+            logger.info("  %s: loaded %d bars from DB cache", symbol, len(cached))
+            return cached
+        else:
+            logger.info(
+                "  %s: cache stale (latest bar %s, need >= %s), re-fetching",
+                symbol, latest_date.date(), stale_cutoff.date(),
+            )
 
     logger.info("  %s: fetching from yfinance...", symbol)
     try:

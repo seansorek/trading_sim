@@ -40,6 +40,27 @@ def _standardize(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
     df.index.name = "timestamp"
     return df
 
+def _check_trading_day_gaps(
+    df: pd.DataFrame, max_gap_days: int = 5, symbol: str = ""
+) -> None:
+    """Raise ValueError if the date index has any gap exceeding *max_gap_days* trading days."""
+    if df.empty or len(df) < 2:
+        return
+    dates = pd.Series(df.index.normalize().unique()).sort_values()
+    gaps = dates.diff().dt.days.dropna()
+    worst = gaps.max()
+    if worst > max_gap_days:
+        gap_idx = gaps.idxmax()
+        gap_start = dates.iloc[gap_idx - 1]
+        gap_end = dates.iloc[gap_idx]
+        raise ValueError(
+            f"Data for {symbol} has a {int(worst)}-day gap "
+            f"({gap_start.date()} to {gap_end.date()}), "
+            f"exceeding the {max_gap_days}-day tolerance. "
+            f"One or more chunk fetches failed."
+        )
+
+
 # --- Loaders: YFinance and CSV ---
 def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd.DataFrame:
     """
@@ -105,10 +126,11 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
         current_start = start_dt
         chunk_num = 0
         
+        failed_chunks = []
         while current_start < end_dt:
             chunk_end = min(current_start + timedelta(days=chunk_days), end_dt)
             chunk_num += 1
-            
+
             try:
                 ticker = yf.Ticker(symbol)
                 chunk_df = ticker.history(
@@ -118,18 +140,20 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
                     actions=False,
                     prepost=False
                 )
-                
+
                 if not chunk_df.empty:
                     all_dfs.append(chunk_df)
                     print(f"  Chunk {chunk_num}: {current_start.date()} to {chunk_end.date()} - {len(chunk_df)} bars")
                 else:
                     print(f"  [warn] Chunk {chunk_num}: No data returned for {current_start.date()} to {chunk_end.date()}")
-                    
+                    failed_chunks.append((chunk_num, current_start.date(), chunk_end.date()))
+
             except Exception as e:
                 print(f"  [error] Chunk {chunk_num} failed ({current_start.date()} to {chunk_end.date()}): {e}")
-            
+                failed_chunks.append((chunk_num, current_start.date(), chunk_end.date()))
+
             current_start = chunk_end
-        
+
         if not all_dfs:
             df = pd.DataFrame()
         else:
@@ -138,6 +162,10 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
             df = df[~df.index.duplicated(keep='first')]
             df = df.sort_index()
             print(f"  Combined {len(all_dfs)} chunks into {len(df)} total bars")
+
+            # Reject result if failed chunks left gaps in coverage
+            if failed_chunks:
+                _check_trading_day_gaps(df, max_gap_days=5, symbol=symbol)
     else:
         # Single request for small ranges
         ticker = yf.Ticker(symbol)

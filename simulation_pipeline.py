@@ -275,11 +275,17 @@ class Backtester:
         trade_log: list[dict] = []
         daily_start_cash = cash
         current_day = df.index[0].date() if len(df) > 0 else None
+        prev_close: Optional[float] = None
+        # Cooldown: after a forced exit, suppress re-entry until signal returns to flat
+        forced_exit_active = False
 
         for ts, row in df.iterrows():
             if ts.date() != current_day:
                 current_day = ts.date()
-                daily_start_cash = cash
+                if prev_close is not None:
+                    daily_start_cash = cash + position * prev_close
+                else:
+                    daily_start_cash = cash
 
             mid = float(row["close"])
             if mid <= 0:
@@ -293,6 +299,13 @@ class Backtester:
             slippage = (self.exec_cfg.slippage_bps / 1e4) * mid
 
             desired = int(signal.loc[ts])
+
+            # Cooldown logic: after forced exit, wait for signal to return to flat
+            if forced_exit_active:
+                if desired == 0:
+                    forced_exit_active = False
+                else:
+                    desired = 0  # suppress re-entry
 
             notional = self.exec_cfg.start_cash * self.exec_cfg.max_position_pct
             shares = int(notional / mid) if mid > 0 else 0
@@ -354,8 +367,9 @@ class Backtester:
                 })
                 position = 0
                 avg_entry_price = None
+                forced_exit_active = True
 
-            # Daily loss limit
+            # Daily loss limit (baseline = mark-to-market equity at day boundary)
             equity = cash + position * mid
             if equity < daily_start_cash * (1 - self.exec_cfg.daily_loss_limit_pct):
                 if position != 0:
@@ -375,10 +389,12 @@ class Backtester:
                     })
                     position = 0
                     avg_entry_price = None
+                    forced_exit_active = True
 
             equity = cash + position * mid
             equity_curve.append(equity)
             timestamps.append(ts)
+            prev_close = mid
 
         equity_series = pd.Series(
             equity_curve, index=pd.DatetimeIndex(timestamps), name="equity"
@@ -576,13 +592,16 @@ def monte_carlo_stress(
     feats: pd.DataFrame,
     signal: pd.Series,
     n_runs: int = 50,
+    base_exec_cfg: Optional[ExecutionConfig] = None,
     out_csv: str = "results/monte_carlo_stats.csv",
 ) -> pd.DataFrame:
+    if base_exec_cfg is None:
+        base_exec_cfg = ExecutionConfig()
     rng = np.random.default_rng(42)
     stats = []
     for _ in range(n_runs):
         exec_cfg = ExecutionConfig(
-            commission_per_share=0.0005,
+            commission_per_share=base_exec_cfg.commission_per_share,
             slippage_bps=max(0.5, float(rng.normal(2.0, 1.0))),
             stop_loss_pct=float(np.clip(rng.normal(0.03, 0.01), 0.01, 0.06)),
             daily_loss_limit_pct=float(np.clip(rng.normal(0.02, 0.005), 0.01, 0.05)),
