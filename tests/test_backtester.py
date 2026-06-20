@@ -427,3 +427,32 @@ class TestDailyDQNStrategyThresholds:
         strat = DailyDQNStrategy(cfg)
         assert strat.confidence_threshold == 5.0
         assert strat.q_advantage_threshold == 3.0
+
+
+# ---------------------------------------------------------------------------
+# Scoped artifact paths — regression test for issue #17
+# ---------------------------------------------------------------------------
+
+def test_monte_carlo_stress_writes_to_custom_out_csv(tmp_path):
+    """monte_carlo_stress must write to the caller-supplied path, not the hardcoded default."""
+    from simulation_pipeline import monte_carlo_stress
+
+    df = _make_df(30)
+    signal = pd.Series(0, index=df.index)
+    out = tmp_path / "scoped_mc.csv"
+    monte_carlo_stress(df, df, signal, n_runs=3, out_csv=str(out))
+    assert out.exists(), "monte_carlo_stress did not write to the custom out_csv path"
+
+
+def test_walk_forward_artifact_paths_are_scoped(tmp_path):
+    """walk_forward_backtest must write artifacts to the caller-supplied paths."""
+    from simulation_pipeline import walk_forward_backtest
+
+    df = _make_df(30)
+    paths = {
+        "equity_curve_csv": str(tmp_path / "wf_equity.csv"),
+        "trade_log_csv": str(tmp_path / "wf_trades.csv"),
+        "metrics_json": str(tmp_path / "wf_metrics.json"),
+    }
+    walk_forward_backtest(df, df, train_days=5, test_days=1, artifact_paths=paths)
+    assert (tmp_path / "wf_metrics.json").exists(), "walk_forward did not write metrics json to custom path"
