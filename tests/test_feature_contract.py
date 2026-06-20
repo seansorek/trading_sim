@@ -171,3 +171,11 @@ def test_normalized_cumsum_features_are_bounded():
         std = float(vals.std())
         assert abs(mean) < 1.0, f"{col} mean {mean:.3f} too far from 0"
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
+
+
+def test_feature_cols_count_is_25():
+    """Regression: CLAUDE.md and project docs describe a 25-feature vector."""
+    assert len(FEATURE_COLS) == 25, (
+        f"Expected 25 features, got {len(FEATURE_COLS)}. "
+        "Update CLAUDE.md and all docs if you intentionally changed the count."
+    )

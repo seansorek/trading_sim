@@ -536,6 +536,7 @@ def walk_forward_backtest(
     feats: pd.DataFrame,
     train_days: int = 5,
     test_days: int = 1,
+    artifact_paths: Optional[dict] = None,
 ) -> BacktestResult:
     _COLS = ["ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z"]
     days = sorted(set(df.index.date))
@@ -566,7 +567,8 @@ def walk_forward_backtest(
         pd.concat(signals).sort_index() if signals else pd.Series(0, index=feats.index)
     )
     bt = Backtester(ExecutionConfig())
-    return bt.run(df.loc[signal_full.index], feats.loc[signal_full.index], signal_full)
+    return bt.run(df.loc[signal_full.index], feats.loc[signal_full.index], signal_full,
+                  artifact_paths=artifact_paths)
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +581,7 @@ def monte_carlo_stress(
     signal: pd.Series,
     n_runs: int = 50,
     base_exec_cfg: Optional[ExecutionConfig] = None,
+    out_csv: str = "results/monte_carlo_stats.csv",
 ) -> pd.DataFrame:
     if base_exec_cfg is None:
         base_exec_cfg = ExecutionConfig()
@@ -596,5 +599,5 @@ def monte_carlo_stress(
         stats.append(res.metrics)
 
     df_stats = pd.DataFrame(stats).replace([np.inf, -np.inf], np.nan).dropna()
-    df_stats.to_csv("results/monte_carlo_stats.csv", index=False)
+    df_stats.to_csv(out_csv, index=False)
     return df_stats
