@@ -47,12 +47,16 @@ class TradingEnv:
         self._num_bars = len(self.df)
         self._date_range = f"{self.df.index[0].date()} to {self.df.index[-1].date()}"
 
-        # Optional simple scaler: z-score per feature
+        # Optional simple scaler: z-score per feature.
+        # Fit the scaler on a strict warmup window only — fitting over the
+        # entire DataFrame leaks future means/stdevs into observations at
+        # earlier steps (look-ahead bias). See issue #45.
         if self.scaler is None:
+            fit_end = min(252, max(self.window + 1, len(self.df) // 2))
             self.scaler = {}
             for c in self.features:
-                mu = float(self.df[c].mean())
-                sd = float(self.df[c].std() or 1.0)
+                mu = float(self.df[c].iloc[:fit_end].mean())
+                sd = float(self.df[c].iloc[:fit_end].std() or 1.0)
                 self.scaler[c] = (mu, sd)
         for c in self.features:
             mu, sd = self.scaler[c]
