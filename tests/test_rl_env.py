@@ -93,3 +93,47 @@ class TestTradingEnvFeatureDimension:
             "close should not be in env.features — it was included before the fix "
             "causing a 26-column observation vs 25-column FEATURE_COLS mismatch."
         )
+
+
+class TestTradingEnvScalerNoLookahead:
+    """Issue #45: scaler must be fit on a warmup window only, not the full df.
+
+    If the scaler were fit over the entire DataFrame, perturbing the tail of
+    the feature series would change the (mu, sd) used to normalise rows at the
+    head — leaking future statistics into past observations.
+    """
+
+    def _build_env_with_feats(self, feats, window=5):
+        raw = _make_raw_ohlcv(n=len(feats))
+        # Align raw index to feats so make_daily_features patch is consistent.
+        raw = raw.iloc[: len(feats)]
+        with patch("rl_env.load_yfinance", return_value=raw), \
+             patch("rl_env.make_daily_features", return_value=feats):
+            from rl_env import TradingEnv
+            env = TradingEnv(symbol="TEST", window=window)
+        return env
+
+    def test_scaler_independent_of_future_rows(self):
+        """Mutating the tail of a feature must not change the scaler's (mu, sd)."""
+        raw = _make_raw_ohlcv(n=600)
+        feats_a = _make_feats_df(raw)
+        feats_b = feats_a.copy()
+        # Inject a huge spike in the back half of every feature column.
+        tail_start = len(feats_b) // 2 + 50
+        for c in FEATURE_COLS:
+            feats_b.iloc[tail_start:, feats_b.columns.get_loc(c)] += 1e6
+
+        env_a = self._build_env_with_feats(feats_a)
+        env_b = self._build_env_with_feats(feats_b)
+
+        for c in FEATURE_COLS:
+            mu_a, sd_a = env_a.scaler[c]
+            mu_b, sd_b = env_b.scaler[c]
+            assert mu_a == pytest.approx(mu_b, rel=1e-6, abs=1e-6), (
+                f"Scaler mean for {c} leaked future stats: "
+                f"{mu_a} vs {mu_b} when only tail rows changed"
+            )
+            assert sd_a == pytest.approx(sd_b, rel=1e-6, abs=1e-6), (
+                f"Scaler std for {c} leaked future stats: "
+                f"{sd_a} vs {sd_b} when only tail rows changed"
+            )
