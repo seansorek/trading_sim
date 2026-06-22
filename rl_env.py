@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Optional, List
 
-from daily_features import make_daily_features, FEATURE_COLS
+from daily_features import make_daily_features, FEATURE_COLS, FWD_RET_HORIZON_DAYS
 from data_loader import load_yfinance
 
 
@@ -110,8 +110,11 @@ class TradingEnv:
         if target_pos != self.position:
             cost = (abs(target_pos - self.position)) * (self.transaction_cost_bps * 1e-4) * self.prices[self.idx - 1]
 
-        # Realized PnL for the day based on fwd return
-        ret = self.returns[self.idx - 1]
+        # fwd_ret_1d is actually a FWD_RET_HORIZON_DAYS-bar cumulative return;
+        # divide by horizon so per-step reward is a per-day-equivalent PnL.
+        # (Window overlap across consecutive idx steps remains but the magnitude
+        #  matches a one-bar holding period.)
+        ret = self.returns[self.idx - 1] / FWD_RET_HORIZON_DAYS
         gross_pnl = target_pos * ret * self.prices[self.idx - 1]
         pnl = gross_pnl - cost
         

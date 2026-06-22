@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 
 
+# Horizon (in trading days) of fwd_ret_1d. See note where it is computed.
+FWD_RET_HORIZON_DAYS = 3
+
+
 # Version string stored alongside model pickles. Bump when FEATURE_COLS changes;
 # old models become explicitly incompatible.
 FEATURE_SET_NAME: str = "daily_v3"
@@ -181,8 +185,12 @@ def make_daily_features(
         obv_raw.rolling(20).std() + 1e-12
     )
 
-    # 3-day forward return: less noisy than 1-day, aligns with the 5-day holding period
-    feats["fwd_ret_1d"] = (df["close"].shift(-3) / df["close"]) - 1
+    # The column name is fwd_ret_1d for backwards compatibility, but it is a
+    # FWD_RET_HORIZON_DAYS-bar cumulative forward return — less noisy than a true
+    # 1-day return. Consumers that pay this as per-bar PnL (e.g. rl_env, which
+    # advances idx by 1 per step) must divide by FWD_RET_HORIZON_DAYS to avoid
+    # inflating reward magnitude and double-counting overlapping windows.
+    feats["fwd_ret_1d"] = (df["close"].shift(-FWD_RET_HORIZON_DAYS) / df["close"]) - 1
 
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.
