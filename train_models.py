@@ -43,7 +43,7 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-from data_loader import load_yfinance
+from data_loader import check_cache_freshness, load_yfinance
 from daily_features import (
     FEATURE_COLS,
     FEATURE_SET_NAME,
@@ -99,17 +99,15 @@ def _load_symbol(
     """
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
-        # Freshness check: reject cache if the latest bar is too far from `end`
-        end_dt = pd.to_datetime(end)
-        latest_bar = cached.index.max()
-        # Normalize both to tz-naive dates for comparison
-        latest_date = latest_bar.tz_localize(None) if latest_bar.tzinfo else latest_bar
-        end_date = end_dt.tz_localize(None) if end_dt.tzinfo else end_dt
-        stale_cutoff = end_date - pd.tseries.offsets.BDay(_STALE_TOLERANCE_BDAYS)
-        if latest_date >= stale_cutoff:
+        if check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS):
             logger.info("  %s: loaded %d bars from DB cache", symbol, len(cached))
             return cached
         else:
+            latest_bar = cached.index.max()
+            latest_date = latest_bar.tz_localize(None) if latest_bar.tzinfo else latest_bar
+            end_dt = pd.to_datetime(end)
+            end_date = end_dt.tz_localize(None) if end_dt.tzinfo else end_dt
+            stale_cutoff = end_date - pd.tseries.offsets.BDay(_STALE_TOLERANCE_BDAYS)
             logger.info(
                 "  %s: cache stale (latest bar %s, need >= %s), re-fetching",
                 symbol, latest_date.date(), stale_cutoff.date(),

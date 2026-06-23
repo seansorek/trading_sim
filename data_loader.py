@@ -61,6 +61,24 @@ def _check_trading_day_gaps(
         )
 
 
+# --- Cache freshness helper ---
+def check_cache_freshness(
+    cached: pd.DataFrame, end: str, stale_tolerance_bdays: int = 4
+) -> bool:
+    """Return True if *cached* data is fresh enough relative to *end*.
+
+    The cache is considered fresh when its latest bar is within
+    *stale_tolerance_bdays* business days of the requested *end* date.
+    """
+    end_dt = pd.to_datetime(end)
+    latest_bar = cached.index.max()
+    # Normalize both to tz-naive timestamps for comparison
+    latest_date = latest_bar.tz_localize(None) if latest_bar.tzinfo else latest_bar
+    end_date = end_dt.tz_localize(None) if end_dt.tzinfo else end_dt
+    stale_cutoff = end_date - pd.tseries.offsets.BDay(stale_tolerance_bdays)
+    return latest_date >= stale_cutoff
+
+
 # --- Loaders: YFinance and CSV ---
 def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd.DataFrame:
     """

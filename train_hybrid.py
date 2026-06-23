@@ -36,7 +36,7 @@ from daily_features import (
     discretize_labels,
     make_daily_features,
 )
-from data_loader import load_yfinance
+from data_loader import check_cache_freshness, load_yfinance
 from db import DB
 from hybrid_model import (
     TransformerCfg,
@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 
 LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
 MODEL_KEY = "daily_hybrid"
+
+# Maximum number of business days the cached data's latest bar can lag behind
+# the requested end date before we consider the cache stale and re-fetch.
+_STALE_TOLERANCE_BDAYS = 4
 
 
 def _seed_all(seed: int = 42) -> None:
@@ -83,9 +87,14 @@ def _preprocess(X: np.ndarray) -> np.ndarray:
 def _load_symbol(symbol: str, start: str, end: str, db: DB) -> pd.DataFrame | None:
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
-        logger.info("  %s: %d bars from DB cache", symbol, len(cached))
-        return cached
-    logger.info("  %s: fetching from yfinance...", symbol)
+        if check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS):
+            logger.info("  %s: %d bars from DB cache", symbol, len(cached))
+            return cached
+        logger.info(
+            "  %s: cache stale, re-fetching from yfinance...", symbol,
+        )
+    else:
+        logger.info("  %s: fetching from yfinance...", symbol)
     try:
         df = load_yfinance(symbol, start=start, end=end, interval="1d")
     except Exception as exc:
