@@ -248,11 +248,15 @@ class Backtester:
         run_id: Optional[str] = None,
         symbol: str = "",
         strategy: str = "",
+        seed: Optional[int] = None,
     ) -> BacktestResult:
-        # Deterministic execution
-        np.random.seed(42)
-        random.seed(42)
-        torch.manual_seed(42)
+        # Seed only when the caller explicitly requests reproducibility.
+        # Previously this hard-coded seed=42 on every call, which defeated
+        # Monte Carlo stress tests (see issue #55).
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.manual_seed(seed)
 
         if artifact_paths is None:
             artifact_paths = {
