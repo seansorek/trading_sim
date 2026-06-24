@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db import DB
+from data_loader import check_cache_freshness
 from train_models import _load_symbol, _STALE_TOLERANCE_BDAYS
 
 
