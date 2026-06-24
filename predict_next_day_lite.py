@@ -214,11 +214,23 @@ def predict_symbol(
         try:
             agent = models["daily_dqn"]
             n_rows, n_cols = X_all.shape
+
+            # Z-score normalize features to match DQN training (rl_env.py).
+            # Fit scaler on a warmup window to avoid look-ahead bias.
+            fit_end = min(252, max(dqn_window + 1, n_rows // 2))
+            X_normed = X_all.copy()
+            for ci, col in enumerate(FEATURE_COLS):
+                mu = float(X_all[:fit_end, ci].mean())
+                sd = float(X_all[:fit_end, ci].std() or 1.0)
+                if sd == 0:
+                    sd = 1.0
+                X_normed[:, ci] = (X_all[:, ci] - mu) / sd
+
             if n_rows >= dqn_window:
-                state = X_all[-dqn_window:].flatten()
+                state = X_normed[-dqn_window:].flatten()
             else:
-                pad = np.zeros(dqn_window * n_cols - X_all.size, dtype=np.float32)
-                state = np.concatenate([X_all.flatten(), pad])
+                pad = np.zeros(dqn_window * n_cols - X_normed.size, dtype=np.float32)
+                state = np.concatenate([X_normed.flatten(), pad])
 
             with torch.no_grad():
                 s_t = torch.from_numpy(state).float().unsqueeze(0)
