@@ -111,11 +111,12 @@ class DailyDQNStrategy(BaseStrategy):
         daily_feats = make_daily_features(df).fillna(0.0)
         feature_cols = FEATURE_COLS
 
-        # Fit per-run normalizer from available data
+        # Fit normalizer on warmup window only to avoid look-ahead bias
+        fit_end = min(252, max(self.window + 1, len(daily_feats) // 2))
         scaler_stats: dict = {}
         for col in feature_cols:
-            mu = float(daily_feats[col].mean())
-            sigma = float(daily_feats[col].std() or 1.0)
+            mu = float(daily_feats[col].iloc[:fit_end].mean())
+            sigma = float(daily_feats[col].iloc[:fit_end].std() or 1.0)
             scaler_stats[col] = (mu, sigma)
 
         normalized = daily_feats.copy()
