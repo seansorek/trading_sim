@@ -143,8 +143,36 @@ def _predict_regressor_signal(
     X_scaled = data["scaler"].transform(X_clean)
     pred_ret = data["model"].predict(X_scaled)
 
-    sq = float(os.environ.get("PREDICTOR_SIGNAL_QUANTILE", signal_quantile))
-    tw = int(os.environ.get("PREDICTOR_THRESHOLD_WINDOW", threshold_window))
+    # NOTE: ml_strategies.DailyPredictorStrategy.__init__ (lines ~324-325) has
+    # the same unguarded os.environ.get(...) -> float()/int() parse pattern.
+    # That is a known pre-existing twin, intentionally not touched by this
+    # fix — scoped here because this file is what's deployed to production.
+    sq_raw = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+    if sq_raw is None:
+        sq = signal_quantile
+    else:
+        try:
+            sq = float(sq_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid PREDICTOR_SIGNAL_QUANTILE=%r — falling back to default %.2f",
+                sq_raw, signal_quantile,
+            )
+            sq = signal_quantile
+
+    tw_raw = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+    if tw_raw is None:
+        tw = threshold_window
+    else:
+        try:
+            tw = int(tw_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid PREDICTOR_THRESHOLD_WINDOW=%r — falling back to default %d",
+                tw_raw, threshold_window,
+            )
+            tw = threshold_window
+
     signals = compute_predictor_signal(pred_ret, sq, tw)
 
     last_signal = int(signals[-1])

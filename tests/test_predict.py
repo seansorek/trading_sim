@@ -651,6 +651,46 @@ class TestPredictRegressorSignal:
         called_with = scaler.transform.call_args[0][0]
         assert np.isfinite(called_with).all()
 
+    def test_valid_signal_quantile_env_override_is_applied(self, monkeypatch):
+        """A well-formed PREDICTOR_SIGNAL_QUANTILE override should be parsed
+        and used without raising — the valid-override path."""
+        monkeypatch.setenv("PREDICTOR_SIGNAL_QUANTILE", "0.9")
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] in {"BUY", "SELL", "HOLD"}
+        assert 0.0 <= result["confidence"] <= 1.0
+
+    def test_invalid_signal_quantile_env_falls_back_to_default(self, monkeypatch):
+        """A malformed PREDICTOR_SIGNAL_QUANTILE (e.g. a typo in the GitHub
+        Actions environment) must not raise — it should log a warning and
+        fall back to the function's default signal_quantile=0.7, still
+        producing a valid result. Regression test for the bug where this
+        previously surfaced as an uncaught ValueError, silently turning into
+        a per-model {"error": ...} entry for daily_predictor every day."""
+        monkeypatch.setenv("PREDICTOR_SIGNAL_QUANTILE", "not-a-number")
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "BUY"
+        assert 0.0 <= result["confidence"] <= 1.0
+
 
 # ---------------------------------------------------------------------------
 # predict_symbol with daily_predictor (end-to-end through the dispatch loop)
