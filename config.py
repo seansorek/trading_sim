@@ -126,6 +126,9 @@ class DiscordCfg:
 @dataclass
 class PredictionCfg:
     symbols: list[str] = field(default_factory=lambda: ["AAPL", "SPY", "MSFT", "GOOGL", "NVDA"])
+    models: list[str] = field(
+        default_factory=lambda: ["daily_logistic", "daily_xgboost", "daily_predictor"]
+    )
 
 
 @dataclass
@@ -172,7 +175,11 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
             symbols=prediction_raw.get(
                 "symbols",
                 PredictionCfg.__dataclass_fields__["symbols"].default_factory(),
-            )
+            ),
+            models=prediction_raw.get(
+                "models",
+                PredictionCfg.__dataclass_fields__["models"].default_factory(),
+            ),
         ),
         data=DataCfg(**{k: v for k, v in data_raw.items() if k in DataCfg.__dataclass_fields__}),
         execution=ExecutionCfg(**{k: v for k, v in exec_raw.items() if k in ExecutionCfg.__dataclass_fields__}),

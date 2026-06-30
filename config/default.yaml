@@ -14,8 +14,15 @@ symbols:
   - IWM
 
 # Symbol universe for the daily prediction job and Discord notifications.
-# Edit this list to change what gets sent to Discord — no workflow YAML edit needed.
+# Edit `symbols` to change what gets sent to Discord — no workflow YAML edit needed.
+# Edit `models` to add/remove a model from the live pipeline — no code change needed
+# (predict_next_day_lite.py loads exactly this list; a model missing its pickle is
+# logged and skipped, not a hard failure). See models/README.md for what each does.
 prediction:
+  models:
+    - daily_logistic
+    - daily_xgboost
+    - daily_predictor
   symbols:
     - AAPL
     - SPY
