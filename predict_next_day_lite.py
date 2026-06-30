@@ -27,6 +27,8 @@ from data_loader import load_yfinance
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
+from ml_strategies import compute_predictor_signal
+from train_models import _preprocess
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +66,79 @@ def _load_pkl(path: str, model_key: str) -> dict:
             f"features, got {len(data['feature_contract'])}. Retrain."
         )
     return data
+
+
+def _predict_classifier_signal(data: dict, X_latest: np.ndarray) -> dict:
+    """
+    Predict today's signal for a 3-class classifier model (daily_logistic,
+    daily_xgboost). Both share identical prediction logic — only the
+    trained model object differs — so this one function serves both,
+    instead of two copy-pasted blocks.
+    """
+    X_scaled = data["scaler"].transform(X_latest)
+    prob = data["model"].predict_proba(X_scaled)[0]
+    pred_idx = int(np.argmax(prob))
+    confidence = float(prob[pred_idx])
+    threshold = data.get("confidence_threshold", 0.55)
+    pred_class = int(data["model"].classes_[pred_idx])
+    signal = _SIGNAL_NAMES[pred_class]
+    if signal != "HOLD" and confidence < threshold:
+        signal = "HOLD"
+    return {"signal": signal, "confidence": confidence}
+
+
+def _regressor_confidence(pred_ret: np.ndarray, threshold_window: int) -> float:
+    """
+    Percentile rank of today's |predicted return| within the trailing
+    threshold_window predictions, in [0, 1].
+
+    This is NOT a calibrated probability like the classifiers' confidence
+    (Ridge has no predict_proba) — it is the fraction of the trailing
+    window whose magnitude today's prediction equals or exceeds. Higher
+    means today's forecast is more extreme relative to its recent history,
+    which is also what compute_predictor_signal's rolling quantile uses to
+    decide whether to trade.
+    """
+    window = pred_ret[-threshold_window:]
+    if len(window) < 2:
+        return 0.0
+    today_abs = abs(pred_ret[-1])
+    return float(np.mean(np.abs(window) <= today_abs))
+
+
+def _predict_regressor_signal(
+    data: dict,
+    X_all: np.ndarray,
+    signal_quantile: float = 0.7,
+    threshold_window: int = 60,
+) -> dict:
+    """
+    Predict today's signal for a regression-style model (daily_predictor).
+
+    Unlike the classifiers, this needs the *trailing window* of
+    predictions (X_all), not just the latest bar, because
+    compute_predictor_signal's causal rolling quantile needs history to
+    decide whether today's forecast is extreme enough to trade — the same
+    decision logic used in backtesting (ml_strategies.DailyPredictorStrategy),
+    so live and backtest predictions can't silently diverge.
+
+    Applies the same ±5-std-clip preprocessing (train_models._preprocess)
+    daily_predictor was trained on (see train_predictor.prepare_data) —
+    skipping this would feed the model out-of-distribution inputs it never
+    saw in training.
+    """
+    X_clean = _preprocess(X_all.copy())
+    X_scaled = data["scaler"].transform(X_clean)
+    pred_ret = data["model"].predict(X_scaled)
+
+    sq = float(os.environ.get("PREDICTOR_SIGNAL_QUANTILE", signal_quantile))
+    tw = int(os.environ.get("PREDICTOR_THRESHOLD_WINDOW", threshold_window))
+    signals = compute_predictor_signal(pred_ret, sq, tw)
+
+    last_signal = int(signals[-1])
+    signal_name = _SIGNAL_NAMES[last_signal + 1]
+    confidence = _regressor_confidence(pred_ret, tw)
+    return {"signal": signal_name, "confidence": confidence}
 
 
 def load_models(db: Optional[DB] = None) -> dict:

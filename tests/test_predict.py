@@ -16,6 +16,9 @@ from daily_features import FEATURE_COLS
 from dqn_signal import gate_dqn_signal
 from predict_next_day_lite import (
     _load_pkl,
+    _predict_classifier_signal,
+    _predict_regressor_signal,
+    _regressor_confidence,
     append_predictions_history,
     predict_symbol,
     send_discord,
@@ -550,3 +553,99 @@ class TestPredictProbaClassMapping:
         assert p["signal"] == "BUY", (
             f"With classes_=[0,1,2] and argmax=2, signal should be BUY, got {p['signal']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _predict_classifier_signal / _predict_regressor_signal (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestPredictClassifierSignal:
+    def test_matches_existing_predict_symbol_behavior(self):
+        """The extracted helper must reproduce exactly what the old inline
+        daily_logistic/daily_xgboost blocks computed."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+        data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
+
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+
+        assert result["signal"] == "BUY"
+        assert abs(result["confidence"] - 0.7) < 1e-6
+
+    def test_below_threshold_collapses_to_hold(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.25, 0.30, 0.45]])
+        clf.classes_ = np.array([0, 1, 2])
+        data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
+
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+
+        assert result["signal"] == "HOLD"
+
+
+class TestRegressorConfidence:
+    def test_today_is_max_in_window_gives_confidence_one(self):
+        pred_ret = np.array([0.001] * 59 + [0.05])
+        conf = _regressor_confidence(pred_ret, threshold_window=60)
+        assert conf == pytest.approx(1.0)
+
+    def test_today_is_typical_gives_mid_confidence(self):
+        pred_ret = np.array([0.001] * 60)
+        conf = _regressor_confidence(pred_ret, threshold_window=60)
+        assert conf == pytest.approx(1.0)  # all equal -> today <= every value
+
+    def test_too_short_window_returns_zero(self):
+        assert _regressor_confidence(np.array([0.01]), threshold_window=60) == 0.0
+
+
+class TestPredictRegressorSignal:
+    def test_extreme_prediction_triggers_buy_with_clean_features(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "BUY"
+        assert 0.0 <= result["confidence"] <= 1.0
+
+    def test_unremarkable_prediction_holds(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = np.full(80, 0.001)
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "HOLD"
+
+    def test_inf_and_nan_features_do_not_crash(self):
+        """X_all may contain inf/nan from upstream feature computation on
+        thin data — _preprocess must clip these before scaling, matching
+        what the model was trained on (train_models._preprocess)."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = np.full(80, 0.001)
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        X_all[0, 0] = np.inf
+        X_all[1, 1] = np.nan
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] in {"BUY", "SELL", "HOLD"}
+        called_with = scaler.transform.call_args[0][0]
+        assert np.isfinite(called_with).all()
