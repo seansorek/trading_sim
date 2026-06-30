@@ -38,6 +38,18 @@ logger = logging.getLogger(__name__)
 
 _SIGNAL_NAMES = ["SELL", "HOLD", "BUY"]  # index matches label {0,1,2}
 
+# Maps a loaded model_key to how predict_symbol should run it. Adding a new
+# classifier or regressor model means adding one entry here and one entry
+# to prediction.models in config/default.yaml — predict_symbol, the DB
+# upsert, and the Discord payload all pick it up automatically with no
+# further code changes. DQN is handled separately below (different
+# artifact format and a windowed state, not a single-row prediction).
+MODEL_KINDS = {
+    "daily_logistic": "classifier",
+    "daily_xgboost": "classifier",
+    "daily_predictor": "regressor",
+}
+
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -230,59 +242,30 @@ def predict_symbol(
     result["predictions"] = {}
     prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # --- DailyLogistic ---
-    if "daily_logistic" in models:
+    for model_key, data in models.items():
+        if model_key == "daily_dqn":
+            continue  # handled separately below — different artifact format
         try:
-            data = models["daily_logistic"]
-            X_scaled = data["scaler"].transform(X_latest)
-            prob = data["model"].predict_proba(X_scaled)[0]
-            pred_idx = int(np.argmax(prob))
-            confidence = float(prob[pred_idx])
-            threshold = data.get("confidence_threshold", 0.55)
-            pred_class = int(data["model"].classes_[pred_idx])
-            signal = _SIGNAL_NAMES[pred_class]
-            if signal != "HOLD" and confidence < threshold:
-                signal = "HOLD"
-            result["predictions"]["daily_logistic"] = {
-                "signal": signal,
-                "confidence": confidence,
-            }
+            kind = MODEL_KINDS.get(model_key)
+            if kind == "classifier":
+                pred = _predict_classifier_signal(data, X_latest)
+            elif kind == "regressor":
+                pred = _predict_regressor_signal(data, X_all)
+            else:
+                raise RuntimeError(
+                    f"Unknown model kind for '{model_key}' — "
+                    "register it in MODEL_KINDS."
+                )
+            result["predictions"][model_key] = pred
             if db is not None:
-                meta = db.get_active_model("daily_logistic")
+                meta = db.get_active_model(model_key)
                 version = meta["version"] if meta else 0
                 db.upsert_prediction(
-                    symbol, "daily_logistic", version, prediction_date,
-                    signal, confidence, result["price"]
+                    symbol, model_key, version, prediction_date,
+                    pred["signal"], pred["confidence"], result["price"],
                 )
         except Exception as exc:
-            result["predictions"]["daily_logistic"] = {"error": str(exc)}
-
-    # --- DailyXGBoost ---
-    if "daily_xgboost" in models:
-        try:
-            data = models["daily_xgboost"]
-            X_scaled = data["scaler"].transform(X_latest)
-            prob = data["model"].predict_proba(X_scaled)[0]
-            pred_idx = int(np.argmax(prob))
-            confidence = float(prob[pred_idx])
-            threshold = data.get("confidence_threshold", 0.55)
-            pred_class = int(data["model"].classes_[pred_idx])
-            signal = _SIGNAL_NAMES[pred_class]
-            if signal != "HOLD" and confidence < threshold:
-                signal = "HOLD"
-            result["predictions"]["daily_xgboost"] = {
-                "signal": signal,
-                "confidence": confidence,
-            }
-            if db is not None:
-                meta = db.get_active_model("daily_xgboost")
-                version = meta["version"] if meta else 0
-                db.upsert_prediction(
-                    symbol, "daily_xgboost", version, prediction_date,
-                    signal, confidence, result["price"]
-                )
-        except Exception as exc:
-            result["predictions"]["daily_xgboost"] = {"error": str(exc)}
+            result["predictions"][model_key] = {"error": str(exc)}
 
     # --- DailyDQN ---
     if "daily_dqn" in models:

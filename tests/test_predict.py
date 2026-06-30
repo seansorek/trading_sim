@@ -649,3 +649,100 @@ class TestPredictRegressorSignal:
         assert result["signal"] in {"BUY", "SELL", "HOLD"}
         called_with = scaler.transform.call_args[0][0]
         assert np.isfinite(called_with).all()
+
+
+# ---------------------------------------------------------------------------
+# predict_symbol with daily_predictor (end-to-end through the dispatch loop)
+# ---------------------------------------------------------------------------
+
+class TestPredictSymbolPredictor:
+    def _build_predictor_models(self, pred_ret: np.ndarray) -> dict:
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = pred_ret
+        return {
+            "daily_predictor": {
+                "model": model,
+                "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS),
+            }
+        }
+
+    def test_extreme_prediction_produces_buy(self):
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        pred_ret[-1] = 0.05
+        models = self._build_predictor_models(pred_ret)
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result
+        p = result["predictions"]["daily_predictor"]
+        assert p["signal"] == "BUY"
+
+    def test_unremarkable_prediction_produces_hold(self):
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        models = self._build_predictor_models(pred_ret)
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_predictor"]
+        assert p["signal"] == "HOLD"
+
+    def test_runs_alongside_classifier_without_interference(self):
+        """Both a classifier and the regressor in the same models dict must
+        each produce their own independent prediction entry."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        pred_ret[-1] = 0.05
+        models = {
+            "daily_logistic": {
+                "model": clf, "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS), "confidence_threshold": 0.55,
+            },
+            **self._build_predictor_models(pred_ret),
+        }
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert result["predictions"]["daily_logistic"]["signal"] == "BUY"
+        assert result["predictions"]["daily_predictor"]["signal"] == "BUY"
+
+    def test_unknown_model_kind_reports_error_not_crash(self):
+        """A model_key with no MODEL_KINDS entry must surface as a
+        per-model error in the result dict, not crash the whole symbol's
+        prediction (one bad/misconfigured model must not take down the
+        others) — this is the 'easy to add without breaking things'
+        contract: forgetting to register a new model's kind fails loudly
+        and locally, not silently or globally."""
+        models = {
+            "totally_new_model": {
+                "model": MagicMock(), "scaler": MagicMock(),
+                "feature_contract": list(FEATURE_COLS),
+            }
+        }
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result  # the symbol overall still succeeds
+        assert "error" in result["predictions"]["totally_new_model"]
