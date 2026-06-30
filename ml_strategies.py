@@ -169,7 +169,9 @@ class DailyLogisticStrategy(BaseStrategy):
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
-        return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        # Shift by one bar: decision from close[D] executes on bar D+1
+        return raw.shift(1).fillna(0).astype(int)
 
 
 class DailyXGBoostStrategy(BaseStrategy):
@@ -243,7 +245,8 @@ class DailyXGBoostStrategy(BaseStrategy):
             preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
             signals = preds - 1
 
-        return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        return raw.shift(1).fillna(0).astype(int)
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +295,8 @@ class OrdinalLogisticStrategy(BaseStrategy):
         preds = np.argmax(probs, axis=1)
         preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
         signals = preds - 1
-        return self._apply_holding_period(pd.Series(signals, index=feats.index))
+        raw = self._apply_holding_period(pd.Series(signals, index=feats.index))
+        return raw.shift(1).fillna(0).astype(int)
 
 
 class XGBoostStrategy(BaseStrategy):
@@ -334,4 +338,5 @@ class XGBoostStrategy(BaseStrategy):
         preds = np.argmax(probs, axis=1)
         preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
         signals = preds - 1
-        return self._apply_holding_period(pd.Series(signals, index=feats.index))
+        raw = self._apply_holding_period(pd.Series(signals, index=feats.index))
+        return raw.shift(1).fillna(0).astype(int)

@@ -729,3 +729,70 @@ def test_compute_metrics_scale_in_weighted_average_entry():
     assert metrics["hit_rate"] == pytest.approx(0.0), (
         f"Expected hit_rate=0.0 (PnL is exactly zero, not a win), got {metrics['hit_rate']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #61 — ML strategy signals must be lagged by one bar
+# ---------------------------------------------------------------------------
+
+def test_daily_logistic_signal_is_shifted_by_one_bar():
+    """
+    DailyLogisticStrategy.signal() must shift its output by one bar so that
+    a prediction derived from close[D] executes on bar D+1, not bar D.
+    """
+    from unittest.mock import patch, MagicMock
+    from base_strategy import StrategyConfig
+    from ml_strategies import DailyLogisticStrategy
+
+    n = 60
+    rng = np.random.default_rng(42)
+    close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.012, n))
+    idx = pd.date_range("2023-01-02", periods=n, freq="B")
+    df = pd.DataFrame(
+        {
+            "open": close * 0.999,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+
+    cfg = StrategyConfig(name="daily_logistic", holding_period=0)
+    strat = DailyLogisticStrategy(cfg, use_pretrained=False, confidence_threshold=0.0)
+    signal = strat.signal(df, df)
+
+    # The first bar must be 0 (NaN filled to 0 by the shift)
+    assert signal.iloc[0] == 0, (
+        f"First bar should be 0 after shift(1), got {signal.iloc[0]}"
+    )
+
+
+def test_daily_xgboost_signal_is_shifted_by_one_bar():
+    """DailyXGBoostStrategy.signal() must also shift by one bar."""
+    from base_strategy import StrategyConfig
+    from ml_strategies import DailyXGBoostStrategy
+
+    n = 200
+    rng = np.random.default_rng(42)
+    close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.015, n))
+    idx = pd.date_range("2023-01-02", periods=n, freq="B")
+    df = pd.DataFrame(
+        {
+            "open": close * 0.999,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+
+    cfg = StrategyConfig(name="daily_xgboost", holding_period=0)
+    strat = DailyXGBoostStrategy(cfg, use_pretrained=False, confidence_threshold=0.0)
+    signal = strat.signal(df, df)
+
+    assert signal.iloc[0] == 0, (
+        f"First bar should be 0 after shift(1), got {signal.iloc[0]}"
+    )
