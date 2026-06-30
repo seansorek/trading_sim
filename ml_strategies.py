@@ -270,6 +270,42 @@ class DailyXGBoostStrategy(BaseStrategy):
         return raw.shift(1).fillna(0).astype(int)
 
 
+def compute_predictor_signal(
+    pred_ret: np.ndarray, signal_quantile: float, threshold_window: int
+) -> np.ndarray:
+    """
+    Causal rolling-quantile decision layer for a continuous return forecast.
+
+    Single source of truth for the daily_predictor decision logic — called
+    by both DailyPredictorStrategy.signal() (backtest) and
+    predict_next_day_lite.py's live-prediction path, so the two can never
+    silently diverge. A fixed vol-scaled band does not work here because a
+    regularized regressor's predictions are shrunk toward zero on a
+    different scale than raw returns (empirically ~6x smaller) — this
+    adapts to whatever scale a given prediction model produces by trading
+    only the top `1 - signal_quantile` fraction of the trailing
+    `threshold_window` bars' |prediction| magnitudes. The threshold is
+    shifted by one bar so it never sees today's own prediction.
+
+    Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY) the same length as
+    pred_ret. Bars before `threshold_window`'s min_periods is satisfied
+    default to HOLD (0), since the threshold is undefined (NaN) and any
+    NaN comparison is False.
+    """
+    pred_series = pd.Series(pred_ret)
+    abs_pred = pred_series.abs()
+    rolling_thr = (
+        abs_pred.rolling(threshold_window, min_periods=20)
+        .quantile(signal_quantile)
+        .shift(1)
+    )
+    trigger = (abs_pred > rolling_thr).values
+    actions = np.ones(len(pred_series), dtype=int)  # default: HOLD
+    actions[trigger & (pred_ret > 0)] = 2  # BUY
+    actions[trigger & (pred_ret < 0)] = 0  # SELL
+    return actions - 1  # {0,1,2} -> {-1,0,1}
+
+
 class DailyPredictorStrategy(BaseStrategy):
     """
     Decision layer over the daily_predictor regression model.
@@ -336,19 +372,9 @@ class DailyPredictorStrategy(BaseStrategy):
             model.fit(X_scaled[mask], y_raw[mask])
             pred_ret = model.predict(X_scaled)
 
-        pred_series = pd.Series(pred_ret, index=daily_feats.index)
-        abs_pred = pred_series.abs()
-        rolling_thr = (
-            abs_pred.rolling(self.threshold_window, min_periods=20)
-            .quantile(self.signal_quantile)
-            .shift(1)
+        signals = compute_predictor_signal(
+            pred_ret, self.signal_quantile, self.threshold_window
         )
-        trigger = (abs_pred > rolling_thr).values
-        actions = np.ones(len(pred_series), dtype=int)  # default: HOLD
-        actions[trigger & (pred_ret > 0)] = 2  # BUY
-        actions[trigger & (pred_ret < 0)] = 0  # SELL
-        signals = actions - 1  # {0,1,2} -> {-1,0,1}
-
         return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 
 

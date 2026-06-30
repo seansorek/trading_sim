@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from daily_features import FWD_RET_HORIZON_DAYS, make_daily_features
 import train_predictor
 from base_strategy import StrategyConfig
-from ml_strategies import DailyPredictorStrategy
+from ml_strategies import DailyPredictorStrategy, compute_predictor_signal
 
 
 def _make_price_df(n: int = 300, seed: int = 7) -> pd.DataFrame:
@@ -119,3 +119,42 @@ def test_predictor_strategy_raises_without_artifact():
     cfg = StrategyConfig(name="daily_predictor")
     with pytest.raises(RuntimeError):
         DailyPredictorStrategy(cfg, use_pretrained=True, model_path="models/does_not_exist.pkl")
+
+
+def test_compute_predictor_signal_buy_on_extreme_positive():
+    """A predicted-return spike well above the trailing window's quantile
+    must trigger BUY on the day it occurs."""
+    pred_ret = np.full(80, 0.001)
+    pred_ret[-1] = 0.05
+    signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
+    assert signals[-1] == 1
+
+
+def test_compute_predictor_signal_sell_on_extreme_negative():
+    pred_ret = np.full(80, 0.001)
+    pred_ret[-1] = -0.05
+    signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
+    assert signals[-1] == -1
+
+
+def test_compute_predictor_signal_hold_when_unremarkable():
+    """A prediction with the same magnitude as the entire trailing window
+    is exactly at the boundary, not above it — must not trigger a trade."""
+    pred_ret = np.full(80, 0.001)
+    signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
+    assert signals[-1] == 0
+
+
+def test_compute_predictor_signal_early_bars_are_hold():
+    """Before min_periods=20 trailing predictions exist, the rolling
+    threshold is undefined (NaN) — must default to HOLD, never trade on
+    an undefined threshold."""
+    pred_ret = np.array([0.05, -0.05, 0.03])
+    signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
+    assert (signals == 0).all()
+
+
+def test_compute_predictor_signal_output_length_matches_input():
+    pred_ret = np.full(100, 0.002)
+    signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
+    assert len(signals) == 100
