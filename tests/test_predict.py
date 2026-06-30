@@ -20,6 +20,7 @@ from predict_next_day_lite import (
     _predict_regressor_signal,
     _regressor_confidence,
     append_predictions_history,
+    load_models,
     predict_symbol,
     send_discord,
 )
@@ -746,3 +747,48 @@ class TestPredictSymbolPredictor:
 
         assert "error" not in result  # the symbol overall still succeeds
         assert "error" in result["predictions"]["totally_new_model"]
+
+
+# ---------------------------------------------------------------------------
+# load_models (Task 5 — config-driven model list)
+# ---------------------------------------------------------------------------
+
+class TestLoadModels:
+    def test_respects_explicit_model_keys_list(self, tmp_path, monkeypatch):
+        """Passing model_keys explicitly must load exactly that list,
+        independent of config — proves a model can be added/removed by
+        changing the list with no other code path involved."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        artifact = _make_artifact()
+        with open(tmp_path / "models" / "daily_logistic.pkl", "wb") as f:
+            pickle.dump(artifact, f)
+
+        loaded = load_models(db=None, model_keys=["daily_logistic"])
+
+        assert set(loaded.keys()) <= {"daily_logistic", "daily_dqn"}
+        assert "daily_logistic" in loaded
+
+    def test_missing_pickle_for_configured_model_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        """A model_key in the config list whose pickle doesn't exist on
+        disk must be silently skipped (logged), not raise — so a
+        half-deployed model doesn't take down the whole prediction run."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+
+        loaded = load_models(db=None, model_keys=["daily_predictor", "totally_unknown"])
+
+        assert loaded == {}
+
+    def test_defaults_to_config_prediction_models(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        artifact = _make_artifact()
+        with open(tmp_path / "models" / "daily_predictor.pkl", "wb") as f:
+            pickle.dump(artifact, f)
+
+        with patch("predict_next_day_lite.get_config") as mock_cfg:
+            mock_cfg.return_value.prediction.models = ["daily_predictor"]
+            loaded = load_models(db=None)
+
+        assert "daily_predictor" in loaded

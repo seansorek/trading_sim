@@ -153,12 +153,19 @@ def _predict_regressor_signal(
     return {"signal": signal_name, "confidence": confidence}
 
 
-def load_models(db: Optional[DB] = None) -> dict:
+def load_models(
+    db: Optional[DB] = None, model_keys: Optional[list] = None
+) -> dict:
     """
     Load all available daily model pickles.
 
-    Uses DB model_registry to resolve artifact_path when available.
-    Falls back to canonical paths (models/daily_logistic.pkl, etc.) otherwise.
+    model_keys defaults to config.prediction.models (config-driven, so a
+    model can be added to or removed from the live pipeline by editing
+    config/default.yaml — no code change). Uses DB model_registry to
+    resolve artifact_path when available, falling back to the canonical
+    models/<model_key>.pkl path otherwise. A configured model whose
+    artifact is missing or invalid is logged and skipped, not fatal —
+    other configured models still load and predict.
     """
     models = {}
 
@@ -169,10 +176,11 @@ def load_models(db: Optional[DB] = None) -> dict:
                 return meta["artifact_path"]
         return canonical
 
-    for model_key, canonical in [
-        ("daily_logistic", "models/daily_logistic.pkl"),
-        ("daily_xgboost", "models/daily_xgboost.pkl"),
-    ]:
+    if model_keys is None:
+        model_keys = get_config().prediction.models
+
+    for model_key in model_keys:
+        canonical = f"models/{model_key}.pkl"
         path = _resolve_path(model_key, canonical)
         try:
             models[model_key] = _load_pkl(path, model_key)
