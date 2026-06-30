@@ -391,6 +391,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     strategy_display = {
         "daily_logistic": "Daily Logistic",
         "daily_xgboost": "Daily XGBoost",
+        "daily_predictor": "Daily Predictor",
         "daily_dqn": "Daily DQN",
     }
 

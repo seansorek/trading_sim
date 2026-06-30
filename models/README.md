@@ -90,6 +90,16 @@ walk-forward or out-of-sample-of-out-of-sample validation yet. Treat this as a p
 that the prediction/strategy split surfaces real signal the classification framing was
 discarding, not as a finished, deployable edge.
 
+**Deployment status:** `daily_predictor` is wired into `predict_next_day_lite.py` and the live
+Discord pipeline (`prediction.models` in `config/default.yaml`), alongside `daily_logistic` and
+`daily_xgboost`. Live inference uses the exact same decision function as backtesting
+(`ml_strategies.compute_predictor_signal`) so the two can't silently diverge. Its Discord
+"confidence" field is not a calibrated probability like the classifiers' — it's the percentile
+rank of today's |predicted return| within its trailing window (see
+`predict_next_day_lite._regressor_confidence`). Given the caveats above, treat its live signals
+with the same skepticism as the backtest: a promising lead under active validation, not a
+proven edge.
+
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay
 - **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)

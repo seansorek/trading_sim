@@ -24,14 +24,16 @@ DQN is trained separately:
 python train_dqn.py --symbol SPY --days 500 --episodes 30
 ```
 
-**Experimental: prediction/strategy split.** `train_models.py`'s Logistic/XGBoost/hybrid models
-classify the discretized SELL/HOLD/BUY action directly — discretization bakes a decision
-threshold into the training target. `train_predictor.py` instead trains a Ridge regression on
-the continuous forward-return target (evaluated by Spearman IC, not accuracy), and
+**Prediction/strategy split.** `train_models.py`'s Logistic/XGBoost/hybrid models classify the
+discretized SELL/HOLD/BUY action directly — discretization bakes a decision threshold into the
+training target. `train_predictor.py` instead trains a Ridge regression on the continuous
+forward-return target (evaluated by Spearman IC, not accuracy), and
 `ml_strategies.DailyPredictorStrategy` is a separate, independently-tunable decision layer that
-converts those forecasts into trade signals via a rolling-quantile threshold. Not wired into the
-production Discord pipeline yet — see `models/README.md` → "Prediction vs. strategy" for the
-backtest comparison and honest caveats.
+converts those forecasts into trade signals via a rolling-quantile threshold
+(`ml_strategies.compute_predictor_signal` — the single shared implementation used by both
+backtesting and the live pipeline). `daily_predictor` is wired into `predict_next_day_lite.py`
+and Discord alongside `daily_logistic`/`daily_xgboost` — see `models/README.md` → "Prediction vs.
+strategy" for the backtest comparison and honest caveats.
 ```bash
 python train_predictor.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 2500
 ```
@@ -83,6 +85,12 @@ Requires `DISCORD_WEBHOOK_URL` env var for notifications. Without it, prediction
 **To change what symbols get predicted:**
 Edit `prediction.symbols` in `config/default.yaml` and push. No workflow YAML edit needed.
 
+**To change which models predict (add/remove a model from the live pipeline):**
+Edit `prediction.models` in `config/default.yaml` and push. `predict_next_day_lite.py` reads this
+list at startup — a model removed from the list is simply not loaded or predicted; a model added
+to the list whose pickle is missing is logged and skipped, not a hard failure. No workflow YAML
+edit needed.
+
 **Required GitHub secret:** `DISCORD_WEBHOOK_URL` — set in repo Settings → Secrets and variables → Actions.
 
 ---
@@ -113,6 +121,7 @@ Test coverage:
 - `test_predict.py` — model loading validation, signal generation, Discord formatting
 - `test_data_leakage.py` — purged/embargo-gap regression tests for the train/test split
 - `test_predictor.py` — regression prediction model + `DailyPredictorStrategy` decision layer
+- `test_config.py` — prediction.models / prediction.symbols YAML loading
 
 ---
 
@@ -131,6 +140,6 @@ Test coverage:
 | `simulation_pipeline.py` | Backtester engine, metrics (Sharpe/Sortino/drawdown), walk-forward |
 | `db.py` | SQLite layer — bars, features, model registry, predictions, backtest runs |
 | `data_loader.py` | yfinance wrapper with DB caching |
-| `ml_strategies.py` | `DailyLogisticStrategy`, `DailyXGBoostStrategy`, `DailyPredictorStrategy` wrappers |
+| `ml_strategies.py` | `DailyLogisticStrategy`, `DailyXGBoostStrategy`, `DailyPredictorStrategy` wrappers; `compute_predictor_signal` is the shared decision-layer function used by both backtest and live prediction |
 | `dqn_agent.py` | PyTorch DQN network and agent |
 | `rl_env.py` | Gym-style environment for DQN training |
