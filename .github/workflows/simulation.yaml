@@ -10,7 +10,7 @@ on:
   workflow_dispatch:       # Manual trigger
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   predict:
@@ -33,7 +33,24 @@ jobs:
       - name: Generate next-day predictions
         run: python predict_next_day_lite.py
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Only the scheduled daily run and manual dispatch are "real" runs
+          # that should notify Discord. A push to main still executes this
+          # script as a smoke test (catches load/runtime errors before the
+          # next scheduled run) but must not post a live trading signal.
+          DISCORD_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && secrets.DISCORD_WEBHOOK_URL || '' }}
+
+      - name: Commit predictions history
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add predictions/history.jsonl
+          if git diff --cached --quiet; then
+            echo "No history changes to commit"
+          else
+            git commit -m "chore: record daily predictions $(date -u +%Y-%m-%d)"
+            git push
+          fi
 
       - name: Log completion
         run: |

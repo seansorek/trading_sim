@@ -1,4 +1,5 @@
 """test_predict.py — Tests for predict_next_day_lite.py (no network, no real models)."""
+import json
 import pickle
 import sys
 import tempfile
@@ -13,7 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from daily_features import FEATURE_COLS
 from dqn_signal import gate_dqn_signal
-from predict_next_day_lite import _load_pkl, predict_symbol, send_discord
+from predict_next_day_lite import (
+    _load_pkl,
+    append_predictions_history,
+    predict_symbol,
+    send_discord,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +253,73 @@ class TestSendDiscord:
 
         # No valid predictions → no embeds → returns False
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# append_predictions_history
+# ---------------------------------------------------------------------------
+
+class TestAppendPredictionsHistory:
+    def _predictions(self):
+        return [
+            {
+                "symbol": "AAPL",
+                "price": 150.0,
+                "predictions": {
+                    "daily_logistic": {"signal": "BUY", "confidence": 0.7},
+                    "daily_xgboost": {"signal": "HOLD", "confidence": 0.6},
+                },
+            },
+            {"symbol": "BADTICKER", "error": "Insufficient data"},
+        ]
+
+    def test_writes_one_record_per_symbol_model_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n = append_predictions_history(self._predictions(), path)
+
+            assert n == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 2
+            records = [json.loads(line) for line in lines]
+            assert {r["model"] for r in records} == {"daily_logistic", "daily_xgboost"}
+            assert all(r["symbol"] == "AAPL" for r in records)
+
+    def test_error_predictions_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n = append_predictions_history(
+                [{"symbol": "BADTICKER", "error": "Insufficient data"}], path
+            )
+
+        assert n == 0
+        assert not Path(path).exists()
+
+    def test_appends_without_truncating_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(self._predictions(), path)
+            append_predictions_history(self._predictions(), path)
+
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 4
+
+    def test_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "nested" / "dir" / "history.jsonl")
+            n = append_predictions_history(self._predictions(), path)
+
+            assert n == 2
+            assert Path(path).exists()
+
+    def test_record_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(self._predictions(), path)
+
+            record = json.loads(Path(path).read_text().splitlines()[0])
+            assert set(record) == {"date", "symbol", "model", "signal", "confidence", "price"}
+            assert record["price"] == 150.0
 
 
 # ---------------------------------------------------------------------------

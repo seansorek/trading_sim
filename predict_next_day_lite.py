@@ -265,6 +265,50 @@ def predict_symbol(
 
 
 # ---------------------------------------------------------------------------
+# Predictions history (append-only, survives across ephemeral CI runs)
+# ---------------------------------------------------------------------------
+
+def append_predictions_history(predictions: list, history_path: str) -> int:
+    """Append today's predictions to an append-only JSONL history file.
+
+    One record per (symbol, model) prediction. Unlike the daily_predictions
+    DB table, this file is meant to be committed back to the repo so it
+    survives ephemeral CI runners — it's the only durable record of what
+    the live models actually predicted on a given day. Returns the number
+    of records written.
+    """
+    prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
+    records = []
+    for pred in predictions:
+        if "error" in pred:
+            continue
+        symbol = pred["symbol"]
+        price = pred.get("price")
+        for model_key, model_pred in pred.get("predictions", {}).items():
+            if "signal" not in model_pred:
+                continue
+            records.append({
+                "date": prediction_date,
+                "symbol": symbol,
+                "model": model_key,
+                "signal": model_pred["signal"],
+                "confidence": model_pred["confidence"],
+                "price": price,
+            })
+
+    if not records:
+        return 0
+
+    parent = os.path.dirname(history_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(history_path, "a") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    return len(records)
+
+
+# ---------------------------------------------------------------------------
 # Discord notification
 # ---------------------------------------------------------------------------
 
@@ -373,6 +417,12 @@ def main() -> None:
     )
     parser.add_argument("--db", default="data/trading_sim.db")
     parser.add_argument("--output", default="tomorrow_trades.json")
+    parser.add_argument(
+        "--history", default="predictions/history.jsonl",
+        help="Append-only JSONL file recording each day's predictions "
+             "(tracked in git so it survives ephemeral CI runners; "
+             "pass an empty string to skip writing it)"
+    )
     args = parser.parse_args()
 
     symbols = (
@@ -432,6 +482,11 @@ def main() -> None:
     with open(args.output, "w") as f:
         json.dump(predictions, f, indent=2)
     logger.info("Saved predictions to %s", args.output)
+
+    # Append to durable predictions history (separate from the ephemeral DB)
+    if args.history:
+        n = append_predictions_history(predictions, args.history)
+        logger.info("Appended %d records to %s", n, args.history)
 
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
