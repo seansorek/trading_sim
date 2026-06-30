@@ -30,6 +30,7 @@ try:
     from ml_strategies import (
         DailyLogisticStrategy,
         DailyXGBoostStrategy,
+        DailyPredictorStrategy,
     )
     HAS_ML_STRATEGIES = True
 except ImportError as exc:
@@ -85,6 +86,7 @@ STRATEGY_REGISTRY: dict = {}
 if HAS_ML_STRATEGIES:
     STRATEGY_REGISTRY["daily_logistic"] = DailyLogisticStrategy
     STRATEGY_REGISTRY["daily_xgboost"] = DailyXGBoostStrategy
+    STRATEGY_REGISTRY["daily_predictor"] = DailyPredictorStrategy
 
 
 class DailyDQNStrategy(BaseStrategy):

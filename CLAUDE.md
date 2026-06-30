@@ -24,12 +24,24 @@ DQN is trained separately:
 python train_dqn.py --symbol SPY --days 500 --episodes 30
 ```
 
+**Experimental: prediction/strategy split.** `train_models.py`'s Logistic/XGBoost/hybrid models
+classify the discretized SELL/HOLD/BUY action directly — discretization bakes a decision
+threshold into the training target. `train_predictor.py` instead trains a Ridge regression on
+the continuous forward-return target (evaluated by Spearman IC, not accuracy), and
+`ml_strategies.DailyPredictorStrategy` is a separate, independently-tunable decision layer that
+converts those forecasts into trade signals via a rolling-quantile threshold. Not wired into the
+production Discord pipeline yet — see `models/README.md` → "Prediction vs. strategy" for the
+backtest comparison and honest caveats.
+```bash
+python train_predictor.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 2500
+```
+
 ### 2. Backtest models
 
 Runs simulated trading across symbols and strategies in parallel, writes equity curves and metrics to `results/`, and records runs in the DB.
 
 ```bash
-python simulate_multi.py --symbols AAPL,MSFT,SPY --strategies daily_logistic,daily_xgboost
+python simulate_multi.py --symbols AAPL,MSFT,SPY --strategies daily_logistic,daily_xgboost,daily_predictor
 ```
 
 Optional flags:
@@ -99,6 +111,8 @@ Test coverage:
 - `test_db.py` — SQLite schema, inserts, queries
 - `test_feature_contract.py` — FEATURE_COLS consistency between training and prediction
 - `test_predict.py` — model loading validation, signal generation, Discord formatting
+- `test_data_leakage.py` — purged/embargo-gap regression tests for the train/test split
+- `test_predictor.py` — regression prediction model + `DailyPredictorStrategy` decision layer
 
 ---
 
@@ -110,12 +124,13 @@ Test coverage:
 | `config.py` | Dataclass definitions; `get_config()` returns a cached `AppConfig` |
 | `daily_features.py` | Computes the 25-feature vector; `FEATURE_COLS` is the canonical feature contract |
 | `train_models.py` | **Entry point:** train and save Logistic + XGBoost models |
+| `train_predictor.py` | **Entry point:** train the Ridge return-prediction model (experimental prediction/strategy split) |
 | `train_dqn.py` | **Entry point:** train the DQN agent |
 | `simulate_multi.py` | **Entry point:** parallel backtest runner |
 | `predict_next_day_lite.py` | **Entry point:** daily prediction + Discord webhook |
 | `simulation_pipeline.py` | Backtester engine, metrics (Sharpe/Sortino/drawdown), walk-forward |
 | `db.py` | SQLite layer — bars, features, model registry, predictions, backtest runs |
 | `data_loader.py` | yfinance wrapper with DB caching |
-| `ml_strategies.py` | `DailyLogisticStrategy` and `DailyXGBoostStrategy` wrappers |
+| `ml_strategies.py` | `DailyLogisticStrategy`, `DailyXGBoostStrategy`, `DailyPredictorStrategy` wrappers |
 | `dqn_agent.py` | PyTorch DQN network and agent |
 | `rl_env.py` | Gym-style environment for DQN training |

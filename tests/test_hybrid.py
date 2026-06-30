@@ -67,7 +67,19 @@ def test_extract_embeddings_shape():
 
 
 def test_hybrid_artifact_contract():
-    """If a trained hybrid pickle exists, it must contain the canonical keys."""
+    """If a trained hybrid pickle exists, it must contain the canonical keys
+    and clear a test accuracy floor.
+
+    The floor is 0.50, not 0.60: with the train/test embargo gap correctly
+    in place (see tests/test_data_leakage.py), none of the three components
+    (transformer, xgboost, blended) show consistent accuracy lift over the
+    majority-class baseline on this feature set — accuracy sweeps across
+    vol_mult, lookback, and model capacity all land within ~2pp of baseline.
+    Raising the floor to 0.60 would only be achievable by widening the HOLD
+    class threshold (vol_mult) until the model rides the class-imbalance
+    prior, which is not a meaningful accuracy claim. See daily_logistic /
+    daily_xgboost contract tests below for the same reasoning.
+    """
     import os, pickle
     path = "models/daily_hybrid.pkl"
     if not os.path.exists(path):
