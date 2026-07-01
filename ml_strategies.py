@@ -136,11 +136,13 @@ class DailyLogisticStrategy(BaseStrategy):
         use_pretrained: bool = True,
         confidence_threshold: float = 0.55,
         model_path: str = "models/daily_logistic.pkl",
+        spy_df: Optional[pd.DataFrame] = None,
     ):
         super().__init__(cfg)
         if not HAS_SKLEARN:
             raise ImportError("scikit-learn not installed.")
 
+        self.spy_df = spy_df
         self.model: Optional[LogisticRegression] = None
         self.scaler: Optional[StandardScaler] = None
         self.confidence_threshold = float(
@@ -157,7 +159,7 @@ class DailyLogisticStrategy(BaseStrategy):
             logger.info("DailyLogisticStrategy: loaded model from %s", model_path)
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        daily_feats = make_daily_features(df)
+        daily_feats = make_daily_features(df, spy_df=self.spy_df)
         X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
 
         if self.model is not None and self.scaler is not None:
@@ -205,11 +207,13 @@ class DailyXGBoostStrategy(BaseStrategy):
         use_pretrained: bool = True,
         confidence_threshold: float = 0.55,
         model_path: str = "models/daily_xgboost.pkl",
+        spy_df: Optional[pd.DataFrame] = None,
     ):
         super().__init__(cfg)
         if not HAS_XGBOOST:
             raise ImportError("xgboost not installed.")
 
+        self.spy_df = spy_df
         self.model = None
         self.scaler: Optional[StandardScaler] = None
         self.confidence_threshold = float(
@@ -226,7 +230,7 @@ class DailyXGBoostStrategy(BaseStrategy):
             logger.info("DailyXGBoostStrategy: loaded model from %s", model_path)
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        daily_feats = make_daily_features(df)
+        daily_feats = make_daily_features(df, spy_df=self.spy_df)
         X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
 
         if self.model is not None and self.scaler is not None:

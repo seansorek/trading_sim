@@ -90,8 +90,9 @@ if HAS_ML_STRATEGIES:
 class DailyDQNStrategy(BaseStrategy):
     """DQN agent generating daily long/short/hold signals."""
 
-    def __init__(self, cfg: StrategyConfig):
+    def __init__(self, cfg: StrategyConfig, spy_df=None):
         super().__init__(cfg)
+        self.spy_df = spy_df
         self.model_path = os.environ.get(
             "DQN_MODEL", getattr(cfg, "model_path", "models/dqn_agent.pt")
         )
@@ -106,7 +107,7 @@ class DailyDQNStrategy(BaseStrategy):
             logger.warning("DQN: failed to load agent from %s: %s", self.model_path, exc)
             return pd.Series(0, index=df.index)
 
-        daily_feats = make_daily_features(df).fillna(0.0)
+        daily_feats = make_daily_features(df, spy_df=self.spy_df).fillna(0.0)
         feature_cols = FEATURE_COLS
 
         # Fit normalizer on warmup window only to avoid look-ahead bias

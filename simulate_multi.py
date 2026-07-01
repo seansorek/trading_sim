@@ -53,6 +53,7 @@ def run_symbol_strategy(
     exec_cfg: ExecutionConfig,
     run_id: str,
     n_mc_runs: int = 10,
+    spy_df=None,
 ) -> dict:
     """Run backtest + walk-forward + Monte Carlo for one (symbol, strategy) pair."""
     artifact_base = f"results/{symbol}_{strategy_name}"
@@ -65,7 +66,7 @@ def run_symbol_strategy(
     # Daily strategies build their own features internally; pass empty feats
     feats = make_features(df) if not strategy_name.startswith("daily_") else df
 
-    signal = build_strategy_signal(strategy_name, cfg, feats, df)
+    signal = build_strategy_signal(strategy_name, cfg, feats, df, spy_df=spy_df)
 
     bt = Backtester(exec_cfg)
     res = bt.run(
@@ -135,6 +136,13 @@ def process_symbol(
 
     logger.info("Processing %s (%d bars)", symbol, len(df))
 
+    spy_df = None
+    if symbol != "SPY":
+        try:
+            spy_df = load_yfinance("SPY", start=start, end=end, interval="1d")
+        except Exception as exc:
+            logger.warning("Could not load SPY data for %s relative features: %s", symbol, exc)
+
     results: dict = {}
     for strat in strategies:
         cfg = StrategyConfig(
@@ -151,6 +159,7 @@ def process_symbol(
                 exec_cfg=exec_cfg,
                 run_id=run_id,
                 n_mc_runs=n_mc_runs,
+                spy_df=spy_df,
             )
             results[strat] = summary
             pnl_pct = summary["metrics"].get("total_return_pct", 0.0)
