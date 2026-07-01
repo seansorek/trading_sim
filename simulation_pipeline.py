@@ -28,8 +28,6 @@ os.makedirs("results", exist_ok=True)
 # ---------------------------------------------------------------------------
 try:
     from ml_strategies import (
-        OrdinalLogisticStrategy,
-        XGBoostStrategy,
         DailyLogisticStrategy,
         DailyXGBoostStrategy,
     )

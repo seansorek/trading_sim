@@ -253,7 +253,7 @@ class DQNAgent:
 
     @staticmethod
     def load(path: str) -> "DQNAgent":
-        blob = torch.load(path, map_location="cpu")
+        blob = torch.load(path, map_location="cpu", weights_only=True)
         cfg_dict = blob["cfg"].copy()
         cfg = DQNConfig(**cfg_dict)
         agent = DQNAgent(blob["state_dim"], blob["action_dim"], cfg)

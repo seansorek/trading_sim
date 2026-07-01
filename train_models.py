@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import json
+import hashlib
 import logging
 import os
 import pickle
@@ -68,6 +69,14 @@ LABEL_MAP = {0: "SELL", 1: "HOLD", 2: "BUY"}
 # Maximum number of business days the cached data's latest bar can lag behind
 # the requested end date before we consider the cache stale and re-fetch.
 _STALE_TOLERANCE_BDAYS = 4
+
+
+def _pickle_and_hash(artifact: dict, path: str) -> None:
+    """Write artifact as pickle and save its SHA-256 to <path>.sha256."""
+    with open(path, "wb") as f:
+        pickle.dump(artifact, f)
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    Path(path + ".sha256").write_text(digest, encoding="ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -254,13 +263,11 @@ def _save_and_register(
         "test_accuracy": test_accuracy,
         "test_f1": test_f1,
     }
-    with open(artifact_path, "wb") as f:
-        pickle.dump(artifact, f)
+    _pickle_and_hash(artifact, artifact_path)
 
     # Also write to the canonical path (no version suffix) for backward compat
     canonical = f"models/{model_key}.pkl"
-    with open(canonical, "wb") as f:
-        pickle.dump(artifact, f)
+    _pickle_and_hash(artifact, canonical)
 
     db.update_artifact_path(model_key, version, artifact_path)
     db.deactivate_old_models(model_key, version)
