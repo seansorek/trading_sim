@@ -8,6 +8,7 @@ used in the daily pipeline.
 Feature contract: always use FEATURE_COLS from daily_features. Never infer
 column order from DataFrame iteration — training and prediction must agree.
 """
+import hashlib
 import logging
 import os
 import pickle
@@ -63,6 +64,22 @@ def _load_pickle(path: str, strategy_name: str) -> dict:
         raise RuntimeError(
             f"[{strategy_name}] Model file not found: {path}. "
             "Run train_models.py first."
+        )
+    hash_path = path + ".sha256"
+    if os.path.exists(hash_path):
+        expected = open(hash_path, encoding="ascii").read().strip()
+        with open(path, "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"[{strategy_name}] Integrity check failed for {path}: "
+                "SHA-256 mismatch. The file may have been tampered with. Retrain."
+            )
+    else:
+        logger.warning(
+            "[%s] No hash file found for %s — skipping integrity check. "
+            "Retrain with the current train_models.py to enable verification.",
+            strategy_name, path,
         )
     try:
         with open(path, "rb") as f:
@@ -249,94 +266,3 @@ class DailyXGBoostStrategy(BaseStrategy):
         return raw.shift(1).fillna(0).astype(int)
 
 
-# ---------------------------------------------------------------------------
-# Intraday strategies (legacy — not used in daily pipeline)
-# ---------------------------------------------------------------------------
-
-class OrdinalLogisticStrategy(BaseStrategy):
-    """Logistic regression on 5-minute intraday features. Legacy; not in daily pipeline."""
-
-    _INTRADAY_COLS = [
-        "ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z",
-        "momentum_5", "momentum_20", "vp_ratio", "vol_regime", "price_position",
-    ]
-
-    def __init__(self, cfg: StrategyConfig, use_pretrained: bool = True,
-                 confidence_threshold: float = 0.65):
-        super().__init__(cfg)
-        if not HAS_SKLEARN:
-            raise ImportError("scikit-learn not installed.")
-        self.model: Optional[LogisticRegression] = None
-        self.scaler: Optional[StandardScaler] = None
-        self.confidence_threshold = confidence_threshold
-        self._feature_cols: list[str] = []
-
-        if use_pretrained and os.path.exists("models/ordinal_logistic.pkl"):
-            try:
-                with open("models/ordinal_logistic.pkl", "rb") as f:
-                    data = pickle.load(f)
-                self.model = data["model"]
-                self.scaler = data["scaler"]
-                self._feature_cols = data.get("feature_cols", self._INTRADAY_COLS)
-                self.confidence_threshold = data.get("confidence_threshold", confidence_threshold)
-                logger.info("OrdinalLogisticStrategy: loaded intraday model")
-            except Exception as exc:
-                logger.warning("OrdinalLogisticStrategy: failed to load model: %s", exc)
-
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        if self.model is None or self.scaler is None:
-            return pd.Series(0, index=feats.index)
-        cols = [c for c in self._feature_cols if c in feats.columns]
-        if not cols:
-            return pd.Series(0, index=feats.index)
-        X = _preprocess(feats[cols].values.astype(np.float32))
-        X_scaled = self.scaler.transform(X)
-        probs = self.model.predict_proba(X_scaled)
-        preds = np.argmax(probs, axis=1)
-        preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-        signals = preds - 1
-        raw = self._apply_holding_period(pd.Series(signals, index=feats.index))
-        return raw.shift(1).fillna(0).astype(int)
-
-
-class XGBoostStrategy(BaseStrategy):
-    """XGBoost on 5-minute intraday features. Legacy; not in daily pipeline."""
-
-    _INTRADAY_COLS = [
-        "ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z",
-        "momentum_5", "momentum_20", "vp_ratio", "vol_regime", "price_position",
-    ]
-
-    def __init__(self, cfg: StrategyConfig, use_pretrained: bool = True,
-                 confidence_threshold: float = 0.60):
-        super().__init__(cfg)
-        if not HAS_XGBOOST:
-            raise ImportError("xgboost not installed.")
-        self.model = None
-        self.confidence_threshold = confidence_threshold
-        self._feature_cols: list[str] = []
-
-        if use_pretrained and os.path.exists("models/xgboost.pkl"):
-            try:
-                with open("models/xgboost.pkl", "rb") as f:
-                    data = pickle.load(f)
-                self.model = data["model"]
-                self._feature_cols = data.get("feature_cols", self._INTRADAY_COLS)
-                self.confidence_threshold = data.get("confidence_threshold", confidence_threshold)
-                logger.info("XGBoostStrategy: loaded intraday model")
-            except Exception as exc:
-                logger.warning("XGBoostStrategy: failed to load model: %s", exc)
-
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        if self.model is None:
-            return pd.Series(0, index=feats.index)
-        cols = [c for c in self._feature_cols if c in feats.columns]
-        if not cols:
-            return pd.Series(0, index=feats.index)
-        X = _preprocess(feats[cols].values.astype(np.float32))
-        probs = self.model.predict_proba(X)
-        preds = np.argmax(probs, axis=1)
-        preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-        signals = preds - 1
-        raw = self._apply_holding_period(pd.Series(signals, index=feats.index))
-        return raw.shift(1).fillna(0).astype(int)
