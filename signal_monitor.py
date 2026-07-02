@@ -143,3 +143,80 @@ def score_realized_ic(
         }
 
     return results
+
+
+def check_signal_drift(
+    history_path: str,
+    today_date: str,
+    today_mean_scores: dict[str, float],
+    window_days: int = 30,
+    sigma_threshold: float = DRIFT_SIGMA_THRESHOLD,
+    abs_threshold: float = DRIFT_ABS_THRESHOLD,
+) -> dict[str, bool]:
+    """
+    Check if today's predicted-return distribution has drifted vs trailing window.
+
+    today_mean_scores: {model: mean score across all symbols today}
+    Returns {model: True} only when shift > sigma_threshold σ AND > abs_threshold
+    AND yesterday also showed the same shift (two-consecutive-day guard).
+    """
+    records = _load_history(history_path)
+    today = datetime.strptime(today_date, "%Y-%m-%d").date()
+    yesterday = today - timedelta(days=1)
+    window_start = today - timedelta(days=window_days)
+
+    # Build daily mean scores from history: {date -> {model -> mean_score}}
+    raw: dict = {}
+    for r in records:
+        try:
+            d = datetime.strptime(r["date"], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            continue
+        if d < window_start or d >= today:
+            continue
+        model = r.get("model")
+        if not model:
+            continue
+        score = _signal_to_score(r.get("signal", "HOLD"), float(r.get("confidence", 0.0)))
+        raw.setdefault(d, {}).setdefault(model, []).append(score)
+
+    daily_means: dict = {d: {m: float(np.mean(s)) for m, s in ms.items()}
+                         for d, ms in raw.items()}
+
+    warnings: dict[str, bool] = {}
+    all_models = set(today_mean_scores.keys())
+
+    for model in all_models:
+        today_score = today_mean_scores.get(model)
+        if today_score is None:
+            warnings[model] = False
+            continue
+
+        # Baseline window: exclude today and yesterday for a clean reference
+        baseline_scores = [
+            daily_means[d][model]
+            for d in daily_means
+            if model in daily_means[d] and d < yesterday
+        ]
+        if len(baseline_scores) < MIN_DRIFT_WINDOW:
+            warnings[model] = False
+            continue
+
+        baseline = np.array(baseline_scores)
+        mu = float(baseline.mean())
+        sigma = float(baseline.std())
+        if sigma == 0.0:
+            warnings[model] = False
+            continue
+
+        def _is_shifted(score: float) -> bool:
+            z = (score - mu) / sigma
+            return abs(z) > sigma_threshold and abs(score - mu) > abs_threshold
+
+        today_shifted = _is_shifted(today_score)
+        yesterday_score = daily_means.get(yesterday, {}).get(model)
+        yesterday_shifted = yesterday_score is not None and _is_shifted(yesterday_score)
+
+        warnings[model] = today_shifted and yesterday_shifted
+
+    return warnings
