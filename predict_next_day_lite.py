@@ -353,7 +353,7 @@ def predict_symbol(
 # Predictions history (append-only, survives across ephemeral CI runs)
 # ---------------------------------------------------------------------------
 
-def append_predictions_history(predictions: list, history_path: str) -> int:
+def append_predictions_history(predictions: list, history_path: str, prediction_date: str) -> int:
     """Append today's predictions to an append-only JSONL history file.
 
     One record per (symbol, model) prediction. Unlike the daily_predictions
@@ -361,8 +361,10 @@ def append_predictions_history(predictions: list, history_path: str) -> int:
     survives ephemeral CI runners — it's the only durable record of what
     the live models actually predicted on a given day. Returns the number
     of records written.
+
+    prediction_date: ISO date string (YYYY-MM-DD) to use for all records.
+    Passed in from main() to avoid midnight-crossing race with score_realized_ic.
     """
-    prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
     records = []
     for pred in predictions:
         if "error" in pred:
@@ -645,7 +647,7 @@ def main() -> None:
 
     # Append to durable predictions history (separate from the ephemeral DB)
     if args.history:
-        n = append_predictions_history(predictions, args.history)
+        n = append_predictions_history(predictions, args.history, prediction_date)
         logger.info("Appended %d records to %s", n, args.history)
 
     # Discord notification

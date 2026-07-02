@@ -74,12 +74,46 @@ def test_drift_warning_on_two_consecutive_days(tmp_path):
 
 
 def test_no_drift_when_abs_shift_below_threshold(tmp_path):
-    """Even if z-score is high, abs shift must exceed DRIFT_ABS_THRESHOLD (0.002)."""
-    # Base score near zero; tiny absolute shift even if sigma-ratio is large
-    path, today = _build_history(tmp_path, base_score=0.0001, yesterday_score=0.003)
-    # today shift of 0.003 - 0.0001 = 0.0029 > 0.002, so this WILL warn
-    # Let's use an even smaller shift: 0.001
-    result = check_signal_drift(path, today, {"daily_predictor": 0.001})
+    """Even if z-score is high, abs shift must exceed DRIFT_ABS_THRESHOLD (0.002).
+
+    This test validates that the abs-threshold guard (line 212-214 in signal_monitor.py)
+    actually blocks a warning when abs(score - mu) < 0.002, even if z-score > 2.0.
+
+    Setup: alternating BUY/HOLD baseline (29 days) creates genuine std ≈ 0.0001.
+    - Even baseline days (i in 2..30, step 2): BUY with confidence 0.0002 → score +0.0002
+    - Odd baseline days (i in 3..29, step 2): HOLD with confidence 0.0 → score 0.0
+    - Baseline mean ≈ 0.0001, std ≈ 0.0001
+    - Yesterday: confidence 0.001 (BUY) → score +0.001 → abs-shift ≈ 0.0009 < 0.002
+    - Today: confidence 0.001 (BUY) → score +0.001 → z ≈ 9 (> 2.0) but abs-shift < 0.002
+    - Expected: False (abs-threshold blocks both yesterday and today)
+    """
+    today = date.today()
+    records = []
+
+    # Build 29-day baseline with alternating BUY/HOLD
+    for i in range(2, 31):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        if i % 2 == 0:  # Even: BUY 0.0002
+            records.append({
+                "date": d, "symbol": "AAPL", "model": "daily_predictor",
+                "signal": "BUY", "confidence": 0.0002, "price": 100.0,
+            })
+        else:  # Odd: HOLD 0.0
+            records.append({
+                "date": d, "symbol": "AAPL", "model": "daily_predictor",
+                "signal": "HOLD", "confidence": 0.0, "price": 100.0,
+            })
+
+    # Yesterday: score 0.001 (high z-score but low abs-shift)
+    yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    records.append({
+        "date": yesterday, "symbol": "AAPL", "model": "daily_predictor",
+        "signal": "BUY", "confidence": 0.001, "price": 100.0,
+    })
+
+    path = _write_history(tmp_path, records)
+    # Today: same as yesterday (0.001) → z ≈ 9, abs-shift ≈ 0.0009
+    result = check_signal_drift(path, today.strftime("%Y-%m-%d"), {"daily_predictor": 0.001})
     assert result.get("daily_predictor") is False
 
 
