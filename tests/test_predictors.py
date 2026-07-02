@@ -1,12 +1,20 @@
 """Tests for the predictor layer — no real models, no file I/O."""
 import sys
 from pathlib import Path
+import pickle
+import tempfile
+from unittest import mock as unittest_mock
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from daily_features import FEATURE_COLS
 from predictors.base import BasePredictor, _preprocess
+from predictors.logistic import LogisticPredictor
+from predictors.xgboost_pred import XGBPredictor
 
 
 class TestBasePredictor:
@@ -34,3 +42,149 @@ class TestBasePredictor:
     def test_preprocess_preserves_shape(self):
         X = np.ones((50, 10))
         assert _preprocess(X).shape == (50, 10)
+
+
+def _make_fake_pickle(path: str, feature_contract=None):
+    """Write a minimal valid pickle for LogisticPredictor.load().
+
+    Patches _load_validated_pickle to inject mocks after loading.
+    """
+    if feature_contract is None:
+        feature_contract = list(FEATURE_COLS)
+
+    # Pickle only serializable data (str/list/np.array), mocks attached in tests
+    artifact = {
+        "model": None,  # Placeholder, will be mocked in tests
+        "scaler": None,  # Placeholder, will be mocked in tests
+        "feature_contract": feature_contract,
+        "confidence_threshold": 0.55,
+    }
+    with open(path, "wb") as f:
+        pickle.dump(artifact, f)
+
+
+class TestLogisticPredictor:
+    def _create_mock_predictor(self):
+        """Helper to create a LogisticPredictor with mocks."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x  # identity
+        clf = MagicMock()
+        clf.classes_ = np.array([0, 1, 2])
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        return LogisticPredictor(model=clf, scaler=scaler, confidence_threshold=0.55)
+
+    def test_load_returns_predictor_instance(self):
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            _make_fake_pickle(f.name)
+            # Patch _load_validated_pickle to inject mocks
+            with unittest_mock.patch("predictors.base._load_validated_pickle") as mock_load:
+                scaler = MagicMock()
+                scaler.transform.side_effect = lambda x: x
+                clf = MagicMock()
+                clf.classes_ = np.array([0, 1, 2])
+                clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+                mock_load.return_value = {
+                    "model": clf,
+                    "scaler": scaler,
+                    "feature_contract": list(FEATURE_COLS),
+                    "confidence_threshold": 0.55,
+                }
+                pred = LogisticPredictor.load(f.name)
+            assert isinstance(pred, LogisticPredictor)
+
+    def test_load_missing_file_raises(self):
+        with pytest.raises(RuntimeError, match="not found"):
+            LogisticPredictor.load("/nonexistent/model.pkl")
+
+    def test_load_wrong_feature_contract_raises(self):
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            _make_fake_pickle(f.name, feature_contract=["bad_col"])
+            with pytest.raises(RuntimeError, match="Feature contract mismatch"):
+                LogisticPredictor.load(f.name)
+
+    def test_predict_returns_tuple(self):
+        pred = self._create_mock_predictor()
+        n = 5
+        X = np.zeros((n, len(FEATURE_COLS)), dtype=np.float32)
+        # mock returns same shape regardless of input length
+        pred.model.predict_proba.return_value = np.tile([0.1, 0.2, 0.7], (n, 1))
+        scores, proba = pred.predict(X)
+        assert scores.shape == (n,)
+        assert proba.shape[0] == n
+
+    def test_predict_scores_in_minus1_0_1(self):
+        pred = self._create_mock_predictor()
+        n = 3
+        pred.model.classes_ = np.array([0, 1, 2])
+        pred.model.predict_proba.return_value = np.array([
+            [0.7, 0.2, 0.1],  # SELL → -1
+            [0.1, 0.7, 0.2],  # HOLD → 0
+            [0.1, 0.2, 0.7],  # BUY  → +1
+        ])
+        X = np.zeros((n, len(FEATURE_COLS)), dtype=np.float32)
+        scores, _ = pred.predict(X)
+        np.testing.assert_array_equal(scores, [-1.0, 0.0, 1.0])
+
+    def test_predict_maps_through_classes_not_column_index(self):
+        """classes_=[0, 2] (no HOLD class): col 1 → class 2 → BUY (+1)."""
+        pred = self._create_mock_predictor()
+        pred.model.classes_ = np.array([0, 2])  # missing class 1 (HOLD)
+        pred.model.predict_proba.return_value = np.array([[0.3, 0.7]])
+        X = np.zeros((1, len(FEATURE_COLS)), dtype=np.float32)
+        scores, _ = pred.predict(X)
+        assert scores[0] == 1.0  # argmax=1 → classes_[1]=2 → 2-1=1 (BUY)
+
+    def test_confidence_threshold_loaded_from_pickle(self):
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            _make_fake_pickle(f.name)
+            with unittest_mock.patch("predictors.base._load_validated_pickle") as mock_load:
+                scaler = MagicMock()
+                scaler.transform.side_effect = lambda x: x
+                clf = MagicMock()
+                clf.classes_ = np.array([0, 1, 2])
+                mock_load.return_value = {
+                    "model": clf,
+                    "scaler": scaler,
+                    "feature_contract": list(FEATURE_COLS),
+                    "confidence_threshold": 0.55,
+                }
+                pred = LogisticPredictor.load(f.name)
+            assert pred.confidence_threshold == 0.55
+
+
+class TestXGBPredictor:
+    def _create_mock_predictor(self):
+        """Helper to create an XGBPredictor with mocks."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x  # identity
+        clf = MagicMock()
+        clf.classes_ = np.array([0, 1, 2])
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        return XGBPredictor(model=clf, scaler=scaler, confidence_threshold=0.55)
+
+    def test_load_returns_predictor_instance(self):
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            _make_fake_pickle(f.name)
+            with unittest_mock.patch("predictors.base._load_validated_pickle") as mock_load:
+                scaler = MagicMock()
+                scaler.transform.side_effect = lambda x: x
+                clf = MagicMock()
+                clf.classes_ = np.array([0, 1, 2])
+                clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+                mock_load.return_value = {
+                    "model": clf,
+                    "scaler": scaler,
+                    "feature_contract": list(FEATURE_COLS),
+                    "confidence_threshold": 0.55,
+                }
+                pred = XGBPredictor.load(f.name)
+            assert isinstance(pred, XGBPredictor)
+
+    def test_predict_scores_shape_matches_input(self):
+        pred = self._create_mock_predictor()
+        n = 7
+        pred.model.predict_proba.return_value = np.tile([0.1, 0.2, 0.7], (n, 1))
+        X = np.zeros((n, len(FEATURE_COLS)), dtype=np.float32)
+        scores, proba = pred.predict(X)
+        assert scores.shape == (n,)
+        assert proba.shape == (n, 3)
