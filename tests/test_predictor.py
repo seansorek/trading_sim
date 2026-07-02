@@ -163,7 +163,6 @@ def test_compute_predictor_signal_output_length_matches_input():
 def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
     """DailyPredictorStrategy must use best_signal_quantile/best_threshold_window
     from the pickle when env vars are not set — second priority level."""
-    import pickle, os
     from sklearn.linear_model import Ridge
     from sklearn.preprocessing import StandardScaler
     from daily_features import FEATURE_COLS
@@ -200,7 +199,6 @@ def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
 def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
     """Pickle without best_signal_quantile/best_threshold_window keys must
     fall back to hardcoded defaults without raising."""
-    import pickle
     from sklearn.linear_model import Ridge
     from sklearn.preprocessing import StandardScaler
     from daily_features import FEATURE_COLS
@@ -215,8 +213,6 @@ def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
     pkl_path = str(tmp_path / "old_predictor.pkl")
     with open(pkl_path, "wb") as f:
         pickle.dump(artifact, f)
-
-    import os
     env_backup = {k: os.environ.pop(k, None)
                   for k in ("PREDICTOR_SIGNAL_QUANTILE", "PREDICTOR_THRESHOLD_WINDOW")}
     try:

@@ -202,18 +202,28 @@ class DailyPredictorStrategy(BaseStrategy):
                 try:
                     self.signal_quantile = float(sq_env)
                 except ValueError:
-                    pass
-            elif "best_signal_quantile" in data:
-                self.signal_quantile = float(data["best_signal_quantile"])
+                    # Invalid env var — fall through to pickle key
+                    if "best_signal_quantile" in data:
+                        self.signal_quantile = float(data["best_signal_quantile"])
+                    # else: stays at constructor default
+            else:
+                if "best_signal_quantile" in data:
+                    self.signal_quantile = float(data["best_signal_quantile"])
+                # else: stays at constructor default
 
             tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
             if tw_env is not None:
                 try:
                     self.threshold_window = int(tw_env)
                 except ValueError:
-                    pass
-            elif "best_threshold_window" in data:
-                self.threshold_window = int(data["best_threshold_window"])
+                    # Invalid env var — fall through to pickle key
+                    if "best_threshold_window" in data:
+                        self.threshold_window = int(data["best_threshold_window"])
+                    # else: stays at constructor default
+            else:
+                if "best_threshold_window" in data:
+                    self.threshold_window = int(data["best_threshold_window"])
+                # else: stays at constructor default
         else:
             sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
             if sq_env is not None:
