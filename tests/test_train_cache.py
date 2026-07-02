@@ -93,6 +93,36 @@ def test_stale_tolerance_boundary(tmp_path):
     assert result is not None
 
 
+def test_short_but_fresh_cache_triggers_refetch_for_more_history(tmp_path):
+    """A cache that is fresh (latest bar is recent) but doesn't reach back to
+    the requested start date must trigger a re-fetch, not be silently reused.
+
+    Regression test for the bug where requesting more history (e.g. --days
+    2500 after a previous --days 1000 run) was a no-op: _load_symbol only
+    checked recency of the latest bar and ignored whether the cache's
+    earliest bar covered the requested start, so it kept returning the same
+    short cache forever.
+    """
+    db = DB(str(tmp_path / "test.db"))
+
+    # Cache only covers the most recent 100 business days (~5 months).
+    short_data = _make_bar_df("2024-01-02", n=100)
+    db.upsert_bars("AAPL", "1d", short_data)
+
+    latest_bar = short_data.index.max()
+    end_date = (latest_bar + pd.tseries.offsets.BDay(1)).strftime("%Y-%m-%d")
+
+    # Request a much longer window — e.g. ~1000 business days back.
+    long_data = _make_bar_df("2020-01-02", n=1000)
+
+    with patch("train_models.load_yfinance", return_value=long_data) as mock_fetch:
+        result = _load_symbol("AAPL", "2020-01-02", end_date, db)
+
+    mock_fetch.assert_called_once()
+    assert result is not None
+    assert len(result) == 1000
+
+
 def test_one_past_stale_tolerance_triggers_refetch(tmp_path):
     """Cache one business day past the tolerance should trigger a refetch."""
     db = DB(str(tmp_path / "test.db"))

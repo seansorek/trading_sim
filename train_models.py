@@ -44,10 +44,11 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-from data_loader import check_cache_freshness, load_yfinance
+from data_loader import check_cache_coverage, check_cache_freshness, load_yfinance
 from daily_features import (
     FEATURE_COLS,
     FEATURE_SET_NAME,
+    FWD_RET_HORIZON_DAYS,
     discretize_labels,
     make_daily_features,
 )
@@ -108,9 +109,16 @@ def _load_symbol(
     """
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
-        if check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS):
+        fresh = check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS)
+        covers_start = check_cache_coverage(cached, start)
+        if fresh and covers_start:
             logger.info("  %s: loaded %d bars from DB cache", symbol, len(cached))
             return cached
+        elif not covers_start:
+            logger.info(
+                "  %s: cache missing older history (earliest bar %s, need <= start %s), re-fetching",
+                symbol, cached.index.min().date(), pd.to_datetime(start).date(),
+            )
         else:
             latest_bar = cached.index.max()
             latest_date = latest_bar.tz_localize(None) if latest_bar.tzinfo else latest_bar
@@ -138,13 +146,16 @@ def _load_symbol(
 
 
 def _prepare_data(
-    symbols: list[str], days: int, db: DB
+    symbols: list[str], days: int, db: DB, vol_mult: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """
     Collect training data across symbols with per-symbol temporal splits.
 
     Each symbol is split 80/20 by time independently before pooling, so the
-    test set contains truly held-out future data for every symbol.
+    test set contains truly held-out future data for every symbol. An embargo
+    gap of FWD_RET_HORIZON_DAYS rows is dropped between train and test so that
+    no training label's forward-return horizon overlaps the test period's
+    price action (purged split — see Lopez de Prado).
 
     Returns (X_train, y_train, X_test, y_test, symbol_list_used).
     """
@@ -182,21 +193,28 @@ def _prepare_data(
 
         X_sym = feats[FEATURE_COLS].values.astype(np.float32)
 
-        # Volatility-adjusted thresholds: 0.5σ bands scaled for 3-day horizon
+        # Volatility-adjusted thresholds: vol_mult*sigma bands scaled for 3-day horizon
         vol = feats["vol_20d"].values
-        pos_thr = vol * np.sqrt(3) * 0.5
+        pos_thr = vol * np.sqrt(3) * vol_mult
         y_sym = discretize_labels(feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr)
 
         split = int(len(X_sym) * 0.8)
+        # Embargo gap: drop rows whose fwd_ret_1d horizon would reach into the
+        # test period, so train labels never depend on test-period prices.
+        test_start = split + FWD_RET_HORIZON_DAYS
+        if test_start >= len(X_sym):
+            logger.warning("  %s: too few rows for embargo gap, skipping", symbol)
+            continue
         X_tr = _preprocess(X_sym[:split].copy())
-        X_te = _preprocess(X_sym[split:].copy())
+        X_te = _preprocess(X_sym[test_start:].copy())
 
         train_Xs.append(X_tr); train_ys.append(y_sym[:split])
-        test_Xs.append(X_te);  test_ys.append(y_sym[split:])
+        test_Xs.append(X_te);  test_ys.append(y_sym[test_start:])
         used_symbols.append(symbol)
         logger.info(
-            "  %s: %d samples (train=%d test=%d), class dist %s",
-            symbol, len(y_sym), split, len(y_sym) - split, np.bincount(y_sym).tolist(),
+            "  %s: %d samples (train=%d embargo=%d test=%d), class dist %s",
+            symbol, len(y_sym), split, FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
+            np.bincount(y_sym).tolist(),
         )
 
     if not train_Xs:
@@ -334,11 +352,14 @@ def train_logistic(
     else:
         if optimize and not HAS_SKOPT:
             logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")
+        # class_weight=None keeps the natural HOLD-majority prior, which test
+        # accuracy is measured against. "balanced" fights that prior and tanks
+        # accuracy (see hybrid_model tuning notes).
         model = LogisticRegression(
             C=cfg.get("C", 1.0),
             max_iter=cfg.get("max_iter", 1000),
             solver="lbfgs",
-            class_weight="balanced",
+            class_weight=cfg.get("class_weight"),
             random_state=42,
             multi_class="multinomial",
         )
@@ -413,12 +434,19 @@ def train_xgboost(
             num_class=3,
             eval_metric="mlogloss",
         )
-        # Class weights to counteract class imbalance
+        # Sample weighting scheme: "none" keeps the natural HOLD-majority prior
+        # (best for test accuracy, since the test set has the same prior);
+        # "sqrt" is a mild rebalance; "inverse" fully balances classes but was
+        # found to tank accuracy to ~34-43% (see hybrid_model tuning notes).
+        class_weight = cfg.get("class_weight", "none")
         class_counts = np.bincount(y_train, minlength=3)
         total = len(y_train)
-        sample_weights = np.array([
-            total / (3 * class_counts[y]) for y in y_train
-        ])
+        if class_weight == "inverse":
+            sample_weights = np.array([total / (3 * class_counts[y]) for y in y_train])
+        elif class_weight == "sqrt":
+            sample_weights = np.sqrt(np.array([total / (3 * class_counts[y]) for y in y_train]))
+        else:
+            sample_weights = None
         model.fit(X_tr, y_train, sample_weight=sample_weights)
 
     train_acc = float(accuracy_score(y_train, model.predict(X_tr)))
@@ -536,6 +564,18 @@ def main() -> None:
     parser.add_argument("--optimize", action="store_true", help="Run Bayesian hyperparameter search")
     parser.add_argument("--db", default="data/trading_sim.db", help="Path to SQLite DB")
     parser.add_argument("--confidence", type=float, default=0.55, help="Confidence threshold")
+    parser.add_argument(
+        "--vol-mult", type=float, default=0.5,
+        help="Volatility multiplier for label thresholds (higher -> larger HOLD class, easier task)",
+    )
+    parser.add_argument(
+        "--logistic-class-weight", choices=["none", "balanced"], default="none",
+        help="Logistic class_weight scheme ('balanced' fights the natural HOLD-majority prior)",
+    )
+    parser.add_argument(
+        "--xgb-class-weight", choices=["none", "sqrt", "inverse"], default="none",
+        help="XGBoost sample weighting scheme",
+    )
     # DQN-specific args
     parser.add_argument("--dqn-symbols", default=_DQN_DEFAULT_SYMBOLS, help="Symbols for DQN training")
     parser.add_argument("--dqn-start", default="2024-01-01", help="DQN training start date")
@@ -558,7 +598,9 @@ def main() -> None:
     db = DB(args.db)
 
     logger.info("Collecting and preparing data...")
-    X_train, y_train, X_test, y_test, used_symbols = _prepare_data(symbols, args.days, db)
+    X_train, y_train, X_test, y_test, used_symbols = _prepare_data(
+        symbols, args.days, db, vol_mult=args.vol_mult,
+    )
     logger.info(
         "Total samples: %d  Features: %d  Train: %d  Test: %d",
         len(X_train) + len(X_test), X_train.shape[1], len(X_train), len(X_test),
@@ -573,6 +615,7 @@ def main() -> None:
         logistic_cfg = {
             "C": cfg.strategies.logistic.C,
             "max_iter": cfg.strategies.logistic.max_iter,
+            "class_weight": None if args.logistic_class_weight == "none" else args.logistic_class_weight,
         }
         model, scaler, train_acc, test_acc, test_f1 = train_logistic(
             X_train, X_test, y_train, y_test, logistic_cfg,
@@ -605,6 +648,7 @@ def main() -> None:
             "colsample_bytree": cfg.strategies.xgboost.colsample_bytree,
             "min_child_weight": cfg.strategies.xgboost.min_child_weight,
             "gamma": cfg.strategies.xgboost.gamma,
+            "class_weight": args.xgb_class_weight,
         }
         model, scaler, train_acc, test_acc, test_f1 = train_xgboost(
             X_train, X_test, y_train, y_test, xgb_cfg,

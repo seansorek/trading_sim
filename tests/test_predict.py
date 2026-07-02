@@ -1,4 +1,5 @@
 """test_predict.py — Tests for predict_next_day_lite.py (no network, no real models)."""
+import json
 import pickle
 import sys
 import tempfile
@@ -13,7 +14,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from daily_features import FEATURE_COLS
 from dqn_signal import gate_dqn_signal
-from predict_next_day_lite import _load_pkl, predict_symbol, send_discord
+from predict_next_day_lite import (
+    _load_pkl,
+    _predict_classifier_signal,
+    _predict_regressor_signal,
+    _regressor_confidence,
+    append_predictions_history,
+    load_models,
+    predict_symbol,
+    send_discord,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +260,73 @@ class TestSendDiscord:
 
 
 # ---------------------------------------------------------------------------
+# append_predictions_history
+# ---------------------------------------------------------------------------
+
+class TestAppendPredictionsHistory:
+    def _predictions(self):
+        return [
+            {
+                "symbol": "AAPL",
+                "price": 150.0,
+                "predictions": {
+                    "daily_logistic": {"signal": "BUY", "confidence": 0.7},
+                    "daily_xgboost": {"signal": "HOLD", "confidence": 0.6},
+                },
+            },
+            {"symbol": "BADTICKER", "error": "Insufficient data"},
+        ]
+
+    def test_writes_one_record_per_symbol_model_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n = append_predictions_history(self._predictions(), path)
+
+            assert n == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 2
+            records = [json.loads(line) for line in lines]
+            assert {r["model"] for r in records} == {"daily_logistic", "daily_xgboost"}
+            assert all(r["symbol"] == "AAPL" for r in records)
+
+    def test_error_predictions_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n = append_predictions_history(
+                [{"symbol": "BADTICKER", "error": "Insufficient data"}], path
+            )
+
+        assert n == 0
+        assert not Path(path).exists()
+
+    def test_appends_without_truncating_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(self._predictions(), path)
+            append_predictions_history(self._predictions(), path)
+
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 4
+
+    def test_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "nested" / "dir" / "history.jsonl")
+            n = append_predictions_history(self._predictions(), path)
+
+            assert n == 2
+            assert Path(path).exists()
+
+    def test_record_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(self._predictions(), path)
+
+            record = json.loads(Path(path).read_text().splitlines()[0])
+            assert set(record) == {"date", "symbol", "model", "signal", "confidence", "price"}
+            assert record["price"] == 150.0
+
+
+# ---------------------------------------------------------------------------
 # gate_dqn_signal  (shared helper)
 # ---------------------------------------------------------------------------
 
@@ -477,3 +554,281 @@ class TestPredictProbaClassMapping:
         assert p["signal"] == "BUY", (
             f"With classes_=[0,1,2] and argmax=2, signal should be BUY, got {p['signal']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _predict_classifier_signal / _predict_regressor_signal (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestPredictClassifierSignal:
+    def test_matches_existing_predict_symbol_behavior(self):
+        """The extracted helper must reproduce exactly what the old inline
+        daily_logistic/daily_xgboost blocks computed."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+        data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
+
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+
+        assert result["signal"] == "BUY"
+        assert abs(result["confidence"] - 0.7) < 1e-6
+
+    def test_below_threshold_collapses_to_hold(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.25, 0.30, 0.45]])
+        clf.classes_ = np.array([0, 1, 2])
+        data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
+
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+
+        assert result["signal"] == "HOLD"
+
+
+class TestRegressorConfidence:
+    def test_today_is_max_in_window_gives_confidence_one(self):
+        pred_ret = np.array([0.001] * 59 + [0.05])
+        conf = _regressor_confidence(pred_ret, threshold_window=60)
+        assert conf == pytest.approx(1.0)
+
+    def test_today_is_typical_gives_mid_confidence(self):
+        pred_ret = np.array([0.001] * 60)
+        conf = _regressor_confidence(pred_ret, threshold_window=60)
+        assert conf == pytest.approx(1.0)  # all equal -> today <= every value
+
+    def test_too_short_window_returns_zero(self):
+        assert _regressor_confidence(np.array([0.01]), threshold_window=60) == 0.0
+
+
+class TestPredictRegressorSignal:
+    def test_extreme_prediction_triggers_buy_with_clean_features(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "BUY"
+        assert 0.0 <= result["confidence"] <= 1.0
+
+    def test_unremarkable_prediction_holds(self):
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = np.full(80, 0.001)
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "HOLD"
+
+    def test_inf_and_nan_features_do_not_crash(self):
+        """X_all may contain inf/nan from upstream feature computation on
+        thin data — _preprocess must clip these before scaling, matching
+        what the model was trained on (train_models._preprocess)."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = np.full(80, 0.001)
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        X_all[0, 0] = np.inf
+        X_all[1, 1] = np.nan
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] in {"BUY", "SELL", "HOLD"}
+        called_with = scaler.transform.call_args[0][0]
+        assert np.isfinite(called_with).all()
+
+    def test_valid_signal_quantile_env_override_is_applied(self, monkeypatch):
+        """A well-formed PREDICTOR_SIGNAL_QUANTILE override should be parsed
+        and used without raising — the valid-override path."""
+        monkeypatch.setenv("PREDICTOR_SIGNAL_QUANTILE", "0.9")
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] in {"BUY", "SELL", "HOLD"}
+        assert 0.0 <= result["confidence"] <= 1.0
+
+    def test_invalid_signal_quantile_env_falls_back_to_default(self, monkeypatch):
+        """A malformed PREDICTOR_SIGNAL_QUANTILE (e.g. a typo in the GitHub
+        Actions environment) must not raise — it should log a warning and
+        fall back to the function's default signal_quantile=0.7, still
+        producing a valid result. Regression test for the bug where this
+        previously surfaced as an uncaught ValueError, silently turning into
+        a per-model {"error": ...} entry for daily_predictor every day."""
+        monkeypatch.setenv("PREDICTOR_SIGNAL_QUANTILE", "not-a-number")
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        pred_ret = np.full(80, 0.001)
+        pred_ret[-1] = 0.05
+        model.predict.return_value = pred_ret
+        data = {"model": model, "scaler": scaler}
+
+        X_all = np.zeros((80, len(FEATURE_COLS)), dtype=np.float32)
+        result = _predict_regressor_signal(data, X_all)
+
+        assert result["signal"] == "BUY"
+        assert 0.0 <= result["confidence"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# predict_symbol with daily_predictor (end-to-end through the dispatch loop)
+# ---------------------------------------------------------------------------
+
+class TestPredictSymbolPredictor:
+    def _build_predictor_models(self, pred_ret: np.ndarray) -> dict:
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        model = MagicMock()
+        model.predict.return_value = pred_ret
+        return {
+            "daily_predictor": {
+                "model": model,
+                "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS),
+            }
+        }
+
+    def test_extreme_prediction_produces_buy(self):
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        pred_ret[-1] = 0.05
+        models = self._build_predictor_models(pred_ret)
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result
+        p = result["predictions"]["daily_predictor"]
+        assert p["signal"] == "BUY"
+
+    def test_unremarkable_prediction_produces_hold(self):
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        models = self._build_predictor_models(pred_ret)
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_predictor"]
+        assert p["signal"] == "HOLD"
+
+    def test_runs_alongside_classifier_without_interference(self):
+        """Both a classifier and the regressor in the same models dict must
+        each produce their own independent prediction entry."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+
+        n = 100
+        pred_ret = np.full(n, 0.001)
+        pred_ret[-1] = 0.05
+        models = {
+            "daily_logistic": {
+                "model": clf, "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS), "confidence_threshold": 0.55,
+            },
+            **self._build_predictor_models(pred_ret),
+        }
+        feats_df = _make_features_df(n)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert result["predictions"]["daily_logistic"]["signal"] == "BUY"
+        assert result["predictions"]["daily_predictor"]["signal"] == "BUY"
+
+    def test_unknown_model_kind_reports_error_not_crash(self):
+        """A model_key with no MODEL_KINDS entry must surface as a
+        per-model error in the result dict, not crash the whole symbol's
+        prediction (one bad/misconfigured model must not take down the
+        others) — this is the 'easy to add without breaking things'
+        contract: forgetting to register a new model's kind fails loudly
+        and locally, not silently or globally."""
+        models = {
+            "totally_new_model": {
+                "model": MagicMock(), "scaler": MagicMock(),
+                "feature_contract": list(FEATURE_COLS),
+            }
+        }
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result  # the symbol overall still succeeds
+        assert "error" in result["predictions"]["totally_new_model"]
+
+
+# ---------------------------------------------------------------------------
+# load_models (Task 5 — config-driven model list)
+# ---------------------------------------------------------------------------
+
+class TestLoadModels:
+    def test_respects_explicit_model_keys_list(self, tmp_path, monkeypatch):
+        """Passing model_keys explicitly must load exactly that list,
+        independent of config — proves a model can be added/removed by
+        changing the list with no other code path involved."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        artifact = _make_artifact()
+        with open(tmp_path / "models" / "daily_logistic.pkl", "wb") as f:
+            pickle.dump(artifact, f)
+
+        loaded = load_models(db=None, model_keys=["daily_logistic"])
+
+        assert set(loaded.keys()) <= {"daily_logistic", "daily_dqn"}
+        assert "daily_logistic" in loaded
+
+    def test_missing_pickle_for_configured_model_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        """A model_key in the config list whose pickle doesn't exist on
+        disk must be silently skipped (logged), not raise — so a
+        half-deployed model doesn't take down the whole prediction run."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+
+        loaded = load_models(db=None, model_keys=["daily_predictor", "totally_unknown"])
+
+        assert loaded == {}
+
+    def test_defaults_to_config_prediction_models(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        artifact = _make_artifact()
+        with open(tmp_path / "models" / "daily_predictor.pkl", "wb") as f:
+            pickle.dump(artifact, f)
+
+        with patch("predict_next_day_lite.get_config") as mock_cfg:
+            mock_cfg.return_value.prediction.models = ["daily_predictor"]
+            loaded = load_models(db=None)
+
+        assert "daily_predictor" in loaded

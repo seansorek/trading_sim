@@ -27,6 +27,8 @@ from data_loader import load_yfinance
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
+from ml_strategies import compute_predictor_signal
+from train_models import _preprocess
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +37,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _SIGNAL_NAMES = ["SELL", "HOLD", "BUY"]  # index matches label {0,1,2}
+
+# Maps a loaded model_key to how predict_symbol should run it. Adding a new
+# classifier or regressor model means adding one entry here and one entry
+# to prediction.models in config/default.yaml — predict_symbol, the DB
+# upsert, and the Discord payload all pick it up automatically with no
+# further code changes. DQN is handled separately below (different
+# artifact format and a windowed state, not a single-row prediction).
+MODEL_KINDS = {
+    "daily_logistic": "classifier",
+    "daily_xgboost": "classifier",
+    "daily_predictor": "regressor",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +80,120 @@ def _load_pkl(path: str, model_key: str) -> dict:
     return data
 
 
-def load_models(db: Optional[DB] = None) -> dict:
+def _predict_classifier_signal(data: dict, X_latest: np.ndarray) -> dict:
+    """
+    Predict today's signal for a 3-class classifier model (daily_logistic,
+    daily_xgboost). Both share identical prediction logic — only the
+    trained model object differs — so this one function serves both,
+    instead of two copy-pasted blocks.
+    """
+    X_scaled = data["scaler"].transform(X_latest)
+    prob = data["model"].predict_proba(X_scaled)[0]
+    pred_idx = int(np.argmax(prob))
+    confidence = float(prob[pred_idx])
+    threshold = data.get("confidence_threshold", 0.55)
+    pred_class = int(data["model"].classes_[pred_idx])
+    signal = _SIGNAL_NAMES[pred_class]
+    if signal != "HOLD" and confidence < threshold:
+        signal = "HOLD"
+    return {"signal": signal, "confidence": confidence}
+
+
+def _regressor_confidence(pred_ret: np.ndarray, threshold_window: int) -> float:
+    """
+    Percentile rank of today's |predicted return| within the trailing
+    threshold_window predictions, in [0, 1].
+
+    This is NOT a calibrated probability like the classifiers' confidence
+    (Ridge has no predict_proba) — it is the fraction of the trailing
+    window whose magnitude today's prediction equals or exceeds. Higher
+    means today's forecast is more extreme relative to its recent history,
+    which is also what compute_predictor_signal's rolling quantile uses to
+    decide whether to trade.
+    """
+    window = pred_ret[-threshold_window:]
+    if len(window) < 2:
+        return 0.0
+    today_abs = abs(pred_ret[-1])
+    return float(np.mean(np.abs(window) <= today_abs))
+
+
+def _predict_regressor_signal(
+    data: dict,
+    X_all: np.ndarray,
+    signal_quantile: float = 0.7,
+    threshold_window: int = 60,
+) -> dict:
+    """
+    Predict today's signal for a regression-style model (daily_predictor).
+
+    Unlike the classifiers, this needs the *trailing window* of
+    predictions (X_all), not just the latest bar, because
+    compute_predictor_signal's causal rolling quantile needs history to
+    decide whether today's forecast is extreme enough to trade — the same
+    decision logic used in backtesting (ml_strategies.DailyPredictorStrategy),
+    so live and backtest predictions can't silently diverge.
+
+    Applies the same ±5-std-clip preprocessing (train_models._preprocess)
+    daily_predictor was trained on (see train_predictor.prepare_data) —
+    skipping this would feed the model out-of-distribution inputs it never
+    saw in training.
+    """
+    X_clean = _preprocess(X_all.copy())
+    X_scaled = data["scaler"].transform(X_clean)
+    pred_ret = data["model"].predict(X_scaled)
+
+    # NOTE: ml_strategies.DailyPredictorStrategy.__init__ (lines ~324-325) has
+    # the same unguarded os.environ.get(...) -> float()/int() parse pattern.
+    # That is a known pre-existing twin, intentionally not touched by this
+    # fix — scoped here because this file is what's deployed to production.
+    sq_raw = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+    if sq_raw is None:
+        sq = signal_quantile
+    else:
+        try:
+            sq = float(sq_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid PREDICTOR_SIGNAL_QUANTILE=%r — falling back to default %.2f",
+                sq_raw, signal_quantile,
+            )
+            sq = signal_quantile
+
+    tw_raw = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+    if tw_raw is None:
+        tw = threshold_window
+    else:
+        try:
+            tw = int(tw_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid PREDICTOR_THRESHOLD_WINDOW=%r — falling back to default %d",
+                tw_raw, threshold_window,
+            )
+            tw = threshold_window
+
+    signals = compute_predictor_signal(pred_ret, sq, tw)
+
+    last_signal = int(signals[-1])
+    signal_name = _SIGNAL_NAMES[last_signal + 1]
+    confidence = _regressor_confidence(pred_ret, tw)
+    return {"signal": signal_name, "confidence": confidence}
+
+
+def load_models(
+    db: Optional[DB] = None, model_keys: Optional[list] = None
+) -> dict:
     """
     Load all available daily model pickles.
 
-    Uses DB model_registry to resolve artifact_path when available.
-    Falls back to canonical paths (models/daily_logistic.pkl, etc.) otherwise.
+    model_keys defaults to config.prediction.models (config-driven, so a
+    model can be added to or removed from the live pipeline by editing
+    config/default.yaml — no code change). Uses DB model_registry to
+    resolve artifact_path when available, falling back to the canonical
+    models/<model_key>.pkl path otherwise. A configured model whose
+    artifact is missing or invalid is logged and skipped, not fatal —
+    other configured models still load and predict.
     """
     models = {}
 
@@ -82,10 +204,11 @@ def load_models(db: Optional[DB] = None) -> dict:
                 return meta["artifact_path"]
         return canonical
 
-    for model_key, canonical in [
-        ("daily_logistic", "models/daily_logistic.pkl"),
-        ("daily_xgboost", "models/daily_xgboost.pkl"),
-    ]:
+    if model_keys is None:
+        model_keys = get_config().prediction.models
+
+    for model_key in model_keys:
+        canonical = f"models/{model_key}.pkl"
         path = _resolve_path(model_key, canonical)
         try:
             models[model_key] = _load_pkl(path, model_key)
@@ -155,59 +278,30 @@ def predict_symbol(
     result["predictions"] = {}
     prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # --- DailyLogistic ---
-    if "daily_logistic" in models:
+    for model_key, data in models.items():
+        if model_key == "daily_dqn":
+            continue  # handled separately below — different artifact format
         try:
-            data = models["daily_logistic"]
-            X_scaled = data["scaler"].transform(X_latest)
-            prob = data["model"].predict_proba(X_scaled)[0]
-            pred_idx = int(np.argmax(prob))
-            confidence = float(prob[pred_idx])
-            threshold = data.get("confidence_threshold", 0.55)
-            pred_class = int(data["model"].classes_[pred_idx])
-            signal = _SIGNAL_NAMES[pred_class]
-            if signal != "HOLD" and confidence < threshold:
-                signal = "HOLD"
-            result["predictions"]["daily_logistic"] = {
-                "signal": signal,
-                "confidence": confidence,
-            }
+            kind = MODEL_KINDS.get(model_key)
+            if kind == "classifier":
+                pred = _predict_classifier_signal(data, X_latest)
+            elif kind == "regressor":
+                pred = _predict_regressor_signal(data, X_all)
+            else:
+                raise RuntimeError(
+                    f"Unknown model kind for '{model_key}' — "
+                    "register it in MODEL_KINDS."
+                )
+            result["predictions"][model_key] = pred
             if db is not None:
-                meta = db.get_active_model("daily_logistic")
+                meta = db.get_active_model(model_key)
                 version = meta["version"] if meta else 0
                 db.upsert_prediction(
-                    symbol, "daily_logistic", version, prediction_date,
-                    signal, confidence, result["price"]
+                    symbol, model_key, version, prediction_date,
+                    pred["signal"], pred["confidence"], result["price"],
                 )
         except Exception as exc:
-            result["predictions"]["daily_logistic"] = {"error": str(exc)}
-
-    # --- DailyXGBoost ---
-    if "daily_xgboost" in models:
-        try:
-            data = models["daily_xgboost"]
-            X_scaled = data["scaler"].transform(X_latest)
-            prob = data["model"].predict_proba(X_scaled)[0]
-            pred_idx = int(np.argmax(prob))
-            confidence = float(prob[pred_idx])
-            threshold = data.get("confidence_threshold", 0.55)
-            pred_class = int(data["model"].classes_[pred_idx])
-            signal = _SIGNAL_NAMES[pred_class]
-            if signal != "HOLD" and confidence < threshold:
-                signal = "HOLD"
-            result["predictions"]["daily_xgboost"] = {
-                "signal": signal,
-                "confidence": confidence,
-            }
-            if db is not None:
-                meta = db.get_active_model("daily_xgboost")
-                version = meta["version"] if meta else 0
-                db.upsert_prediction(
-                    symbol, "daily_xgboost", version, prediction_date,
-                    signal, confidence, result["price"]
-                )
-        except Exception as exc:
-            result["predictions"]["daily_xgboost"] = {"error": str(exc)}
+            result["predictions"][model_key] = {"error": str(exc)}
 
     # --- DailyDQN ---
     if "daily_dqn" in models:
@@ -265,6 +359,50 @@ def predict_symbol(
 
 
 # ---------------------------------------------------------------------------
+# Predictions history (append-only, survives across ephemeral CI runs)
+# ---------------------------------------------------------------------------
+
+def append_predictions_history(predictions: list, history_path: str) -> int:
+    """Append today's predictions to an append-only JSONL history file.
+
+    One record per (symbol, model) prediction. Unlike the daily_predictions
+    DB table, this file is meant to be committed back to the repo so it
+    survives ephemeral CI runners — it's the only durable record of what
+    the live models actually predicted on a given day. Returns the number
+    of records written.
+    """
+    prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
+    records = []
+    for pred in predictions:
+        if "error" in pred:
+            continue
+        symbol = pred["symbol"]
+        price = pred.get("price")
+        for model_key, model_pred in pred.get("predictions", {}).items():
+            if "signal" not in model_pred:
+                continue
+            records.append({
+                "date": prediction_date,
+                "symbol": symbol,
+                "model": model_key,
+                "signal": model_pred["signal"],
+                "confidence": model_pred["confidence"],
+                "price": price,
+            })
+
+    if not records:
+        return 0
+
+    parent = os.path.dirname(history_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(history_path, "a") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    return len(records)
+
+
+# ---------------------------------------------------------------------------
 # Discord notification
 # ---------------------------------------------------------------------------
 
@@ -281,6 +419,7 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
     strategy_display = {
         "daily_logistic": "Daily Logistic",
         "daily_xgboost": "Daily XGBoost",
+        "daily_predictor": "Daily Predictor",
         "daily_dqn": "Daily DQN",
     }
 
@@ -373,6 +512,12 @@ def main() -> None:
     )
     parser.add_argument("--db", default="data/trading_sim.db")
     parser.add_argument("--output", default="tomorrow_trades.json")
+    parser.add_argument(
+        "--history", default="predictions/history.jsonl",
+        help="Append-only JSONL file recording each day's predictions "
+             "(tracked in git so it survives ephemeral CI runners; "
+             "pass an empty string to skip writing it)"
+    )
     args = parser.parse_args()
 
     symbols = (
@@ -432,6 +577,11 @@ def main() -> None:
     with open(args.output, "w") as f:
         json.dump(predictions, f, indent=2)
     logger.info("Saved predictions to %s", args.output)
+
+    # Append to durable predictions history (separate from the ephemeral DB)
+    if args.history:
+        n = append_predictions_history(predictions, args.history)
+        logger.info("Appended %d records to %s", n, args.history)
 
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")

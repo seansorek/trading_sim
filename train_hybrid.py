@@ -33,10 +33,11 @@ from sklearn.preprocessing import StandardScaler
 from daily_features import (
     FEATURE_COLS,
     FEATURE_SET_NAME,
+    FWD_RET_HORIZON_DAYS,
     discretize_labels,
     make_daily_features,
 )
-from data_loader import check_cache_freshness, load_yfinance
+from data_loader import check_cache_coverage, check_cache_freshness, load_yfinance
 from db import DB
 from hybrid_model import (
     TransformerCfg,
@@ -87,11 +88,13 @@ def _preprocess(X: np.ndarray) -> np.ndarray:
 def _load_symbol(symbol: str, start: str, end: str, db: DB) -> pd.DataFrame | None:
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
-        if check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS):
+        if check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS) and check_cache_coverage(
+            cached, start
+        ):
             logger.info("  %s: %d bars from DB cache", symbol, len(cached))
             return cached
         logger.info(
-            "  %s: cache stale, re-fetching from yfinance...", symbol,
+            "  %s: cache stale or missing older history, re-fetching from yfinance...", symbol,
         )
     else:
         logger.info("  %s: fetching from yfinance...", symbol)
@@ -159,12 +162,19 @@ def prepare_data(
         )
 
         split = int(len(X_sym) * 0.8)
+        # Embargo gap: drop rows whose fwd_ret_1d horizon would reach into the
+        # test period, so train labels never depend on test-period prices.
+        test_start = split + FWD_RET_HORIZON_DAYS
+        if test_start + lookback >= len(X_sym):
+            logger.warning("  %s: too few rows for embargo gap, skipping", sym)
+            continue
         train_blocks.append((X_sym[:split], y_sym[:split]))
-        test_blocks.append((X_sym[split:], y_sym[split:]))
+        test_blocks.append((X_sym[test_start:], y_sym[test_start:]))
         used_symbols.append(sym)
         logger.info(
-            "  %s: %d rows (train=%d test=%d) class dist %s",
-            sym, len(y_sym), split, len(y_sym) - split, np.bincount(y_sym).tolist(),
+            "  %s: %d rows (train=%d embargo=%d test=%d) class dist %s",
+            sym, len(y_sym), split, FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
+            np.bincount(y_sym).tolist(),
         )
 
     if not train_blocks:

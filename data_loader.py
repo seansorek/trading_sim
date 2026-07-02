@@ -69,6 +69,10 @@ def check_cache_freshness(
 
     The cache is considered fresh when its latest bar is within
     *stale_tolerance_bdays* business days of the requested *end* date.
+
+    Note: this only checks recency of the *latest* bar. It says nothing
+    about whether the cache covers the requested *start* of the range —
+    use ``check_cache_coverage`` for that.
     """
     end_dt = pd.to_datetime(end)
     latest_bar = cached.index.max()
@@ -77,6 +81,26 @@ def check_cache_freshness(
     end_date = end_dt.tz_localize(None) if end_dt.tzinfo else end_dt
     stale_cutoff = end_date - pd.tseries.offsets.BDay(stale_tolerance_bdays)
     return latest_date >= stale_cutoff
+
+
+def check_cache_coverage(
+    cached: pd.DataFrame, start: str, coverage_tolerance_bdays: int = 5
+) -> bool:
+    """Return True if *cached* data's earliest bar covers the requested *start*.
+
+    A cache that is fresh (latest bar is recent) can still be missing older
+    history — e.g. a prior run only fetched the last ~700 days, and a later
+    run asks for 2500 days. ``check_cache_freshness`` alone would say "fresh"
+    and silently skip the fetch needed to backfill the older bars. This check
+    catches that case: the cache's earliest bar must be within
+    *coverage_tolerance_bdays* business days of the requested *start*.
+    """
+    start_dt = pd.to_datetime(start)
+    earliest_bar = cached.index.min()
+    earliest_date = earliest_bar.tz_localize(None) if earliest_bar.tzinfo else earliest_bar
+    start_date = start_dt.tz_localize(None) if start_dt.tzinfo else start_dt
+    coverage_cutoff = start_date + pd.tseries.offsets.BDay(coverage_tolerance_bdays)
+    return earliest_date <= coverage_cutoff
 
 
 # --- Loaders: YFinance and CSV ---
