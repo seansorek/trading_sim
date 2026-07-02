@@ -143,35 +143,25 @@ def _predict_regressor_signal(
     X_scaled = data["scaler"].transform(X_clean)
     pred_ret = data["model"].predict(X_scaled)
 
-    # NOTE: ml_strategies.DailyPredictorStrategy.__init__ (lines ~324-325) has
-    # the same unguarded os.environ.get(...) -> float()/int() parse pattern.
-    # That is a known pre-existing twin, intentionally not touched by this
-    # fix — scoped here because this file is what's deployed to production.
-    sq_raw = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
-    if sq_raw is None:
-        sq = signal_quantile
-    else:
+    sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+    if sq_env is not None:
         try:
-            sq = float(sq_raw)
+            sq = float(sq_env)
         except ValueError:
-            logger.warning(
-                "Invalid PREDICTOR_SIGNAL_QUANTILE=%r — falling back to default %.2f",
-                sq_raw, signal_quantile,
-            )
-            sq = signal_quantile
+            logger.warning("Invalid PREDICTOR_SIGNAL_QUANTILE=%r — ignoring", sq_env)
+            sq = float(data.get("best_signal_quantile", signal_quantile))
+    else:
+        sq = float(data.get("best_signal_quantile", signal_quantile))
 
-    tw_raw = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
-    if tw_raw is None:
-        tw = threshold_window
-    else:
+    tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+    if tw_env is not None:
         try:
-            tw = int(tw_raw)
+            tw = int(tw_env)
         except ValueError:
-            logger.warning(
-                "Invalid PREDICTOR_THRESHOLD_WINDOW=%r — falling back to default %d",
-                tw_raw, threshold_window,
-            )
-            tw = threshold_window
+            logger.warning("Invalid PREDICTOR_THRESHOLD_WINDOW=%r — ignoring", tw_env)
+            tw = int(data.get("best_threshold_window", threshold_window))
+    else:
+        tw = int(data.get("best_threshold_window", threshold_window))
 
     signals = compute_predictor_signal(pred_ret, sq, tw)
 

@@ -50,6 +50,7 @@ except ImportError:
 from daily_features import FEATURE_COLS, FEATURE_SET_NAME, FWD_RET_HORIZON_DAYS, make_daily_features
 from db import DB
 from train_models import _load_symbol, _preprocess
+from walk_forward import sweep_params, WalkForwardConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -179,6 +180,8 @@ def train_xgb_regressor(X_train, X_test, y_train, y_test):
 def _save_and_register(
     model_obj, scaler, model_type: str, train_metrics: dict, test_metrics: dict,
     train_symbols: list[str], days: int, db: DB, train_samples: int, test_samples: int,
+    best_signal_quantile: float = 0.7,
+    best_threshold_window: int = 60,
 ) -> int:
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -224,6 +227,8 @@ def _save_and_register(
         # classifier artifacts without special-casing every consumer.
         "test_accuracy": test_metrics["dir_acc"],
         "test_f1": test_metrics["ic"],
+        "best_signal_quantile": best_signal_quantile,
+        "best_threshold_window": best_threshold_window,
     }
     with open(artifact_path, "wb") as f:
         pickle.dump(artifact, f)
@@ -274,6 +279,15 @@ def main() -> None:
         len(X_train) + len(X_test), X_train.shape[1], len(X_train), len(X_test),
     )
 
+    logger.info("Running walk-forward parameter sweep...")
+    try:
+        wf_config = WalkForwardConfig()
+        best_q, best_w = sweep_params(symbols, args.days, db, wf_config)
+        logger.info("Parameter sweep complete: signal_quantile=%.2f threshold_window=%d", best_q, best_w)
+    except Exception as exc:
+        logger.warning("Parameter sweep failed: %s — using defaults (0.7, 60)", exc)
+        best_q, best_w = 0.7, 60
+
     models_to_train = ["ridge", "xgboost"] if args.model == "both" else [args.model]
 
     for model_type in models_to_train:
@@ -286,6 +300,8 @@ def main() -> None:
             model, scaler, model_type, train_m, test_m,
             data["used_symbols"], args.days, db,
             train_samples=len(X_train), test_samples=len(X_test),
+            best_signal_quantile=best_q,
+            best_threshold_window=best_w,
         )
 
     logger.info("Training complete.")
