@@ -13,8 +13,9 @@ import pandas as pd
 import torch
 
 from base_strategy import BaseStrategy, StrategyConfig
-from data_loader import load_yfinance
-from predictor_strategy import PredictorStrategy
+from daily_features import FEATURE_COLS, make_daily_features
+from dqn_agent import DQNAgent
+from dqn_signal import gate_dqn_signal
 
 logger = logging.getLogger(__name__)
 
@@ -88,67 +89,72 @@ if HAS_ML_STRATEGIES:
 
 
 class DailyDQNStrategy(BaseStrategy):
-    """DQN agent next-day strategy backed by PredictorStrategy + DQNDecision."""
+    """DQN agent generating daily long/short/hold signals."""
 
-    def __init__(
-        self,
-        cfg: StrategyConfig,
-        spy_df=None,
-        model_path: str = "models/dqn_agent.pt",
-        window: int = 20,
-        confidence_threshold: float = 2.0,
-        q_advantage_threshold: float = 1.0,
-    ):
+    def __init__(self, cfg: StrategyConfig, spy_df=None):
         super().__init__(cfg)
-        _model_path = os.environ.get("DQN_MODEL", getattr(cfg, "model_path", model_path))
-        _window = int(os.environ.get("DQN_WINDOW", getattr(cfg, "window", window)))
-        _ct = float(os.environ.get("DQN_CONFIDENCE", getattr(cfg, "confidence_threshold", confidence_threshold)))
-        _qt = float(os.environ.get("DQN_Q_ADVANTAGE", getattr(cfg, "q_advantage_threshold", q_advantage_threshold)))
-
-        # Expose as instance attrs so tests and callers can inspect them
-        self.confidence_threshold = _ct
-        self.q_advantage_threshold = _qt
-
-        from predictors.dqn import DQNPredictor
-        from decision_layers.dqn_decision import DQNDecision
-        try:
-            predictor = DQNPredictor.load(_model_path, window=_window,
-                                          confidence_threshold=_ct,
-                                          q_advantage_threshold=_qt)
-        except Exception as exc:
-            logger.warning("DQNPredictor: failed to load from %s: %s", _model_path, exc)
-            predictor = None
-
-        self._inner = None
-        if predictor is not None:
-            decision = DQNDecision(confidence_threshold=_ct, q_advantage_threshold=_qt)
-            self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
+        self.spy_df = spy_df
+        self.model_path = os.environ.get(
+            "DQN_MODEL", getattr(cfg, "model_path", "models/dqn_agent.pt")
+        )
+        self.window = int(os.environ.get("DQN_WINDOW", getattr(cfg, "window", 20)))
+        self.confidence_threshold = float(os.environ.get("DQN_CONFIDENCE", getattr(cfg, "confidence_threshold", 2.0)))
+        self.q_advantage_threshold = float(os.environ.get("DQN_Q_ADVANTAGE", getattr(cfg, "q_advantage_threshold", 1.0)))
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        if self._inner is None:
+        try:
+            agent = DQNAgent.load(self.model_path)
+        except Exception as exc:
+            logger.warning("DQN: failed to load agent from %s: %s", self.model_path, exc)
             return pd.Series(0, index=df.index)
-        return self._inner.signal(feats, df)
+
+        daily_feats = make_daily_features(df, spy_df=self.spy_df).fillna(0.0)
+        feature_cols = FEATURE_COLS
+
+        # Fit normalizer on warmup window only to avoid look-ahead bias
+        fit_end = min(252, max(self.window + 1, len(daily_feats) // 2))
+        scaler_stats: dict = {}
+        for col in feature_cols:
+            mu = float(daily_feats[col].iloc[:fit_end].mean())
+            sigma = float(daily_feats[col].iloc[:fit_end].std() or 1.0)
+            scaler_stats[col] = (mu, sigma)
+
+        normalized = daily_feats.copy()
+        for col in feature_cols:
+            mu, sigma = scaler_stats[col]
+            normalized[col] = (daily_feats[col] - mu) / (sigma if sigma != 0 else 1.0)
+
+        signals, idxs = [], []
+        for i in range(self.window, len(normalized)):
+            state = (
+                normalized.iloc[i - self.window : i][feature_cols]
+                .values.astype(np.float32)
+                .flatten()
+            )
+
+            with torch.no_grad():
+                s_t = torch.from_numpy(state).float().unsqueeze(0)
+                q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
+
+            signal_str, _confidence = gate_dqn_signal(
+                q_vals,
+                confidence_threshold=self.confidence_threshold,
+                q_advantage_threshold=self.q_advantage_threshold,
+            )
+            sig = {"BUY": 1, "SELL": -1, "HOLD": 0}[signal_str]
+
+            signals.append(sig)
+            idxs.append(daily_feats.index[i])
+
+        if not signals:
+            return pd.Series(0, index=df.index)
+
+        ser = pd.Series(signals, index=pd.DatetimeIndex(idxs))
+        ser = ser.reindex(df.index).fillna(0).astype(int)
+        return self._apply_holding_period(ser)
 
 
 STRATEGY_REGISTRY["daily_dqn"] = DailyDQNStrategy
-
-# Register Ridge + QuantileDecision if daily_predictor.pkl exists
-_RIDGE_PATH = os.environ.get("RIDGE_MODEL", "models/daily_predictor.pkl")
-if os.path.exists(_RIDGE_PATH):
-    from predictors.ridge import RidgePredictor
-    from decision_layers.quantile import QuantileDecision
-
-    class _DailyRidgeQuantileStrategy(BaseStrategy):
-        def __init__(self, cfg: StrategyConfig, spy_df=None, **_kwargs):
-            super().__init__(cfg)
-            predictor = RidgePredictor.load(_RIDGE_PATH)
-            decision = QuantileDecision(signal_quantile=0.7, threshold_window=63)
-            self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
-
-        def signal(self, feats, df):
-            return self._inner.signal(feats, df)
-
-    STRATEGY_REGISTRY["daily_ridge_q"] = _DailyRidgeQuantileStrategy
 
 
 def build_strategy_signal(

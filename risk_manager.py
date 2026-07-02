@@ -3,7 +3,6 @@ risk_manager.py - Advanced risk management for trading strategies.
 
 Provides position sizing, stop loss, take profit, and trailing stop logic.
 """
-import numpy as np
 import pandas as pd
 from typing import Tuple, Optional, Dict
 

@@ -334,8 +334,7 @@ def test_run_symbol_strategy_wf_skipped_flag():
     Issue #20: run_symbol_strategy for a daily_ strategy must set
     wf_metrics['skipped'] = True instead of calling walk_forward_backtest.
     """
-    import importlib
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     from simulation_pipeline import ExecutionConfig, StrategyConfig
 
     n = 60
@@ -740,7 +739,6 @@ def test_daily_logistic_signal_is_shifted_by_one_bar():
     DailyLogisticStrategy.signal() must shift its output by one bar so that
     a prediction derived from close[D] executes on bar D+1, not bar D.
     """
-    from unittest.mock import patch, MagicMock
     from base_strategy import StrategyConfig
     from ml_strategies import DailyLogisticStrategy
 

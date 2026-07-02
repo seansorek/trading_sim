@@ -74,7 +74,6 @@ def test_prepare_data_no_embargo_means_no_overlap_in_dates(tmp_path):
     split = int(len(feats) * 0.8)
     test_start = split + FWD_RET_HORIZON_DAYS
 
-    train_end_date = feats.index[split - 1]
     test_start_date = feats.index[test_start]
     # fwd_ret_1d at the last train row looks FWD_RET_HORIZON_DAYS bars ahead;
     # that target bar must fall strictly before the first test row's date.
