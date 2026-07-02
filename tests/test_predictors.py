@@ -240,3 +240,72 @@ class TestRidgePredictor:
         pred = self._create_mock_predictor()
         assert pred.train_ic == pytest.approx(0.06)
         assert pred.train_r2 == pytest.approx(0.012)
+
+
+from unittest.mock import patch
+import torch
+from predictors.dqn import DQNPredictor
+
+
+def _make_mock_agent(q_values=(0.5, 5.0, 0.2)):
+    """Build a mock DQNAgent returning constant Q-values."""
+    q_tensor = torch.tensor([list(q_values)], dtype=torch.float32)
+    q_network = MagicMock()
+    q_network.return_value = q_tensor
+    agent = MagicMock()
+    agent.q = q_network
+    return agent
+
+
+class TestDQNPredictor:
+    def test_predict_returns_tuple(self):
+        agent = _make_mock_agent()
+        pred = DQNPredictor(agent, window=5)
+        X = np.zeros((20, len(FEATURE_COLS)), dtype=np.float32)
+        scores, proba = pred.predict(X)
+        assert scores.shape == (20,)
+        assert proba is not None
+        assert proba.shape == (20, 3)
+
+    def test_warmup_bars_are_zero(self):
+        agent = _make_mock_agent()
+        pred = DQNPredictor(agent, window=5)
+        X = np.ones((20, len(FEATURE_COLS)), dtype=np.float32)
+        scores, proba = pred.predict(X)
+        # First 5 bars are warmup — Q-matrix rows should be all-zero
+        np.testing.assert_array_equal(proba[:5], 0.0)
+
+    def test_active_bars_have_nonzero_q_values(self):
+        agent = _make_mock_agent(q_values=(0.5, 5.0, 0.2))
+        pred = DQNPredictor(agent, window=5)
+        X = np.ones((20, len(FEATURE_COLS)), dtype=np.float32)
+        _, proba = pred.predict(X)
+        # Bars after warmup (index >= window) should have non-zero Q-values
+        assert not np.all(proba[5:] == 0.0)
+
+    def test_scores_equal_q_long_minus_q_short(self):
+        # Q = [Hold=0.5, Long=5.0, Short=0.2]
+        agent = _make_mock_agent(q_values=(0.5, 5.0, 0.2))
+        pred = DQNPredictor(agent, window=5)
+        X = np.ones((20, len(FEATURE_COLS)), dtype=np.float32)
+        scores, proba = pred.predict(X)
+        # For active bars, score = Q(Long) - Q(Short) = 5.0 - 0.2 = 4.8
+        active_scores = scores[5:]
+        active_proba = proba[5:]
+        np.testing.assert_allclose(
+            active_scores, active_proba[:, 1] - active_proba[:, 2], atol=1e-5
+        )
+
+    def test_nan_input_does_not_crash(self):
+        agent = _make_mock_agent()
+        pred = DQNPredictor(agent, window=5)
+        X = np.full((20, len(FEATURE_COLS)), np.nan, dtype=np.float32)
+        scores, proba = pred.predict(X)  # should not raise
+        assert scores.shape == (20,)
+
+    def test_load_delegates_to_dqn_agent(self):
+        with patch("predictors.dqn.DQNAgent") as MockDQN:
+            MockDQN.load.return_value = _make_mock_agent()
+            pred = DQNPredictor.load("models/fake_dqn.pt", window=10)
+        MockDQN.load.assert_called_once_with("models/fake_dqn.pt")
+        assert pred.window == 10
