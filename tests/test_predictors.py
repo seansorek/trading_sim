@@ -15,6 +15,7 @@ from daily_features import FEATURE_COLS
 from predictors.base import BasePredictor, _preprocess
 from predictors.logistic import LogisticPredictor
 from predictors.xgboost_pred import XGBPredictor
+from predictors.ridge import RidgePredictor
 
 
 class TestBasePredictor:
@@ -188,3 +189,54 @@ class TestXGBPredictor:
         scores, proba = pred.predict(X)
         assert scores.shape == (n,)
         assert proba.shape == (n, 3)
+
+
+class TestRidgePredictor:
+    def _create_mock_predictor(self):
+        """Helper to create a RidgePredictor with mocks."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x  # identity
+        model = MagicMock()
+        model.predict.return_value = np.array([0.002])
+        return RidgePredictor(model=model, scaler=scaler, train_ic=0.06, train_r2=0.012)
+
+    def test_load_returns_predictor_instance(self):
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            _make_fake_pickle(f.name)
+            with unittest_mock.patch("predictors.base._load_validated_pickle") as mock_load:
+                scaler = MagicMock()
+                scaler.transform.side_effect = lambda x: x
+                model = MagicMock()
+                model.predict.return_value = np.array([0.002, -0.001, 0.003])
+                mock_load.return_value = {
+                    "model": model,
+                    "scaler": scaler,
+                    "feature_contract": list(FEATURE_COLS),
+                    "train_ic": 0.06,
+                    "train_r2": 0.012,
+                }
+                pred = RidgePredictor.load(f.name)
+            assert isinstance(pred, RidgePredictor)
+
+    def test_predict_returns_continuous_scores_and_none_proba(self):
+        pred = self._create_mock_predictor()
+        n = 3
+        pred.model.predict.return_value = np.array([0.002, -0.001, 0.003])
+        X = np.zeros((n, len(FEATURE_COLS)), dtype=np.float32)
+        scores, proba = pred.predict(X)
+        assert proba is None
+        assert scores.shape == (n,)
+        assert scores.dtype == float
+
+    def test_predict_scores_are_signed_floats(self):
+        pred = self._create_mock_predictor()
+        pred.model.predict.return_value = np.array([0.005, -0.003])
+        X = np.zeros((2, len(FEATURE_COLS)), dtype=np.float32)
+        scores, _ = pred.predict(X)
+        assert scores[0] > 0
+        assert scores[1] < 0
+
+    def test_metadata_attributes_available(self):
+        pred = self._create_mock_predictor()
+        assert pred.train_ic == pytest.approx(0.06)
+        assert pred.train_r2 == pytest.approx(0.012)
