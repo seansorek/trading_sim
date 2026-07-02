@@ -1,6 +1,7 @@
 """test_walk_forward.py — Walk-forward harness tests."""
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -8,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from walk_forward import WalkForwardConfig, run_walk_forward_on_df
+from walk_forward import WalkForwardConfig, run_walk_forward_on_df, sweep_params
 from daily_features import FWD_RET_HORIZON_DAYS
 
 
@@ -73,3 +74,46 @@ def test_ic_values_are_finite():
     result = run_walk_forward_on_df(df, spy_df=None, config=config)
     assert result["ic"].notna().all()
     assert result["dir_acc"].between(0.0, 1.0).all()
+
+
+def _mock_load_symbol(symbol, start, end, db):
+    return _sine_price_df(800)
+
+
+def test_sweep_params_returns_valid_pair():
+    config = WalkForwardConfig(train_bars=400, test_bars=63, step_bars=63)
+    with patch("walk_forward._load_symbol", side_effect=_mock_load_symbol):
+        q, w = sweep_params(
+            ["AAPL"], days=900, db=None, config=config,
+            quantiles=[0.65, 0.70], windows=[40, 60],
+        )
+    assert q in [0.65, 0.70]
+    assert w in [40, 60]
+
+
+def test_sweep_params_falls_back_when_all_ic_nonpositive():
+    """All-constant predictions → IC = 0 for every param pair → fallback to defaults."""
+    # Flat price series → Ridge predicts near-constant → IC ≈ 0
+    n = 800
+    idx = pd.date_range("2020-01-02", periods=n, freq="B")
+    flat_df = pd.DataFrame({
+        "open": np.full(n, 100.0), "high": np.full(n, 100.1),
+        "low": np.full(n, 99.9), "close": np.full(n, 100.0),
+        "volume": np.full(n, 1_000_000.0),
+    }, index=idx)
+
+    config = WalkForwardConfig(train_bars=400, test_bars=63, step_bars=63)
+    with patch("walk_forward._load_symbol", return_value=flat_df):
+        q, w = sweep_params(
+            ["AAPL"], days=900, db=None, config=config,
+            quantiles=[0.65, 0.70], windows=[40, 60],
+        )
+    assert q == 0.7
+    assert w == 60
+
+
+def test_sweep_params_no_valid_symbols_returns_defaults():
+    with patch("walk_forward._load_symbol", return_value=None):
+        q, w = sweep_params(["AAPL"], days=900, db=None)
+    assert q == 0.7
+    assert w == 60
