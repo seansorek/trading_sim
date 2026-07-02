@@ -28,6 +28,7 @@ from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
 from ml_strategies import compute_predictor_signal
+from signal_monitor import score_realized_ic, check_signal_drift, _signal_to_score
 from train_models import _preprocess
 
 logging.basicConfig(
@@ -396,7 +397,12 @@ def append_predictions_history(predictions: list, history_path: str) -> int:
 # Discord notification
 # ---------------------------------------------------------------------------
 
-def send_discord(predictions: list, webhook_url: str) -> bool:
+def send_discord(
+    predictions: list,
+    webhook_url: str,
+    ic_results: dict | None = None,
+    drift_warnings: dict | None = None,
+) -> bool:
     if not webhook_url:
         logger.warning("No Discord webhook URL — skipping notification")
         return False
@@ -456,13 +462,35 @@ def send_discord(predictions: list, webhook_url: str) -> bool:
                 "color": color_map[sig_type],
             })
 
+    if drift_warnings:
+        for model, warned in sorted(drift_warnings.items()):
+            if warned:
+                embeds.insert(0, {
+                    "title": f"⚠️ Signal Drift Detected — {model}",
+                    "description": (
+                        "Today's predicted-return distribution has shifted more than 2σ "
+                        "from the trailing 30-day baseline for the second consecutive day. "
+                        "Consider reviewing model freshness or market regime."
+                    ),
+                    "color": 0xFFFF00,
+                })
+
     if not embeds:
         logger.warning("No embeds to send to Discord")
         return False
 
+    ic_lines = []
+    if ic_results:
+        for model, res in sorted(ic_results.items()):
+            if res is not None:
+                ic_lines.append(
+                    f"`{model}` IC={res['ic']:+.3f} dir-acc={res['directional_accuracy']:.0%} "
+                    f"(n={res['lookback_n']})"
+                )
+    ic_summary = ("  |  ".join(ic_lines)) if ic_lines else "IC: not yet available"
     header = (
         f"**Daily Trading Predictions** — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
-        "Results from daily ML models"
+        f"Trailing-20 {ic_summary}"
     )
     success = True
     for i in range(0, len(embeds), 10):
@@ -527,6 +555,32 @@ def main() -> None:
         logger.error("No trained models found. Run train_models.py first.")
         sys.exit(1)
 
+    # --- Realized IC scoring ---
+    ic_results: dict = {}
+    prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
+    if args.history:
+        try:
+            def _fetch_prices(symbol: str, start: str, end: str):
+                return load_yfinance(symbol, start=start, end=end, interval="1d")
+
+            ic_results = score_realized_ic(
+                args.history, prediction_date, fetch_prices_fn=_fetch_prices
+            )
+            for model, res in ic_results.items():
+                if res is not None:
+                    logger.info(
+                        "Trailing IC [%s]: ic=%.4f dir_acc=%.2f n=%d",
+                        model, res["ic"], res["directional_accuracy"], res["lookback_n"],
+                    )
+                    if db is not None:
+                        db.upsert_ic(
+                            model, prediction_date,
+                            res["lookback_n"], res["ic"], res["directional_accuracy"],
+                            res["mean_pred"], res["std_pred"],
+                        )
+        except Exception as exc:
+            logger.warning("IC scoring failed: %s", exc)
+
     # Load SPY once for market-relative features
     spy_df = None
     try:
@@ -546,6 +600,27 @@ def main() -> None:
         predict_symbol(s, models, db=db, history_days=cfg.data.history_days, spy_df=spy_df)
         for s in symbols
     ]
+
+    # --- Drift detection ---
+    drift_warnings: dict = {}
+    if args.history:
+        try:
+            today_mean_scores: dict = {}
+            for pred in predictions:
+                if "error" in pred:
+                    continue
+                for model_key, model_pred in pred.get("predictions", {}).items():
+                    if "signal" not in model_pred:
+                        continue
+                    score = _signal_to_score(model_pred["signal"], model_pred.get("confidence", 0.0))
+                    today_mean_scores.setdefault(model_key, []).append(score)
+            today_mean_scores = {m: float(np.mean(s)) for m, s in today_mean_scores.items()}
+            drift_warnings = check_signal_drift(args.history, prediction_date, today_mean_scores)
+            for model, warned in drift_warnings.items():
+                if warned:
+                    logger.warning("Signal drift detected for %s", model)
+        except Exception as exc:
+            logger.warning("Drift detection failed: %s", exc)
 
     # Summary
     print("\n" + "=" * 50)
@@ -576,7 +651,7 @@ def main() -> None:
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
     if webhook:
-        if send_discord(predictions, webhook):
+        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings):
             logger.info("Discord notification sent.")
         else:
             logger.warning("Discord notification failed.")
