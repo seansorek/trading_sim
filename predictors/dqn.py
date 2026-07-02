@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 from predictors.base import BasePredictor
-from dqn_agent import DQNAgent
 
 
 class DQNPredictor(BasePredictor):
@@ -59,5 +58,6 @@ class DQNPredictor(BasePredictor):
 
     @classmethod
     def load(cls, path: str, **kwargs) -> "DQNPredictor":
+        from dqn_agent import DQNAgent  # lazy import to avoid eager torch load
         agent = DQNAgent.load(path)
         return cls(agent, **kwargs)

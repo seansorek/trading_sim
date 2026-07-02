@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _preprocess(X: np.ndarray) -> np.ndarray:
     """Replace inf/nan with 0, clip to ±5 std per column. Returns a copy."""
+    X = X.copy()
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
     for col in range(X.shape[1]):
@@ -47,7 +48,8 @@ def _load_validated_pickle(
 
     hash_path = path + ".sha256"
     if os.path.exists(hash_path):
-        expected = open(hash_path, encoding="ascii").read().strip()
+        with open(hash_path, encoding="ascii") as fh:
+            expected = fh.read().strip()
         with open(path, "rb") as f:
             actual = hashlib.sha256(f.read()).hexdigest()
         if actual != expected:

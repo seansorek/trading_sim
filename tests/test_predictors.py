@@ -304,7 +304,7 @@ class TestDQNPredictor:
         assert scores.shape == (20,)
 
     def test_load_delegates_to_dqn_agent(self):
-        with patch("predictors.dqn.DQNAgent") as MockDQN:
+        with patch("dqn_agent.DQNAgent") as MockDQN:
             MockDQN.load.return_value = _make_mock_agent()
             pred = DQNPredictor.load("models/fake_dqn.pt", window=10)
         MockDQN.load.assert_called_once_with("models/fake_dqn.pt")
