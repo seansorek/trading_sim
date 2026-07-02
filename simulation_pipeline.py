@@ -73,7 +73,7 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     range_high = df["high"].rolling(60).max()
     range_low = df["low"].rolling(60).min()
     feats["price_position"] = (price - range_low) / (range_high - range_low + 1e-6)
-    feats = feats.bfill().ffill()
+    feats = feats.ffill()
     return feats
 
 
@@ -406,16 +406,17 @@ class Backtester:
 
         metrics = compute_metrics(equity_series, trades_df)
 
-        # Persist artifacts
-        try:
-            os.makedirs(os.path.dirname(artifact_paths["trade_log_csv"]), exist_ok=True)
-            if not trades_df.empty:
-                trades_df.to_csv(artifact_paths["trade_log_csv"])
-            equity_series.to_csv(artifact_paths["equity_curve_csv"])
-            with open(artifact_paths["metrics_json"], "w") as f:
-                json.dump(metrics, f, indent=2)
-        except Exception as exc:
-            logger.warning("Failed to write artifacts: %s", exc)
+        # Persist artifacts (skip when caller passes an empty dict to suppress writes)
+        if artifact_paths:
+            try:
+                os.makedirs(os.path.dirname(artifact_paths["trade_log_csv"]), exist_ok=True)
+                if not trades_df.empty:
+                    trades_df.to_csv(artifact_paths["trade_log_csv"])
+                equity_series.to_csv(artifact_paths["equity_curve_csv"])
+                with open(artifact_paths["metrics_json"], "w") as f:
+                    json.dump(metrics, f, indent=2)
+            except Exception as exc:
+                logger.warning("Failed to write artifacts: %s", exc)
 
         # DB logging (optional)
         if db is not None and run_id is not None:
@@ -608,7 +609,7 @@ def monte_carlo_stress(
             daily_loss_limit_pct=float(np.clip(rng.normal(0.02, 0.005), 0.01, 0.05)),
         )
         bt = Backtester(exec_cfg)
-        res = bt.run(df, feats, signal)
+        res = bt.run(df, feats, signal, artifact_paths={})
         stats.append(res.metrics)
 
     df_stats = pd.DataFrame(stats).replace([np.inf, -np.inf], np.nan).dropna()
