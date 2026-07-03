@@ -16,7 +16,7 @@ import pickle
 import random
 import sys
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -173,8 +173,8 @@ def _predict_regressor_signal(
 
 
 def load_models(
-    db: Optional[DB] = None, model_keys: Optional[list] = None
-) -> dict:
+    db: Optional[DB] = None, model_keys: Optional[list[str]] = None
+) -> dict[str, Any]:
     """
     Load all available daily model pickles.
 
@@ -227,12 +227,12 @@ def load_models(
 
 def predict_symbol(
     symbol: str,
-    models: dict,
+    models: dict[str, Any],
     db: Optional[DB] = None,
     dqn_window: int = 20,
     history_days: int = 1000,
-    spy_df=None,
-) -> dict:
+    spy_df: Optional[pd.DataFrame] = None,
+) -> dict[str, Any]:
     result: dict = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
 
     end_date = datetime.now()
