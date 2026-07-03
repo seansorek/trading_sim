@@ -53,7 +53,7 @@ def run_symbol_strategy(
     n_mc_runs: int = 10,
     spy_df=None,
 ) -> dict:
-    """Run backtest + walk-forward + Monte Carlo for one (symbol, strategy) pair."""
+    """Run backtest + Monte Carlo for one (symbol, strategy) pair."""
     artifact_base = f"results/{symbol}_{strategy_name}"
     artifacts = {
         "equity_curve_csv": f"{artifact_base}_equity_curve.csv",

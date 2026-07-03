@@ -5,8 +5,8 @@ DailyLogisticStrategy and DailyXGBoostStrategy are thin wrappers that
 delegate signal generation to PredictorStrategy, using the appropriate
 predictor and ThresholdDecision from the new modular layers.
 
-DailyPredictorStrategy (regression-based rolling-quantile strategy) and the
-legacy intraday strategies are preserved as-is from main.
+DailyPredictorStrategy (regression-based rolling-quantile strategy) is a
+standalone strategy wrapper.
 
 Shared preprocessing (_preprocess) and model loading (_load_validated_pickle)
 live in predictors/base.py; _load_pickle is a backward-compatible alias.
