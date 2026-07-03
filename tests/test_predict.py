@@ -1,5 +1,7 @@
 """test_predict.py — Tests for predict_next_day_lite.py (no network, no real models)."""
 import json
+import logging
+import os
 import pickle
 import sys
 import tempfile
@@ -234,10 +236,28 @@ class TestSendDiscord:
         result = send_discord(self._minimal_predictions(), "")
         assert result is False
 
-    def test_hold_signals_included_in_embeds(self):
+    def test_pure_hold_day_sends_no_embeds(self):
+        """When every signal for a strategy is HOLD, suppress the HOLD embed
+        — a pure-HOLD day produces no strategy embeds and returns False."""
         mock_resp = MagicMock()
         mock_resp.status_code = 204
         preds = self._minimal_predictions(signal="HOLD", confidence=0.6)
+
+        with patch("requests.post", return_value=mock_resp):
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is False
+
+    def test_hold_included_alongside_buy_signals(self):
+        """HOLD embed must appear when the same strategy also has BUY records."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0,
+             "predictions": {"daily_logistic": {"signal": "BUY", "confidence": 0.8}}},
+            {"symbol": "MSFT", "price": 420.0,
+             "predictions": {"daily_logistic": {"signal": "HOLD", "confidence": 0.6}}},
+        ]
 
         with patch("requests.post", return_value=mock_resp) as mock_post:
             result = send_discord(preds, "https://discord.example/webhook")
@@ -245,7 +265,68 @@ class TestSendDiscord:
         assert result is True
         payload = mock_post.call_args.kwargs["json"]
         titles = [e["title"] for e in payload["embeds"]]
+        assert any("BUY" in t for t in titles)
         assert any("HOLD" in t for t in titles)
+
+    def test_consensus_buy_embed_appears_when_two_models_agree(self):
+        """★ Consensus — BUY embed must appear when ≥2 models signal BUY for the same symbol."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0, "predictions": {
+                "daily_logistic": {"signal": "BUY", "confidence": 0.8},
+                "daily_xgboost": {"signal": "BUY", "confidence": 0.75},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is True
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("Consensus" in t and "BUY" in t for t in titles), (
+            f"Expected consensus BUY embed, got titles: {titles}"
+        )
+        # Consensus embed must come first
+        assert "Consensus" in payload["embeds"][0]["title"]
+
+    def test_consensus_absent_when_models_disagree(self):
+        """No consensus embed when each symbol has only one model voting BUY."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0, "predictions": {
+                "daily_logistic": {"signal": "BUY", "confidence": 0.8},
+                "daily_xgboost": {"signal": "SELL", "confidence": 0.75},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(preds, "https://discord.example/webhook")
+
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert not any("Consensus" in t for t in titles)
+
+    def test_consensus_sell_embed_appears_when_two_models_agree(self):
+        """★ Consensus — SELL embed must appear when ≥2 models signal SELL for a symbol."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "TSLA", "price": 250.0, "predictions": {
+                "daily_logistic": {"signal": "SELL", "confidence": 0.8},
+                "daily_predictor": {"signal": "SELL", "confidence": 0.7},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is True
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("Consensus" in t and "SELL" in t for t in titles)
 
     def test_error_predictions_are_skipped(self):
         preds = [{"symbol": "AAPL", "error": "fetch failed"}]
@@ -790,8 +871,164 @@ class TestPredictSymbolPredictor:
 
 
 # ---------------------------------------------------------------------------
+# JSON structured logging (Task 1)
+# ---------------------------------------------------------------------------
+
+from predict_next_day_lite import _JsonFormatter, _RunIdFilter, _configure_logging
+
+
+class TestJsonLogging:
+    def test_run_id_filter_injects_attribute(self):
+        f = _RunIdFilter("test-run-abc")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="hello", args=(), exc_info=None,
+        )
+        f.filter(record)
+        assert record.run_id == "test-run-abc"
+
+    def test_run_id_filter_returns_true(self):
+        f = _RunIdFilter("x")
+        record = logging.LogRecord(
+            name="t", level=logging.INFO, pathname="", lineno=0,
+            msg="m", args=(), exc_info=None,
+        )
+        assert f.filter(record) is True
+
+    def test_json_formatter_produces_valid_json(self):
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="mymodule", level=logging.WARNING, pathname="", lineno=0,
+            msg="test message", args=(), exc_info=None,
+        )
+        record.run_id = "abc-123"
+        output = fmt.format(record)
+        doc = json.loads(output)
+        assert doc["msg"] == "test message"
+        assert doc["run_id"] == "abc-123"
+        assert doc["level"] == "WARNING"
+        assert doc["logger"] == "mymodule"
+        assert "ts" in doc
+
+    def test_json_formatter_omits_exc_key_when_no_exception(self):
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="t", level=logging.INFO, pathname="", lineno=0,
+            msg="no exc", args=(), exc_info=None,
+        )
+        record.run_id = ""
+        doc = json.loads(fmt.format(record))
+        assert "exc" not in doc
+
+    def test_configure_logging_installs_json_formatter(self):
+        _configure_logging("run-xyz")
+        root = logging.getLogger()
+        formatters = [h.formatter for h in root.handlers if h.formatter is not None]
+        assert any(isinstance(f, _JsonFormatter) for f in formatters)
+        # Restore plain logging so subsequent tests aren't affected
+        root.handlers.clear()
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+
+
+# ---------------------------------------------------------------------------
 # load_models (Task 5 — config-driven model list)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Model staleness detection (Task 2)
+# ---------------------------------------------------------------------------
+
+import time
+from predict_next_day_lite import check_model_staleness
+
+
+class TestCheckModelStaleness:
+    def _make_pkl(self, tmp_path: Path, name: str) -> str:
+        artifact = _make_artifact()
+        p = tmp_path / f"{name}.pkl"
+        with open(p, "wb") as f:
+            pickle.dump(artifact, f)
+        return str(p)
+
+    def test_fresh_model_not_in_result(self, tmp_path):
+        path = self._make_pkl(tmp_path, "daily_logistic")
+        models = {"daily_logistic": {"_artifact_path": path}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" not in stale
+
+    def test_old_model_appears_in_result_with_age(self, tmp_path):
+        path = self._make_pkl(tmp_path, "daily_logistic")
+        # Backdate mtime by 45 days
+        old_time = time.time() - 45 * 86400
+        os.utime(path, (old_time, old_time))
+        models = {"daily_logistic": {"_artifact_path": path}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" in stale
+        assert stale["daily_logistic"] >= 44
+
+    def test_missing_artifact_path_is_skipped(self):
+        models = {"daily_dqn": object()}  # no _artifact_path
+        stale = check_model_staleness(models, max_age_days=30)
+        assert stale == {}
+
+    def test_nonexistent_path_is_skipped(self):
+        models = {"daily_predictor": {"_artifact_path": "/nonexistent/model.pkl"}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert stale == {}
+
+    def test_mixed_fresh_and_stale(self, tmp_path):
+        fresh = self._make_pkl(tmp_path, "fresh")
+        stale_path = self._make_pkl(tmp_path, "stale")
+        old_time = time.time() - 40 * 86400
+        os.utime(stale_path, (old_time, old_time))
+        models = {
+            "daily_logistic": {"_artifact_path": fresh},
+            "daily_predictor": {"_artifact_path": stale_path},
+        }
+        result = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" not in result
+        assert "daily_predictor" in result
+
+
+class TestSendDiscordStaleModels:
+    def _minimal_predictions(self):
+        return [
+            {"symbol": "AAPL", "price": 150.0,
+             "predictions": {"daily_logistic": {"signal": "BUY", "confidence": 0.8}}}
+        ]
+
+    def test_stale_model_warning_embed_prepended(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(
+                self._minimal_predictions(),
+                "https://discord.example/webhook",
+                stale_models={"daily_predictor": 45},
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("daily_predictor" in t for t in titles)
+        assert any("Stale" in t for t in titles)
+        # Warning must be the first embed
+        assert "daily_predictor" in payload["embeds"][0]["title"]
+
+    def test_no_stale_models_no_warning_embed(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(
+                self._minimal_predictions(),
+                "https://discord.example/webhook",
+                stale_models={},
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert not any("Stale" in t for t in titles)
+
 
 class TestLoadModels:
     def test_respects_explicit_model_keys_list(self, tmp_path, monkeypatch):
@@ -808,6 +1045,8 @@ class TestLoadModels:
 
         assert set(loaded.keys()) <= {"daily_logistic", "daily_dqn"}
         assert "daily_logistic" in loaded
+        assert "_artifact_path" in loaded["daily_logistic"]
+        assert loaded["daily_logistic"]["_artifact_path"].endswith("daily_logistic.pkl")
 
     def test_missing_pickle_for_configured_model_is_skipped_not_fatal(self, tmp_path, monkeypatch):
         """A model_key in the config list whose pickle doesn't exist on
