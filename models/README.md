@@ -66,11 +66,11 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Normalization** | `StandardScaler` + `±5-std clip` preprocessing (`train_models._preprocess`) |
 | **OOS Spearman IC** | +0.06 (positive, statistically meaningful given n; classifiers show IC ≈ 0) |
 | **OOS R²** | +0.012 (small but real; confirms the regression picks up a signal the classifiers discarded) |
-| **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `\|predicted return\|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Default: `signal_quantile=0.7`, `threshold_window=60` |
+| **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `|predicted return|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Default: `signal_quantile=0.7`, `threshold_window=60` |
 | **Backtest Sharpe** | +0.27 (10-symbol, 700-day window, untuned defaults) — the only positive Sharpe among the three live models |
 | **Average return** | +0.18% per signal (same window) |
 | **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle |
-| **Live confidence** | Percentile rank of today's `\|predicted return\|` within the trailing `threshold_window` — NOT a calibrated probability |
+| **Live confidence** | Percentile rank of today's `|predicted return|` within the trailing `threshold_window` — NOT a calibrated probability |
 | **Known limitations** | Sharpe 0.27 is weak in absolute terms. Untuned parameters and a single backtest window — not a proven deployable edge. No walk-forward-of-walk-forward validation yet. The positive IC is real but modest. |
 
 **Honest caveat:** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding, but a single untuned backtest is not sufficient validation for capital deployment.
