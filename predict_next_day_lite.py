@@ -17,6 +17,7 @@ import random
 import sys
 import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -476,11 +477,14 @@ def send_discord(
 
     # Organize by strategy → signal
     by_strategy: dict = {}
+    vote_counts: dict = defaultdict(lambda: {"BUY": 0, "SELL": 0})
+    symbol_prices: dict = {}
     for pred in predictions:
         if "error" in pred:
             continue
         symbol = pred["symbol"]
         price = pred.get("price", 0.0)
+        symbol_prices[symbol] = price
         for model_key, model_pred in pred.get("predictions", {}).items():
             if "signal" not in model_pred:
                 continue
@@ -490,13 +494,37 @@ def send_discord(
             by_strategy[model_key][signal].append(
                 {"symbol": symbol, "price": price, "confidence": confidence}
             )
+            if signal in ("BUY", "SELL"):
+                vote_counts[symbol][signal] += 1
 
     embeds = []
     color_map = {"BUY": 0x00FF00, "SELL": 0xFF0000, "HOLD": 0xFFFF00}
 
+    # Consensus block — symbols where ≥2 models agree, listed first
+    for sig_type in ("BUY", "SELL"):
+        agreed = sorted(
+            [
+                (sym, symbol_prices.get(sym, 0.0))
+                for sym, votes in vote_counts.items()
+                if votes[sig_type] >= 2
+            ],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        if agreed:
+            lines = [f"**{sym}** ${price:.2f}" for sym, price in agreed]
+            embeds.append({
+                "title": f"★ Consensus — {sig_type} ({len(agreed)})",
+                "description": "\n".join(lines),
+                "color": color_map[sig_type],
+            })
+
     for strategy in sorted(by_strategy):
         display = strategy_display.get(strategy, strategy)
+        has_non_hold = bool(by_strategy[strategy]["BUY"] or by_strategy[strategy]["SELL"])
         for sig_type in ("BUY", "SELL", "HOLD"):
+            if sig_type == "HOLD" and not has_non_hold:
+                continue
             recs = sorted(
                 by_strategy[strategy][sig_type],
                 key=lambda x: x["confidence"],

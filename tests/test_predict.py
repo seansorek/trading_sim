@@ -236,10 +236,28 @@ class TestSendDiscord:
         result = send_discord(self._minimal_predictions(), "")
         assert result is False
 
-    def test_hold_signals_included_in_embeds(self):
+    def test_pure_hold_day_sends_no_embeds(self):
+        """When every signal for a strategy is HOLD, suppress the HOLD embed
+        — a pure-HOLD day produces no strategy embeds and returns False."""
         mock_resp = MagicMock()
         mock_resp.status_code = 204
         preds = self._minimal_predictions(signal="HOLD", confidence=0.6)
+
+        with patch("requests.post", return_value=mock_resp):
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is False
+
+    def test_hold_included_alongside_buy_signals(self):
+        """HOLD embed must appear when the same strategy also has BUY records."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0,
+             "predictions": {"daily_logistic": {"signal": "BUY", "confidence": 0.8}}},
+            {"symbol": "MSFT", "price": 420.0,
+             "predictions": {"daily_logistic": {"signal": "HOLD", "confidence": 0.6}}},
+        ]
 
         with patch("requests.post", return_value=mock_resp) as mock_post:
             result = send_discord(preds, "https://discord.example/webhook")
@@ -247,7 +265,68 @@ class TestSendDiscord:
         assert result is True
         payload = mock_post.call_args.kwargs["json"]
         titles = [e["title"] for e in payload["embeds"]]
+        assert any("BUY" in t for t in titles)
         assert any("HOLD" in t for t in titles)
+
+    def test_consensus_buy_embed_appears_when_two_models_agree(self):
+        """★ Consensus — BUY embed must appear when ≥2 models signal BUY for the same symbol."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0, "predictions": {
+                "daily_logistic": {"signal": "BUY", "confidence": 0.8},
+                "daily_xgboost": {"signal": "BUY", "confidence": 0.75},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is True
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("Consensus" in t and "BUY" in t for t in titles), (
+            f"Expected consensus BUY embed, got titles: {titles}"
+        )
+        # Consensus embed must come first
+        assert "Consensus" in payload["embeds"][0]["title"]
+
+    def test_consensus_absent_when_models_disagree(self):
+        """No consensus embed when each symbol has only one model voting BUY."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "AAPL", "price": 150.0, "predictions": {
+                "daily_logistic": {"signal": "BUY", "confidence": 0.8},
+                "daily_xgboost": {"signal": "SELL", "confidence": 0.75},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(preds, "https://discord.example/webhook")
+
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert not any("Consensus" in t for t in titles)
+
+    def test_consensus_sell_embed_appears_when_two_models_agree(self):
+        """★ Consensus — SELL embed must appear when ≥2 models signal SELL for a symbol."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        preds = [
+            {"symbol": "TSLA", "price": 250.0, "predictions": {
+                "daily_logistic": {"signal": "SELL", "confidence": 0.8},
+                "daily_predictor": {"signal": "SELL", "confidence": 0.7},
+            }},
+        ]
+
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            result = send_discord(preds, "https://discord.example/webhook")
+
+        assert result is True
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("Consensus" in t and "SELL" in t for t in titles)
 
     def test_error_predictions_are_skipped(self):
         preds = [{"symbol": "AAPL", "error": "fetch failed"}]
