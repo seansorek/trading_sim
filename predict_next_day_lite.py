@@ -15,6 +15,7 @@ import os
 import pickle
 import random
 import sys
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -31,10 +32,40 @@ from ml_strategies import compute_predictor_signal
 from signal_monitor import score_realized_ic, check_signal_drift
 from train_models import _preprocess
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        doc = {
+            "ts": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "run_id": getattr(record, "run_id", ""),
+        }
+        if record.exc_info:
+            doc["exc"] = self.formatException(record.exc_info)
+        return json.dumps(doc)
+
+
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = self.run_id
+        return True
+
+
+def _configure_logging(run_id: str) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(_JsonFormatter())
+    handler.addFilter(_RunIdFilter(run_id))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 logger = logging.getLogger(__name__)
 
 _SIGNAL_NAMES = ["SELL", "HOLD", "BUY"]  # index matches label {0,1,2}
@@ -519,6 +550,9 @@ def send_discord(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    run_id = str(uuid.uuid4())
+    _configure_logging(run_id)
+
     np.random.seed(42)
     random.seed(42)
     torch.manual_seed(42)

@@ -1,5 +1,6 @@
 """test_predict.py — Tests for predict_next_day_lite.py (no network, no real models)."""
 import json
+import logging
 import pickle
 import sys
 import tempfile
@@ -787,6 +788,69 @@ class TestPredictSymbolPredictor:
 
         assert "error" not in result  # the symbol overall still succeeds
         assert "error" in result["predictions"]["totally_new_model"]
+
+
+# ---------------------------------------------------------------------------
+# JSON structured logging (Task 1)
+# ---------------------------------------------------------------------------
+
+from predict_next_day_lite import _JsonFormatter, _RunIdFilter, _configure_logging
+
+
+class TestJsonLogging:
+    def test_run_id_filter_injects_attribute(self):
+        f = _RunIdFilter("test-run-abc")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="hello", args=(), exc_info=None,
+        )
+        f.filter(record)
+        assert record.run_id == "test-run-abc"
+
+    def test_run_id_filter_returns_true(self):
+        f = _RunIdFilter("x")
+        record = logging.LogRecord(
+            name="t", level=logging.INFO, pathname="", lineno=0,
+            msg="m", args=(), exc_info=None,
+        )
+        assert f.filter(record) is True
+
+    def test_json_formatter_produces_valid_json(self):
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="mymodule", level=logging.WARNING, pathname="", lineno=0,
+            msg="test message", args=(), exc_info=None,
+        )
+        record.run_id = "abc-123"
+        output = fmt.format(record)
+        doc = json.loads(output)
+        assert doc["msg"] == "test message"
+        assert doc["run_id"] == "abc-123"
+        assert doc["level"] == "WARNING"
+        assert doc["logger"] == "mymodule"
+        assert "ts" in doc
+
+    def test_json_formatter_omits_exc_key_when_no_exception(self):
+        fmt = _JsonFormatter()
+        record = logging.LogRecord(
+            name="t", level=logging.INFO, pathname="", lineno=0,
+            msg="no exc", args=(), exc_info=None,
+        )
+        record.run_id = ""
+        doc = json.loads(fmt.format(record))
+        assert "exc" not in doc
+
+    def test_configure_logging_installs_json_formatter(self):
+        _configure_logging("run-xyz")
+        root = logging.getLogger()
+        formatters = [h.formatter for h in root.handlers if h.formatter is not None]
+        assert any(isinstance(f, _JsonFormatter) for f in formatters)
+        # Restore plain logging so subsequent tests aren't affected
+        root.handlers.clear()
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
 
 
 # ---------------------------------------------------------------------------
