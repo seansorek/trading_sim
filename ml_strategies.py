@@ -186,14 +186,57 @@ class DailyPredictorStrategy(BaseStrategy):
         super().__init__(cfg)
         self.model = None
         self.scaler: Optional[StandardScaler] = None
-        self.signal_quantile = float(os.environ.get("PREDICTOR_SIGNAL_QUANTILE", signal_quantile))
-        self.threshold_window = int(os.environ.get("PREDICTOR_THRESHOLD_WINDOW", threshold_window))
+        # Params set here before pickle load; updated below if pickle has tuned values.
+        self.signal_quantile = signal_quantile
+        self.threshold_window = threshold_window
 
         if use_pretrained:
             data = _load_pickle(model_path, "DailyPredictorStrategy")
             self.model = data["model"]
             self.scaler = data["scaler"]
             logger.info("DailyPredictorStrategy: loaded model from %s", model_path)
+
+            # Three-level priority: env var -> pickle best_* keys -> constructor default
+            sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+            if sq_env is not None:
+                try:
+                    self.signal_quantile = float(sq_env)
+                except ValueError:
+                    # Invalid env var — fall through to pickle key
+                    if "best_signal_quantile" in data:
+                        self.signal_quantile = float(data["best_signal_quantile"])
+                    # else: stays at constructor default
+            else:
+                if "best_signal_quantile" in data:
+                    self.signal_quantile = float(data["best_signal_quantile"])
+                # else: stays at constructor default
+
+            tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+            if tw_env is not None:
+                try:
+                    self.threshold_window = int(tw_env)
+                except ValueError:
+                    # Invalid env var — fall through to pickle key
+                    if "best_threshold_window" in data:
+                        self.threshold_window = int(data["best_threshold_window"])
+                    # else: stays at constructor default
+            else:
+                if "best_threshold_window" in data:
+                    self.threshold_window = int(data["best_threshold_window"])
+                # else: stays at constructor default
+        else:
+            sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+            if sq_env is not None:
+                try:
+                    self.signal_quantile = float(sq_env)
+                except ValueError:
+                    pass
+            tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+            if tw_env is not None:
+                try:
+                    self.threshold_window = int(tw_env)
+                except ValueError:
+                    pass
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         daily_feats = make_daily_features(df)

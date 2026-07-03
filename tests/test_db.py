@@ -189,3 +189,40 @@ def test_get_backtest_runs(tmp_path):
     )
     df = db.get_backtest_runs(strategy="daily_logistic")
     assert len(df) == 2
+
+
+# ---------------------------------------------------------------------------
+# IC history
+# ---------------------------------------------------------------------------
+
+def test_upsert_and_get_ic_history(tmp_path):
+    db = DB(str(tmp_path / "test.db"))
+    db.upsert_ic("daily_predictor", "2026-07-01", 20, 0.07, 0.54, 0.012, 0.008)
+    df = db.get_ic_history("daily_predictor")
+    assert len(df) == 1
+    assert df.iloc[0]["ic"] == pytest.approx(0.07)
+    assert df.iloc[0]["directional_accuracy"] == pytest.approx(0.54)
+    assert df.iloc[0]["lookback_n"] == 20
+
+
+def test_upsert_ic_is_idempotent(tmp_path):
+    db = DB(str(tmp_path / "test.db"))
+    db.upsert_ic("daily_predictor", "2026-07-01", 20, 0.07, 0.54, None, None)
+    db.upsert_ic("daily_predictor", "2026-07-01", 20, 0.09, 0.56, None, None)  # update
+    df = db.get_ic_history("daily_predictor")
+    assert len(df) == 1
+    assert df.iloc[0]["ic"] == pytest.approx(0.09)
+
+
+def test_get_ic_history_empty(tmp_path):
+    db = DB(str(tmp_path / "test.db"))
+    df = db.get_ic_history("no_such_model")
+    assert df.empty
+
+
+def test_get_ic_history_respects_limit(tmp_path):
+    db = DB(str(tmp_path / "test.db"))
+    for i in range(5):
+        db.upsert_ic("daily_predictor", f"2026-07-0{i+1}", 20, 0.01 * i, 0.5, None, None)
+    df = db.get_ic_history("daily_predictor", limit=3)
+    assert len(df) == 3

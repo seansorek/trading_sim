@@ -124,6 +124,19 @@ CREATE TABLE IF NOT EXISTS daily_predictions (
     UNIQUE(symbol, model_key, prediction_date)
 );
 CREATE INDEX IF NOT EXISTS daily_predictions_date ON daily_predictions(prediction_date, symbol);
+
+CREATE TABLE IF NOT EXISTS ic_history (
+    id                   INTEGER PRIMARY KEY,
+    model                TEXT    NOT NULL,
+    computed_at          TEXT    NOT NULL,
+    lookback_n           INTEGER NOT NULL,
+    ic                   REAL    NOT NULL,
+    directional_accuracy REAL    NOT NULL,
+    mean_pred            REAL,
+    std_pred             REAL,
+    UNIQUE(model, computed_at)
+);
+CREATE INDEX IF NOT EXISTS ic_history_model_date ON ic_history(model, computed_at);
 """
 
 
@@ -472,6 +485,44 @@ class DB:
         """
         with self._lock, self._connect() as con:
             rows = con.execute(sql, (prediction_date,)).fetchall()
+        return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # IC history
+    # ------------------------------------------------------------------
+
+    def upsert_ic(
+        self,
+        model: str,
+        computed_at: str,
+        lookback_n: int,
+        ic: float,
+        directional_accuracy: float,
+        mean_pred: float | None = None,
+        std_pred: float | None = None,
+    ) -> None:
+        sql = """
+            INSERT INTO ic_history
+              (model, computed_at, lookback_n, ic, directional_accuracy, mean_pred, std_pred)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(model, computed_at) DO UPDATE SET
+              lookback_n=excluded.lookback_n,
+              ic=excluded.ic,
+              directional_accuracy=excluded.directional_accuracy,
+              mean_pred=excluded.mean_pred,
+              std_pred=excluded.std_pred
+        """
+        with self._lock, self._connect() as con:
+            con.execute(sql, (model, computed_at, lookback_n, ic,
+                              directional_accuracy, mean_pred, std_pred))
+
+    def get_ic_history(self, model: str, limit: int = 30) -> pd.DataFrame:
+        sql = """
+            SELECT * FROM ic_history WHERE model=?
+            ORDER BY computed_at DESC LIMIT ?
+        """
+        with self._lock, self._connect() as con:
+            rows = con.execute(sql, (model, limit)).fetchall()
         return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
     # ------------------------------------------------------------------

@@ -280,7 +280,7 @@ class TestAppendPredictionsHistory:
     def test_writes_one_record_per_symbol_model_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "history.jsonl")
-            n = append_predictions_history(self._predictions(), path)
+            n = append_predictions_history(self._predictions(), path, "2026-01-01")
 
             assert n == 2
             lines = Path(path).read_text().strip().splitlines()
@@ -293,7 +293,7 @@ class TestAppendPredictionsHistory:
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "history.jsonl")
             n = append_predictions_history(
-                [{"symbol": "BADTICKER", "error": "Insufficient data"}], path
+                [{"symbol": "BADTICKER", "error": "Insufficient data"}], path, "2026-01-01"
             )
 
         assert n == 0
@@ -302,8 +302,8 @@ class TestAppendPredictionsHistory:
     def test_appends_without_truncating_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "history.jsonl")
-            append_predictions_history(self._predictions(), path)
-            append_predictions_history(self._predictions(), path)
+            append_predictions_history(self._predictions(), path, "2026-01-01")
+            append_predictions_history(self._predictions(), path, "2026-01-02")
 
             lines = Path(path).read_text().strip().splitlines()
             assert len(lines) == 4
@@ -311,7 +311,7 @@ class TestAppendPredictionsHistory:
     def test_creates_parent_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "nested" / "dir" / "history.jsonl")
-            n = append_predictions_history(self._predictions(), path)
+            n = append_predictions_history(self._predictions(), path, "2026-01-01")
 
             assert n == 2
             assert Path(path).exists()
@@ -319,7 +319,7 @@ class TestAppendPredictionsHistory:
     def test_record_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "history.jsonl")
-            append_predictions_history(self._predictions(), path)
+            append_predictions_history(self._predictions(), path, "2026-01-01")
 
             record = json.loads(Path(path).read_text().splitlines()[0])
             assert set(record) == {"date", "symbol", "model", "signal", "confidence", "price"}

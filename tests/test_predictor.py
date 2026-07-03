@@ -158,3 +158,69 @@ def test_compute_predictor_signal_output_length_matches_input():
     pred_ret = np.full(100, 0.002)
     signals = compute_predictor_signal(pred_ret, signal_quantile=0.7, threshold_window=60)
     assert len(signals) == 100
+
+
+def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
+    """DailyPredictorStrategy must use best_signal_quantile/best_threshold_window
+    from the pickle when env vars are not set — second priority level."""
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    from daily_features import FEATURE_COLS
+
+    # Build a minimal valid pickle with best params
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(100, len(FEATURE_COLS))).astype(np.float32)
+    y = rng.normal(size=100)
+    scaler = StandardScaler()
+    model = Ridge().fit(scaler.fit_transform(X), y)
+    artifact = {
+        "model": model, "scaler": scaler,
+        "feature_contract": FEATURE_COLS,
+        "best_signal_quantile": 0.65,
+        "best_threshold_window": 40,
+    }
+    pkl_path = str(tmp_path / "predictor.pkl")
+    with open(pkl_path, "wb") as f:
+        pickle.dump(artifact, f)
+
+    env_backup = {k: os.environ.pop(k, None)
+                  for k in ("PREDICTOR_SIGNAL_QUANTILE", "PREDICTOR_THRESHOLD_WINDOW")}
+    try:
+        cfg = StrategyConfig(name="daily_predictor")
+        strat = DailyPredictorStrategy(cfg, use_pretrained=True, model_path=pkl_path)
+        assert strat.signal_quantile == pytest.approx(0.65)
+        assert strat.threshold_window == 40
+    finally:
+        for k, v in env_backup.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
+    """Pickle without best_signal_quantile/best_threshold_window keys must
+    fall back to hardcoded defaults without raising."""
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+    from daily_features import FEATURE_COLS
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(100, len(FEATURE_COLS))).astype(np.float32)
+    y = rng.normal(size=100)
+    scaler = StandardScaler()
+    model = Ridge().fit(scaler.fit_transform(X), y)
+    # Old-format pickle — no best_* keys
+    artifact = {"model": model, "scaler": scaler, "feature_contract": FEATURE_COLS}
+    pkl_path = str(tmp_path / "old_predictor.pkl")
+    with open(pkl_path, "wb") as f:
+        pickle.dump(artifact, f)
+    env_backup = {k: os.environ.pop(k, None)
+                  for k in ("PREDICTOR_SIGNAL_QUANTILE", "PREDICTOR_THRESHOLD_WINDOW")}
+    try:
+        cfg = StrategyConfig(name="daily_predictor")
+        strat = DailyPredictorStrategy(cfg, use_pretrained=True, model_path=pkl_path)
+        assert strat.signal_quantile == pytest.approx(0.7)
+        assert strat.threshold_window == 60
+    finally:
+        for k, v in env_backup.items():
+            if v is not None:
+                os.environ[k] = v
