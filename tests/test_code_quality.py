@@ -61,8 +61,8 @@ def test_backtest_result_metrics_allows_none():
     from simulation_pipeline import BacktestResult
     field_types = {f.name: f.type for f in dataclasses.fields(BacktestResult)}
     metrics_type = str(field_types.get("metrics", ""))
-    assert "float" not in metrics_type or "Any" in metrics_type, (
-        f"BacktestResult.metrics should be Dict[str, Any] (profit_factor is Optional), "
+    assert "Any" in metrics_type, (
+        f"BacktestResult.metrics must be Dict[str, Any] (profit_factor is Optional), "
         f"but annotation is: {metrics_type}"
     )
 

@@ -28,7 +28,7 @@ from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
 from ml_strategies import compute_predictor_signal
-from signal_monitor import score_realized_ic, check_signal_drift, _signal_to_score
+from signal_monitor import score_realized_ic, check_signal_drift
 from train_models import _preprocess
 
 logging.basicConfig(
@@ -607,6 +607,7 @@ def main() -> None:
     drift_warnings: dict = {}
     if args.history:
         try:
+            from signal_monitor import _signal_to_score  # noqa: PLC0415 — deferred to avoid startup ImportError
             today_mean_scores: dict = {}
             for pred in predictions:
                 if "error" in pred:
