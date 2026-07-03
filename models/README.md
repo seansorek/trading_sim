@@ -219,7 +219,7 @@ proven edge.
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay
 - **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)
-- **State**: Rolling window of last 20 days × 28 features (flattened)
+- **State**: Rolling window of last 20 days × 25 features (flattened to 500-dim vector)
 - **Trained via**: `train_dqn.py`
 
 ## Updating models

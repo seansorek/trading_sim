@@ -17,7 +17,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.3.0] — 2026-07-03 — Operational Quality (Sub-project 3, [PR #88](../../pull/88))
+## [0.3.0] — 2026-07-03 — Operational Quality (Sub-project 3, PR #88)
 
 ### Added
 - Structured JSON logging in `predict_next_day_lite.py`: every log line includes `ts`, `level`, `logger`, `msg`, and `run_id` (UUID per invocation) — logs are grep-able and traceable end-to-end across a single GitHub Actions run
@@ -30,7 +30,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.2.0] — 2026-07-03 — Signal Integrity & Code Quality (Sub-projects 1+2, [PR #83](../../pull/83), [PR #84](../../pull/84))
+## [0.2.0] — 2026-07-03 — Signal Integrity & Code Quality (Sub-projects 1+2, PR #83, PR #84)
 
 ### Added (Signal Integrity)
 - `walk_forward.py`: rolling train/test harness with purge/embargo gap, Spearman IC time series, and parameter sweep over `signal_quantile` × `threshold_window`

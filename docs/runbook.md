@@ -142,8 +142,7 @@ MODEL_KINDS = {
 }
 ```
 
-A model whose key is not in `MODEL_KINDS` raises `RuntimeError("Unknown model kind")` and is
-skipped — this is intentional to catch misconfiguration early.
+A model whose key is not in `MODEL_KINDS` raises `RuntimeError` ("Unknown model kind for 'daily_mymodel' — register it in MODEL_KINDS.") and the model is skipped for that run — it does not crash the entire prediction job.
 
 ### Step C — Enable the model in `config/default.yaml`
 
@@ -257,7 +256,7 @@ python train_models.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM
 - **features cache** — recomputed on next run
 - **model_registry** — lost; `predict_next_day_lite.py` falls back to canonical `models/<key>.pkl` paths automatically (the `_resolve_path` fallback in `load_models`)
 - **daily_predictions table** — historical prediction records in the DB. The durable copy is `predictions/history.jsonl` in the repo
-- **ic_history table** — IC tracking data. Will rebuild from `predictions/history.jsonl` on next run
+- **ic_history table** — IC tracking data. Historical rows are not recoverable from DB loss, but the next run will compute and store today's IC correctly (reads `predictions/history.jsonl` as input, not the DB).
 
 ### SQLite integrity check (before deleting)
 

@@ -34,13 +34,16 @@ flowchart LR
     subgraph Prediction["predict_next_day_lite.py\n(GitHub Actions — daily 06:00 UTC)"]
         LM["load_models()\nreads prediction.models\nfrom config/default.yaml"]
         PS["predict_symbol() × N\nclassifier: softmax → SELL/HOLD/BUY\nregressor: rolling-quantile → SELL/HOLD/BUY"]
-        IC["signal_monitor.py\nTrailing-20 Spearman IC\nDrift detection (2σ / 2 consecutive days)"]
     end
 
     subgraph Output
         DI[/"Discord\nwebhook"/]
         TJ["tomorrow_trades.json\n(GitHub Actions artifact)"]
         HJ["predictions/history.jsonl\n(append-only, committed to repo)"]
+    end
+
+    subgraph Monitoring["Monitoring (after each run)"]
+        IC["signal_monitor.py\nTrailing-20 Spearman IC\nDrift detection (2σ / 2 consecutive days)"]
     end
 
     subgraph DB["data/trading_sim.db (SQLite — ephemeral on CI)"]
@@ -76,7 +79,6 @@ flowchart LR
     DL -->|live features| DF
     DF -->|live feature matrix| PS
 
-    PS -->|predictions| IC
     HJ -->|history| IC
     IC -->|IC metrics| ICT
     IC -->|IC + drift to Discord| DI
