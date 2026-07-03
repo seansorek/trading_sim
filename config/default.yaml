@@ -109,9 +109,6 @@ strategies:
     q_advantage_threshold: 1.0
     confidence_threshold: 2.0
     transaction_cost_bps: 5.0
-  hybrid:
-    # Hybrid combines logistic + xgboost + dqn with majority voting.
-    require_agreement: 2  # Number of models that must agree for BUY/SELL.
 
 # Bayesian hyperparameter search settings (used when --optimize is passed to train_models.py).
 optimize:
