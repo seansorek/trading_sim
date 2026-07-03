@@ -15,7 +15,6 @@ import os
 import pickle
 import random
 import sys
-import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -559,14 +558,17 @@ def send_discord(
                 })
 
     if stale_models:
-        for model_key, age_days in sorted(stale_models.items()):
-            embeds.insert(0, {
+        stale_embeds = [
+            {
                 "title": f"⚠️ Stale Model — {model_key}",
                 "description": (
                     f"The `{model_key}` model is {age_days} days old — consider retraining."
                 ),
                 "color": 0xFFFF00,
-            })
+            }
+            for model_key, age_days in sorted(stale_models.items())
+        ]
+        embeds[0:0] = stale_embeds
 
     if not embeds:
         logger.warning("No embeds to send to Discord")

@@ -1045,6 +1045,8 @@ class TestLoadModels:
 
         assert set(loaded.keys()) <= {"daily_logistic", "daily_dqn"}
         assert "daily_logistic" in loaded
+        assert "_artifact_path" in loaded["daily_logistic"]
+        assert loaded["daily_logistic"]["_artifact_path"].endswith("daily_logistic.pkl")
 
     def test_missing_pickle_for_configured_model_is_skipped_not_fatal(self, tmp_path, monkeypatch):
         """A model_key in the config list whose pickle doesn't exist on
