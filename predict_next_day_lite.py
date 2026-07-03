@@ -15,6 +15,7 @@ import os
 import pickle
 import random
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -67,6 +68,25 @@ def _configure_logging(run_id: str) -> None:
 
 
 logger = logging.getLogger(__name__)
+
+
+def check_model_staleness(models: dict[str, Any], max_age_days: int) -> dict[str, int]:
+    """Return {model_key: age_days} for pkl models older than max_age_days."""
+    stale: dict[str, int] = {}
+    now = datetime.utcnow()
+    for model_key, data in models.items():
+        path = data.get("_artifact_path") if isinstance(data, dict) else None
+        if path is None:
+            continue
+        try:
+            mtime = datetime.utcfromtimestamp(os.path.getmtime(path))
+            age_days = (now - mtime).days
+            if age_days > max_age_days:
+                stale[model_key] = age_days
+        except OSError:
+            pass
+    return stale
+
 
 _SIGNAL_NAMES = ["SELL", "HOLD", "BUY"]  # index matches label {0,1,2}
 
@@ -234,6 +254,7 @@ def load_models(
         path = _resolve_path(model_key, canonical)
         try:
             models[model_key] = _load_pkl(path, model_key)
+            models[model_key]["_artifact_path"] = path
             logger.info("Loaded %s from %s", model_key, path)
         except RuntimeError as exc:
             logger.warning("%s", exc)
@@ -435,6 +456,7 @@ def send_discord(
     webhook_url: str,
     ic_results: dict | None = None,
     drift_warnings: dict | None = None,
+    stale_models: dict[str, int] | None = None,
 ) -> bool:
     if not webhook_url:
         logger.warning("No Discord webhook URL — skipping notification")
@@ -507,6 +529,16 @@ def send_discord(
                     ),
                     "color": 0xFFFF00,
                 })
+
+    if stale_models:
+        for model_key, age_days in sorted(stale_models.items()):
+            embeds.insert(0, {
+                "title": f"⚠️ Stale Model — {model_key}",
+                "description": (
+                    f"The `{model_key}` model is {age_days} days old — consider retraining."
+                ),
+                "color": 0xFFFF00,
+            })
 
     if not embeds:
         logger.warning("No embeds to send to Discord")
@@ -590,6 +622,10 @@ def main() -> None:
     if not models:
         logger.error("No trained models found. Run train_models.py first.")
         sys.exit(1)
+
+    stale = check_model_staleness(models, cfg.prediction.max_model_age_days)
+    for model_key, age_days in stale.items():
+        logger.warning("Model %s is %d days old — consider retraining", model_key, age_days)
 
     # --- Realized IC scoring ---
     ic_results: dict = {}
@@ -688,7 +724,7 @@ def main() -> None:
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
     if webhook:
-        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings):
+        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings, stale_models=stale):
             logger.info("Discord notification sent.")
         else:
             logger.warning("Discord notification failed.")

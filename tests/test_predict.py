@@ -1,6 +1,7 @@
 """test_predict.py — Tests for predict_next_day_lite.py (no network, no real models)."""
 import json
 import logging
+import os
 import pickle
 import sys
 import tempfile
@@ -856,6 +857,99 @@ class TestJsonLogging:
 # ---------------------------------------------------------------------------
 # load_models (Task 5 — config-driven model list)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Model staleness detection (Task 2)
+# ---------------------------------------------------------------------------
+
+import time
+from predict_next_day_lite import check_model_staleness
+
+
+class TestCheckModelStaleness:
+    def _make_pkl(self, tmp_path: Path, name: str) -> str:
+        artifact = _make_artifact()
+        p = tmp_path / f"{name}.pkl"
+        with open(p, "wb") as f:
+            pickle.dump(artifact, f)
+        return str(p)
+
+    def test_fresh_model_not_in_result(self, tmp_path):
+        path = self._make_pkl(tmp_path, "daily_logistic")
+        models = {"daily_logistic": {"_artifact_path": path}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" not in stale
+
+    def test_old_model_appears_in_result_with_age(self, tmp_path):
+        path = self._make_pkl(tmp_path, "daily_logistic")
+        # Backdate mtime by 45 days
+        old_time = time.time() - 45 * 86400
+        os.utime(path, (old_time, old_time))
+        models = {"daily_logistic": {"_artifact_path": path}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" in stale
+        assert stale["daily_logistic"] >= 44
+
+    def test_missing_artifact_path_is_skipped(self):
+        models = {"daily_dqn": object()}  # no _artifact_path
+        stale = check_model_staleness(models, max_age_days=30)
+        assert stale == {}
+
+    def test_nonexistent_path_is_skipped(self):
+        models = {"daily_predictor": {"_artifact_path": "/nonexistent/model.pkl"}}
+        stale = check_model_staleness(models, max_age_days=30)
+        assert stale == {}
+
+    def test_mixed_fresh_and_stale(self, tmp_path):
+        fresh = self._make_pkl(tmp_path, "fresh")
+        stale_path = self._make_pkl(tmp_path, "stale")
+        old_time = time.time() - 40 * 86400
+        os.utime(stale_path, (old_time, old_time))
+        models = {
+            "daily_logistic": {"_artifact_path": fresh},
+            "daily_predictor": {"_artifact_path": stale_path},
+        }
+        result = check_model_staleness(models, max_age_days=30)
+        assert "daily_logistic" not in result
+        assert "daily_predictor" in result
+
+
+class TestSendDiscordStaleModels:
+    def _minimal_predictions(self):
+        return [
+            {"symbol": "AAPL", "price": 150.0,
+             "predictions": {"daily_logistic": {"signal": "BUY", "confidence": 0.8}}}
+        ]
+
+    def test_stale_model_warning_embed_prepended(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(
+                self._minimal_predictions(),
+                "https://discord.example/webhook",
+                stale_models={"daily_predictor": 45},
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert any("daily_predictor" in t for t in titles)
+        assert any("Stale" in t for t in titles)
+        # Warning must be the first embed
+        assert "daily_predictor" in payload["embeds"][0]["title"]
+
+    def test_no_stale_models_no_warning_embed(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 204
+        with patch("requests.post", return_value=mock_resp) as mock_post:
+            send_discord(
+                self._minimal_predictions(),
+                "https://discord.example/webhook",
+                stale_models={},
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        titles = [e["title"] for e in payload["embeds"]]
+        assert not any("Stale" in t for t in titles)
+
 
 class TestLoadModels:
     def test_respects_explicit_model_keys_list(self, tmp_path, monkeypatch):

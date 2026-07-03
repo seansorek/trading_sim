@@ -179,6 +179,35 @@ def test_get_config_returns_singleton_across_calls():
     assert first is second
 
 
+def test_prediction_cfg_default_max_model_age_days():
+    """PredictionCfg.max_model_age_days defaults to 30 when not in YAML."""
+    cfg = PredictionCfg()
+    assert cfg.max_model_age_days == 30
+
+
+def test_load_config_reads_max_model_age_days():
+    path = _write_yaml("""
+        prediction:
+          max_model_age_days: 60
+          models:
+            - daily_predictor
+          symbols:
+            - AAPL
+    """)
+    cfg = load_config(path)
+    assert cfg.prediction.max_model_age_days == 60
+
+
+def test_load_config_missing_max_model_age_days_uses_default():
+    path = _write_yaml("""
+        prediction:
+          symbols:
+            - AAPL
+    """)
+    cfg = load_config(path)
+    assert cfg.prediction.max_model_age_days == 30
+
+
 def test_get_config_caches_first_path_ignores_later_path_argument():
     """Once cached, get_config() must not reload even if called again with
     a different path -- the global singleton wins over the argument."""
