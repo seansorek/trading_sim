@@ -54,6 +54,8 @@ git add models/daily_logistic.pkl models/daily_xgboost.pkl models/daily_predicto
 git diff --cached --stat
 
 git commit -m "retrain: update models $(date -u +%Y-%m-%d)"
+# Windows PowerShell: fill in the date manually, e.g.:
+# git commit -m "retrain: update models 2026-07-03"
 git push
 ```
 
@@ -213,6 +215,7 @@ registration can stay in place (harmless).
 
 3. **Verify the webhook URL manually:**
    ```bash
+   # curl is available in bash, Git Bash, and Windows 10+ (built-in since 1803)
    curl -X POST -H "Content-Type: application/json" \
      -d '{"content":"test — webhook alive"}' \
      "$DISCORD_WEBHOOK_URL"
