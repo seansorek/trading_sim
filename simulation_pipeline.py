@@ -6,7 +6,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -134,7 +134,7 @@ class ExecutionConfig:
 class BacktestResult:
     equity_curve: pd.Series
     trades: pd.DataFrame
-    metrics: Dict[str, float]
+    metrics: Dict[str, Any]
 
 
 def _exit_position(
@@ -394,7 +394,7 @@ class Backtester:
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]:
+def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, Any]:
     daily_equity = equity.resample("1D").last().dropna()
     daily_ret = daily_equity.pct_change().dropna()
 
