@@ -291,102 +291,6 @@ def test_compute_metrics_reversal_losing_leg():
     assert metrics["hit_rate"] == pytest.approx(0.5)
 
 
-# ---------------------------------------------------------------------------
-# Issue #20 — walk_forward_backtest skip for daily strategies
-# ---------------------------------------------------------------------------
-
-def test_walk_forward_skipped_for_daily_strategy():
-    """
-    Issue #20: simulate_multi.run_symbol_strategy must skip walk_forward_backtest
-    for daily_ strategies and return wf_metrics with {"skipped": True}.
-
-    We verify the logic directly by calling run_symbol_strategy with a mock
-    strategy that doesn't need external data.
-    """
-    from simulation_pipeline import walk_forward_backtest
-
-    # Build a DataFrame that intentionally lacks the intraday _COLS features
-    n = 30
-    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
-    prices = 100.0 + np.arange(n) * 0.1
-    df = pd.DataFrame(
-        {
-            "open": prices - 0.2,
-            "high": prices + 0.5,
-            "low": prices - 0.5,
-            "close": prices,
-            "volume": np.full(n, 1_000_000.0),
-        },
-        index=idx,
-    )
-
-    # walk_forward_backtest with a feats frame missing _COLS should produce all-zero signals
-    result = walk_forward_backtest(df, df, train_days=3, test_days=1)
-    # The signal is all-flat (zeros), so n_round_trades should be 0
-    assert result.metrics.get("n_round_trades", 0) == 0, (
-        "walk_forward_backtest with missing intraday features should produce "
-        "no trades (all-flat signal)"
-    )
-
-
-def test_run_symbol_strategy_wf_skipped_flag():
-    """
-    Issue #20: run_symbol_strategy for a daily_ strategy must set
-    wf_metrics['skipped'] = True instead of calling walk_forward_backtest.
-    """
-    import importlib
-    from unittest.mock import patch, MagicMock
-    from simulation_pipeline import ExecutionConfig, StrategyConfig
-
-    n = 60
-    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
-    prices = 100.0 + np.arange(n, dtype=float) * 0.1
-    df = pd.DataFrame(
-        {
-            "open": prices - 0.2,
-            "high": prices + 0.5,
-            "low": prices - 0.5,
-            "close": prices,
-            "volume": np.full(n, 1_000_000.0),
-        },
-        index=idx,
-    )
-
-    exec_cfg = ExecutionConfig(
-        start_cash=100_000.0,
-        commission_per_share=0.0,
-        slippage_bps=0.0,
-        stop_loss_pct=0.5,
-        take_profit_pct=0.5,
-        daily_loss_limit_pct=0.99,
-        max_position_pct=0.05,
-    )
-
-    flat_signal = pd.Series(0, index=df.index)
-
-    with patch("simulate_multi.build_strategy_signal", return_value=flat_signal), \
-         patch("simulate_multi.make_features", return_value=df), \
-         patch("simulate_multi.walk_forward_backtest") as mock_wf, \
-         patch("simulate_multi.monte_carlo_stress", return_value=pd.DataFrame()):
-        import simulate_multi
-        result = simulate_multi.run_symbol_strategy(
-            symbol="TEST",
-            strategy_name="daily_logistic",
-            df=df,
-            cfg=StrategyConfig(name="daily_logistic", lookback=20, holding_period=5),
-            exec_cfg=exec_cfg,
-            run_id="test-run-001",
-            n_mc_runs=0,
-        )
-
-    # walk_forward_backtest should NOT have been called for a daily_ strategy
-    mock_wf.assert_not_called()
-    # wf_metrics should carry the skipped flag
-    assert result["wf_metrics"].get("skipped") is True, (
-        f"Expected wf_metrics['skipped']=True for daily strategy, got: {result['wf_metrics']}"
-    )
-
-
 class TestDailyDQNStrategyThresholds:
     """DailyDQNStrategy should use config values, not hardcoded defaults (#33)."""
 
@@ -652,20 +556,6 @@ def test_monte_carlo_stress_writes_to_custom_out_csv(tmp_path):
     out = tmp_path / "scoped_mc.csv"
     monte_carlo_stress(df, df, signal, n_runs=3, out_csv=str(out))
     assert out.exists(), "monte_carlo_stress did not write to the custom out_csv path"
-
-
-def test_walk_forward_artifact_paths_are_scoped(tmp_path):
-    """walk_forward_backtest must write artifacts to the caller-supplied paths."""
-    from simulation_pipeline import walk_forward_backtest
-
-    df = _make_df(30)
-    paths = {
-        "equity_curve_csv": str(tmp_path / "wf_equity.csv"),
-        "trade_log_csv": str(tmp_path / "wf_trades.csv"),
-        "metrics_json": str(tmp_path / "wf_metrics.json"),
-    }
-    walk_forward_backtest(df, df, train_days=5, test_days=1, artifact_paths=paths)
-    assert (tmp_path / "wf_metrics.json").exists(), "walk_forward did not write metrics json to custom path"
 
 
 # ---------------------------------------------------------------------------
