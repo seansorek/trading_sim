@@ -24,9 +24,7 @@ from simulation_pipeline import (
     StrategyConfig,
     STRATEGY_REGISTRY,
     build_strategy_signal,
-    make_features,
     monte_carlo_stress,
-    walk_forward_backtest,
 )
 
 Path("logs").mkdir(exist_ok=True)
@@ -63,8 +61,7 @@ def run_symbol_strategy(
         "metrics_json": f"{artifact_base}_metrics.json",
     }
 
-    # Daily strategies build their own features internally; pass empty feats
-    feats = make_features(df) if not strategy_name.startswith("daily_") else df
+    feats = df  # all registered strategies are daily_ and build features internally
 
     signal = build_strategy_signal(strategy_name, cfg, feats, df, spy_df=spy_df)
 
@@ -77,21 +74,7 @@ def run_symbol_strategy(
         strategy=strategy_name,
     )
 
-    # walk_forward_backtest uses intraday features (_COLS) not present in daily
-    # OHLCV data, so it produces an all-flat signal for daily strategies.
-    # Skip it for daily_ strategies to avoid silently returning meaningless metrics.
-    if strategy_name.startswith("daily_"):
-        wf_metrics = {"skipped": True, "reason": "daily strategy"}
-    else:
-        wf = walk_forward_backtest(
-            df, feats, train_days=3, test_days=1,
-            artifact_paths={
-                "equity_curve_csv": f"{artifact_base}_wf_equity_curve.csv",
-                "trade_log_csv": f"{artifact_base}_wf_trade_log.csv",
-                "metrics_json": f"{artifact_base}_wf_metrics.json",
-            },
-        )
-        wf_metrics = wf.metrics
+    wf_metrics: dict = {"skipped": True}
     mc = monte_carlo_stress(
         df, feats, signal, n_runs=n_mc_runs,
         base_exec_cfg=exec_cfg,

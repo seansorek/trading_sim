@@ -36,47 +36,6 @@ except ImportError as exc:
     HAS_ML_STRATEGIES = False
 
 # ---------------------------------------------------------------------------
-# Intraday feature builder (kept for walk-forward; not used by daily strategies)
-# ---------------------------------------------------------------------------
-
-def rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ema_up = up.ewm(alpha=1 / window, adjust=False).mean()
-    ema_down = down.ewm(alpha=1 / window, adjust=False).mean()
-    rs = ema_up / (ema_down + 1e-12)
-    return 100 - (100 / (1 + rs))
-
-
-def make_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Intraday feature builder. Used by walk_forward_backtest and DQN training."""
-    feats = pd.DataFrame(index=df.index)
-    price = df["close"]
-    returns_1m = price.pct_change().fillna(0)
-    feats["ret_1m"] = returns_1m
-    feats["ma_fast"] = price.rolling(10).mean()
-    feats["ma_slow"] = price.rolling(60).mean()
-    feats["ma_spread"] = feats["ma_fast"] - feats["ma_slow"]
-    feats["vol_10"] = returns_1m.rolling(10).std()
-    feats["vol_60"] = returns_1m.rolling(60).std()
-    feats["rsi_14"] = rsi(price, 14)
-    feats["vol_z"] = (
-        (df["volume"] - df["volume"].rolling(60).mean())
-        / (df["volume"].rolling(60).std() + 1e-12)
-    )
-    feats["momentum_5"] = price.pct_change(5).fillna(0)
-    feats["momentum_20"] = price.pct_change(20).fillna(0)
-    feats["vp_ratio"] = feats["ret_1m"] / (feats["vol_z"].abs() + 1e-6)
-    feats["vol_regime"] = (feats["vol_60"] > feats["vol_60"].rolling(100).mean()).astype(int)
-    range_high = df["high"].rolling(60).max()
-    range_low = df["low"].rolling(60).min()
-    feats["price_position"] = (price - range_low) / (range_high - range_low + 1e-6)
-    feats = feats.ffill()
-    return feats
-
-
-# ---------------------------------------------------------------------------
 # Strategy registry
 # ---------------------------------------------------------------------------
 
@@ -131,24 +90,6 @@ class DailyDQNStrategy(BaseStrategy):
 
 
 STRATEGY_REGISTRY["daily_dqn"] = DailyDQNStrategy
-
-# Register Ridge + QuantileDecision if daily_predictor.pkl exists
-_RIDGE_PATH = os.environ.get("RIDGE_MODEL", "models/daily_predictor.pkl")
-if os.path.exists(_RIDGE_PATH):
-    from predictors.ridge import RidgePredictor
-    from decision_layers.quantile import QuantileDecision
-
-    class _DailyRidgeQuantileStrategy(BaseStrategy):
-        def __init__(self, cfg: StrategyConfig, spy_df=None, **_kwargs):
-            super().__init__(cfg)
-            predictor = RidgePredictor.load(_RIDGE_PATH)
-            decision = QuantileDecision(signal_quantile=0.7, threshold_window=63)
-            self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
-
-        def signal(self, feats, df):
-            return self._inner.signal(feats, df)
-
-    STRATEGY_REGISTRY["daily_ridge_q"] = _DailyRidgeQuantileStrategy
 
 
 def build_strategy_signal(
@@ -534,50 +475,6 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]
         if gross_loss > 0
         else None,
     }
-
-
-# ---------------------------------------------------------------------------
-# Walk-forward backtest (linear model on intraday features)
-# ---------------------------------------------------------------------------
-
-def walk_forward_backtest(
-    df: pd.DataFrame,
-    feats: pd.DataFrame,
-    train_days: int = 5,
-    test_days: int = 1,
-    artifact_paths: Optional[dict] = None,
-) -> BacktestResult:
-    _COLS = ["ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z"]
-    days = sorted(set(df.index.date))
-    signals = []
-
-    for i in range(train_days, len(days)):
-        train_idx = (df.index.date >= days[i - train_days]) & (df.index.date < days[i])
-        test_idx = df.index.date == days[i]
-
-        available = [c for c in _COLS if c in feats.columns]
-        if not available:
-            continue
-
-        X_train = feats.loc[train_idx, available].values
-        y_train = np.sign(
-            df.loc[train_idx, "close"].pct_change(5).shift(-5).fillna(0).values
-        )
-        X = np.c_[np.ones(len(X_train)), X_train]
-        beta, *_ = np.linalg.lstsq(X, y_train, rcond=None)
-
-        X_test = feats.loc[test_idx, available].values
-        X_t = np.c_[np.ones(len(X_test)), X_test]
-        y_hat = X_t @ beta
-        sig = np.where(y_hat > 0.10, 1, np.where(y_hat < -0.10, -1, 0))
-        signals.append(pd.Series(sig, index=feats.loc[test_idx].index))
-
-    signal_full = (
-        pd.concat(signals).sort_index() if signals else pd.Series(0, index=feats.index)
-    )
-    bt = Backtester(ExecutionConfig())
-    return bt.run(df.loc[signal_full.index], feats.loc[signal_full.index], signal_full,
-                  artifact_paths=artifact_paths)
 
 
 # ---------------------------------------------------------------------------
