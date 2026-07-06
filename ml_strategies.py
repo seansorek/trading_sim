@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from base_strategy import BaseStrategy, StrategyConfig
-from daily_features import FEATURE_COLS, make_daily_features
+from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from decision_layers.threshold import ThresholdDecision
 from predictor_strategy import PredictorStrategy
 from predictors.base import _preprocess, _load_validated_pickle
@@ -234,15 +234,55 @@ class DailyPredictorStrategy(BaseStrategy):
             X_scaled = self.scaler.transform(X)
             pred_ret = self.model.predict(X_scaled)
         else:
-            # In-session training fallback (no pre-trained model)
+            # In-session training fallback (no pre-trained model).
+            #
+            # NOT a full walk-forward re-fit (see walk_forward.py) — this is a
+            # single-split approximation of the same purged-split discipline
+            # used by train_models._prepare_data / train_predictor.prepare_data:
+            # an 80/20 time-ordered train/test split with an embargo gap of
+            # FWD_RET_HORIZON_DAYS rows between them, so no training label's
+            # forward-return horizon overlaps the rows we predict on. The
+            # scaler and model are fit ONLY on the train prefix; predictions
+            # are only emitted for the held-out suffix. Rows before the
+            # embargo (train + embargo gap) get no prediction (HOLD, pred=0)
+            # since they were used for fitting and must never be "predicted".
+            #
+            # This is a non-production toy path: a single stale in-session
+            # fit is far weaker than the walk-forward-tuned pretrained model
+            # and exists only so the strategy still runs end-to-end without
+            # a pickle. Logs a warning every time it's used.
+            logger.warning(
+                "DailyPredictorStrategy: no pretrained model — using in-session "
+                "training fallback (single train/test split with embargo gap, "
+                "NOT walk-forward). This is a toy path for smoke-testing only "
+                "and should not be used to judge live strategy performance."
+            )
             from sklearn.linear_model import Ridge
+
             y_raw = daily_feats["fwd_ret_1d"].values
-            mask = ~np.isnan(y_raw)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = Ridge(alpha=10.0)
-            model.fit(X_scaled[mask], y_raw[mask])
-            pred_ret = model.predict(X_scaled)
+            n = len(daily_feats)
+            split = int(n * 0.8)
+            test_start = split + FWD_RET_HORIZON_DAYS
+
+            pred_ret = np.zeros(n, dtype=np.float64)
+            if test_start < n:
+                train_mask = ~np.isnan(y_raw[:split])
+                X_train = X[:split][train_mask]
+                y_train = y_raw[:split][train_mask]
+
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                model = Ridge(alpha=10.0)
+                model.fit(X_train_scaled, y_train)
+
+                X_test_scaled = scaler.transform(X[test_start:])
+                pred_ret[test_start:] = model.predict(X_test_scaled)
+            else:
+                logger.warning(
+                    "DailyPredictorStrategy: not enough rows (%d) for an "
+                    "embargoed train/test split — fallback will emit all-HOLD.",
+                    n,
+                )
 
         signals = compute_predictor_signal(
             pred_ret, self.signal_quantile, self.threshold_window
