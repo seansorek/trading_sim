@@ -295,6 +295,6 @@ def load_alpha_vantage(symbol: str, api_key: str, interval: str = "5min", output
     return _standardize(df)
 
 # --- Save helper ---
-def save_to_csv(df: pd.DataFrame, path: str):
+def save_to_csv(df: pd.DataFrame, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     df.to_csv(path)

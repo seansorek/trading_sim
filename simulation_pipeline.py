@@ -6,16 +6,15 @@ import logging
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 
 from base_strategy import BaseStrategy, StrategyConfig
-from daily_features import FEATURE_COLS, make_daily_features
-from dqn_agent import DQNAgent
-from dqn_signal import gate_dqn_signal
+from data_loader import load_yfinance
+from predictor_strategy import PredictorStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -37,47 +36,6 @@ except ImportError as exc:
     HAS_ML_STRATEGIES = False
 
 # ---------------------------------------------------------------------------
-# Intraday feature builder (kept for walk-forward; not used by daily strategies)
-# ---------------------------------------------------------------------------
-
-def rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ema_up = up.ewm(alpha=1 / window, adjust=False).mean()
-    ema_down = down.ewm(alpha=1 / window, adjust=False).mean()
-    rs = ema_up / (ema_down + 1e-12)
-    return 100 - (100 / (1 + rs))
-
-
-def make_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Intraday feature builder. Used by walk_forward_backtest and DQN training."""
-    feats = pd.DataFrame(index=df.index)
-    price = df["close"]
-    returns_1m = price.pct_change().fillna(0)
-    feats["ret_1m"] = returns_1m
-    feats["ma_fast"] = price.rolling(10).mean()
-    feats["ma_slow"] = price.rolling(60).mean()
-    feats["ma_spread"] = feats["ma_fast"] - feats["ma_slow"]
-    feats["vol_10"] = returns_1m.rolling(10).std()
-    feats["vol_60"] = returns_1m.rolling(60).std()
-    feats["rsi_14"] = rsi(price, 14)
-    feats["vol_z"] = (
-        (df["volume"] - df["volume"].rolling(60).mean())
-        / (df["volume"].rolling(60).std() + 1e-12)
-    )
-    feats["momentum_5"] = price.pct_change(5).fillna(0)
-    feats["momentum_20"] = price.pct_change(20).fillna(0)
-    feats["vp_ratio"] = feats["ret_1m"] / (feats["vol_z"].abs() + 1e-6)
-    feats["vol_regime"] = (feats["vol_60"] > feats["vol_60"].rolling(100).mean()).astype(int)
-    range_high = df["high"].rolling(60).max()
-    range_low = df["low"].rolling(60).min()
-    feats["price_position"] = (price - range_low) / (range_high - range_low + 1e-6)
-    feats = feats.ffill()
-    return feats
-
-
-# ---------------------------------------------------------------------------
 # Strategy registry
 # ---------------------------------------------------------------------------
 
@@ -89,69 +47,46 @@ if HAS_ML_STRATEGIES:
 
 
 class DailyDQNStrategy(BaseStrategy):
-    """DQN agent generating daily long/short/hold signals."""
+    """DQN agent next-day strategy backed by PredictorStrategy + DQNDecision."""
 
-    def __init__(self, cfg: StrategyConfig, spy_df=None):
+    def __init__(
+        self,
+        cfg: StrategyConfig,
+        spy_df=None,
+        model_path: str = "models/dqn_agent.pt",
+        window: int = 20,
+        confidence_threshold: float = 2.0,
+        q_advantage_threshold: float = 1.0,
+    ):
         super().__init__(cfg)
-        self.spy_df = spy_df
-        self.model_path = os.environ.get(
-            "DQN_MODEL", getattr(cfg, "model_path", "models/dqn_agent.pt")
-        )
-        self.window = int(os.environ.get("DQN_WINDOW", getattr(cfg, "window", 20)))
-        self.confidence_threshold = float(os.environ.get("DQN_CONFIDENCE", getattr(cfg, "confidence_threshold", 2.0)))
-        self.q_advantage_threshold = float(os.environ.get("DQN_Q_ADVANTAGE", getattr(cfg, "q_advantage_threshold", 1.0)))
+        _model_path = os.environ.get("DQN_MODEL", getattr(cfg, "model_path", model_path))
+        _window = int(os.environ.get("DQN_WINDOW", getattr(cfg, "window", window)))
+        _ct = float(os.environ.get("DQN_CONFIDENCE", getattr(cfg, "confidence_threshold", confidence_threshold)))
+        _qt = float(os.environ.get("DQN_Q_ADVANTAGE", getattr(cfg, "q_advantage_threshold", q_advantage_threshold)))
+
+        # Expose as instance attrs so tests and callers can inspect them
+        self.confidence_threshold = _ct
+        self.q_advantage_threshold = _qt
+
+        from predictors.dqn import DQNPredictor
+        from decision_layers.dqn_decision import DQNDecision
+        try:
+            predictor = DQNPredictor.load(_model_path, window=_window,
+                                          confidence_threshold=_ct,
+                                          q_advantage_threshold=_qt)
+        except Exception as exc:
+            logger.warning("DQNPredictor: failed to load from %s: %s", _model_path, exc)
+            predictor = None
+
+        self._inner = None
+        if predictor is not None:
+            decision = DQNDecision(confidence_threshold=_ct, q_advantage_threshold=_qt)
+            self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        try:
-            agent = DQNAgent.load(self.model_path)
-        except Exception as exc:
-            logger.warning("DQN: failed to load agent from %s: %s", self.model_path, exc)
+        if self._inner is None:
             return pd.Series(0, index=df.index)
-
-        daily_feats = make_daily_features(df, spy_df=self.spy_df).fillna(0.0)
-        feature_cols = FEATURE_COLS
-
-        # Fit normalizer on warmup window only to avoid look-ahead bias
-        fit_end = min(252, max(self.window + 1, len(daily_feats) // 2))
-        scaler_stats: dict = {}
-        for col in feature_cols:
-            mu = float(daily_feats[col].iloc[:fit_end].mean())
-            sigma = float(daily_feats[col].iloc[:fit_end].std() or 1.0)
-            scaler_stats[col] = (mu, sigma)
-
-        normalized = daily_feats.copy()
-        for col in feature_cols:
-            mu, sigma = scaler_stats[col]
-            normalized[col] = (daily_feats[col] - mu) / (sigma if sigma != 0 else 1.0)
-
-        signals, idxs = [], []
-        for i in range(self.window, len(normalized)):
-            state = (
-                normalized.iloc[i - self.window : i][feature_cols]
-                .values.astype(np.float32)
-                .flatten()
-            )
-
-            with torch.no_grad():
-                s_t = torch.from_numpy(state).float().unsqueeze(0)
-                q_vals = agent.q(s_t).squeeze(0).cpu().numpy()
-
-            signal_str, _confidence = gate_dqn_signal(
-                q_vals,
-                confidence_threshold=self.confidence_threshold,
-                q_advantage_threshold=self.q_advantage_threshold,
-            )
-            sig = {"BUY": 1, "SELL": -1, "HOLD": 0}[signal_str]
-
-            signals.append(sig)
-            idxs.append(daily_feats.index[i])
-
-        if not signals:
-            return pd.Series(0, index=df.index)
-
-        ser = pd.Series(signals, index=pd.DatetimeIndex(idxs))
-        ser = ser.reindex(df.index).fillna(0).astype(int)
-        return self._apply_holding_period(ser)
+        return self._inner.signal(feats, df)
 
 
 STRATEGY_REGISTRY["daily_dqn"] = DailyDQNStrategy
@@ -199,7 +134,7 @@ class ExecutionConfig:
 class BacktestResult:
     equity_curve: pd.Series
     trades: pd.DataFrame
-    metrics: Dict[str, float]
+    metrics: Dict[str, Any]
 
 
 def _exit_position(
@@ -459,7 +394,7 @@ class Backtester:
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]:
+def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, Any]:
     daily_equity = equity.resample("1D").last().dropna()
     daily_ret = daily_equity.pct_change().dropna()
 
@@ -540,50 +475,6 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, float]
         if gross_loss > 0
         else None,
     }
-
-
-# ---------------------------------------------------------------------------
-# Walk-forward backtest (linear model on intraday features)
-# ---------------------------------------------------------------------------
-
-def walk_forward_backtest(
-    df: pd.DataFrame,
-    feats: pd.DataFrame,
-    train_days: int = 5,
-    test_days: int = 1,
-    artifact_paths: Optional[dict] = None,
-) -> BacktestResult:
-    _COLS = ["ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z"]
-    days = sorted(set(df.index.date))
-    signals = []
-
-    for i in range(train_days, len(days)):
-        train_idx = (df.index.date >= days[i - train_days]) & (df.index.date < days[i])
-        test_idx = df.index.date == days[i]
-
-        available = [c for c in _COLS if c in feats.columns]
-        if not available:
-            continue
-
-        X_train = feats.loc[train_idx, available].values
-        y_train = np.sign(
-            df.loc[train_idx, "close"].pct_change(5).shift(-5).fillna(0).values
-        )
-        X = np.c_[np.ones(len(X_train)), X_train]
-        beta, *_ = np.linalg.lstsq(X, y_train, rcond=None)
-
-        X_test = feats.loc[test_idx, available].values
-        X_t = np.c_[np.ones(len(X_test)), X_test]
-        y_hat = X_t @ beta
-        sig = np.where(y_hat > 0.10, 1, np.where(y_hat < -0.10, -1, 0))
-        signals.append(pd.Series(sig, index=feats.loc[test_idx].index))
-
-    signal_full = (
-        pd.concat(signals).sort_index() if signals else pd.Series(0, index=feats.index)
-    )
-    bt = Backtester(ExecutionConfig())
-    return bt.run(df.loc[signal_full.index], feats.loc[signal_full.index], signal_full,
-                  artifact_paths=artifact_paths)
 
 
 # ---------------------------------------------------------------------------

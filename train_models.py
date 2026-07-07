@@ -16,6 +16,7 @@ import os
 import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -382,8 +383,8 @@ def train_xgboost(
     y_test: np.ndarray,
     cfg: dict,
     optimize: bool = False,
-    opt_cfg=None,
-) -> tuple:
+    opt_cfg: Any = None,
+) -> tuple[Any, Any, float, float, float]:
     if not HAS_XGBOOST:
         raise ImportError("xgboost not installed. pip install xgboost")
 

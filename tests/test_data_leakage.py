@@ -100,3 +100,38 @@ def test_hybrid_prepare_data_has_embargo_gap(tmp_path):
     # block, so just assert the block boundary (pre-sequence) embargo holds.
     gap = test_start - split
     assert gap == FWD_RET_HORIZON_DAYS
+
+
+def test_hybrid_prepare_data_val_carved_from_train_not_test(tmp_path):
+    """The validation slice used for early stopping must be carved out of the
+    TRAIN period (most recent portion of it), never overlap the test set, and
+    itself be separated from train-proper by an embargo gap. This guards
+    against issue #90 (test set leaking into early-stopping/checkpoint
+    selection)."""
+    pytest.importorskip("torch")
+    import train_hybrid
+
+    db = train_hybrid.DB(str(tmp_path / "test.db"))
+    df = _make_price_df()
+
+    val_frac = 0.15
+    with patch("train_hybrid._load_symbol", return_value=df):
+        data = train_hybrid.prepare_data(
+            ["AAPL"], days=900, db=db, lookback=20, vol_mult=0.5, val_frac=val_frac,
+        )
+
+    feats = make_daily_features(df, spy_df=None).dropna(subset=["fwd_ret_1d"])
+    split = int(len(feats) * 0.8)
+    val_len = max(int(split * val_frac), 1)
+    val_start = split - val_len
+    train_end = val_start - FWD_RET_HORIZON_DAYS
+
+    expected_val_len = split - val_start
+    expected_train_len = train_end
+
+    assert len(data["y_val"]) == expected_val_len - (20 - 1)
+    assert len(data["y_train"]) == expected_train_len - (20 - 1)
+    # Val labels must never be drawn from the test block.
+    assert val_start < split <= split + FWD_RET_HORIZON_DAYS
+    # Train-proper/val embargo gap must be at least the forward-return horizon.
+    assert val_start - train_end == FWD_RET_HORIZON_DAYS

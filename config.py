@@ -129,6 +129,7 @@ class PredictionCfg:
     models: list[str] = field(
         default_factory=lambda: ["daily_logistic", "daily_xgboost", "daily_predictor"]
     )
+    max_model_age_days: int = 30
 
 
 @dataclass
@@ -180,6 +181,7 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
                 "models",
                 PredictionCfg.__dataclass_fields__["models"].default_factory(),
             ),
+            max_model_age_days=prediction_raw.get("max_model_age_days", 30),
         ),
         data=DataCfg(**{k: v for k, v in data_raw.items() if k in DataCfg.__dataclass_fields__}),
         execution=ExecutionCfg(**{k: v for k, v in exec_raw.items() if k in ExecutionCfg.__dataclass_fields__}),

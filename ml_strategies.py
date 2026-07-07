@@ -1,274 +1,103 @@
 """
 ml_strategies.py — Machine learning trading strategies.
 
-Strategy classes for daily prediction (DailyLogistic, DailyXGBoost).
-Intraday strategies (OrdinalLogistic, XGBoost) kept for reference but not
-used in the daily pipeline.
+DailyLogisticStrategy and DailyXGBoostStrategy are thin wrappers that
+delegate signal generation to PredictorStrategy, using the appropriate
+predictor and ThresholdDecision from the new modular layers.
 
-Feature contract: always use FEATURE_COLS from daily_features. Never infer
-column order from DataFrame iteration — training and prediction must agree.
+DailyPredictorStrategy (regression-based rolling-quantile strategy) is a
+standalone strategy wrapper.
+
+Shared preprocessing (_preprocess) and model loading (_load_validated_pickle)
+live in predictors/base.py; _load_pickle is a backward-compatible alias.
 """
-import hashlib
 import logging
 import os
-import pickle
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from base_strategy import BaseStrategy, StrategyConfig
-from daily_features import FEATURE_COLS, make_daily_features
+from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
+from decision_layers.threshold import ThresholdDecision
+from predictor_strategy import PredictorStrategy
+from predictors.base import _preprocess, _load_validated_pickle
+from predictors.logistic import LogisticPredictor
+from predictors.xgboost_pred import XGBPredictor
 
 logger = logging.getLogger(__name__)
 
+# Backward-compatible alias used by DailyPredictorStrategy
+_load_pickle = _load_validated_pickle
+
 try:
-    from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
 
 try:
-    import xgboost as xgb
+    import xgboost as xgb  # noqa: F401
     HAS_XGBOOST = True
 except ImportError:
     HAS_XGBOOST = False
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0, clip to ±5 std per column."""
-    X = np.where(np.isinf(X), np.nan, X)
-    X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
-    return X
-
-
-def _load_pickle(path: str, strategy_name: str) -> dict:
-    """
-    Load a model pickle and validate it contains the required keys.
-
-    Raises RuntimeError (not a silent HOLD) if the file is missing or
-    has an incompatible structure.
-    """
-    if not os.path.exists(path):
-        raise RuntimeError(
-            f"[{strategy_name}] Model file not found: {path}. "
-            "Run train_models.py first."
-        )
-    hash_path = path + ".sha256"
-    if os.path.exists(hash_path):
-        expected = open(hash_path, encoding="ascii").read().strip()
-        with open(path, "rb") as f:
-            actual = hashlib.sha256(f.read()).hexdigest()
-        if actual != expected:
-            raise RuntimeError(
-                f"[{strategy_name}] Integrity check failed for {path}: "
-                "SHA-256 mismatch. The file may have been tampered with. Retrain."
-            )
-    else:
-        logger.warning(
-            "[%s] No hash file found for %s — skipping integrity check. "
-            "Retrain with the current train_models.py to enable verification.",
-            strategy_name, path,
-        )
-    try:
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-    except Exception as exc:
-        raise RuntimeError(
-            f"[{strategy_name}] Failed to unpickle {path}: {exc}"
-        ) from exc
-
-    required = {"model", "scaler", "feature_contract"}
-    missing = required - data.keys()
-    if missing:
-        raise RuntimeError(
-            f"[{strategy_name}] Pickle {path} is missing keys: {missing}. "
-            "Retrain with the current train_models.py."
-        )
-    if data["feature_contract"] != FEATURE_COLS:
-        raise RuntimeError(
-            f"[{strategy_name}] Feature contract mismatch in {path}. "
-            f"Expected {len(FEATURE_COLS)} features, got {len(data['feature_contract'])}. "
-            "Retrain models."
-        )
-    return data
-
-
-def _apply_confidence_filter(
-    preds: np.ndarray, probs: np.ndarray, threshold: float
-) -> np.ndarray:
-    """Zero out predictions whose max probability is below threshold."""
-    confidence = probs.max(axis=1)
-    result = preds.copy()
-    result[confidence < threshold] = 0
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Daily strategies
+# Daily strategies — modular architecture (PredictorStrategy-backed)
 # ---------------------------------------------------------------------------
 
 class DailyLogisticStrategy(BaseStrategy):
-    """
-    Logistic regression predicting next-day return class using daily features.
+    """Logistic regression next-day strategy backed by PredictorStrategy.
 
-    Loads from a pickle with structure:
-      {'model': LogisticRegression, 'scaler': StandardScaler,
-       'feature_contract': FEATURE_COLS, 'confidence_threshold': float, ...}
-
-    Raises RuntimeError on load failure — never silently returns all-HOLD.
+    Loads the trained LogisticPredictor from a pickle and gates signals with
+    ThresholdDecision. All shared orchestration (feature extraction, lag,
+    holding period) is handled by PredictorStrategy.
     """
 
     def __init__(
         self,
         cfg: StrategyConfig,
-        use_pretrained: bool = True,
-        confidence_threshold: float = 0.55,
         model_path: str = "models/daily_logistic.pkl",
         spy_df: Optional[pd.DataFrame] = None,
+        **_kwargs,
     ):
         super().__init__(cfg)
         if not HAS_SKLEARN:
-            raise ImportError("scikit-learn not installed.")
-
-        self.spy_df = spy_df
-        self.model: Optional[LogisticRegression] = None
-        self.scaler: Optional[StandardScaler] = None
-        self.confidence_threshold = float(
-            os.environ.get("LOGISTIC_CONFIDENCE_THRESHOLD", confidence_threshold)
-        )
-
-        if use_pretrained:
-            data = _load_pickle(model_path, "DailyLogisticStrategy")
-            self.model = data["model"]
-            self.scaler = data["scaler"]
-            self.confidence_threshold = data.get(
-                "confidence_threshold", self.confidence_threshold
-            )
-            logger.info("DailyLogisticStrategy: loaded model from %s", model_path)
+            raise ImportError("scikit-learn is not installed.")
+        predictor = LogisticPredictor.load(model_path)
+        decision = ThresholdDecision(predictor.confidence_threshold)
+        self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        daily_feats = make_daily_features(df, spy_df=self.spy_df)
-        X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
-
-        if self.model is not None and self.scaler is not None:
-            X_scaled = self.scaler.transform(X)
-            probs = self.model.predict_proba(X_scaled)
-            # Map through model.classes_ instead of assuming column i == class i
-            classes = self.model.classes_
-            preds = classes[np.argmax(probs, axis=1)]
-            preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-            signals = preds - 1  # {0,1,2} -> {-1,0,1}
-        else:
-            # In-session training fallback (no pre-trained model)
-            y_raw = daily_feats["fwd_ret_1d"].values
-            mask = ~np.isnan(y_raw)
-            from daily_features import discretize_labels
-            y = discretize_labels(y_raw)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = LogisticRegression(
-                max_iter=1000, solver="lbfgs", class_weight="balanced", random_state=42
-            )
-            model.fit(X_scaled[mask], y[mask])
-            probs = model.predict_proba(X_scaled)
-            classes = model.classes_
-            preds = classes[np.argmax(probs, axis=1)]
-            preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-            signals = preds - 1
-
-        raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
-        # Shift by one bar: decision from close[D] executes on bar D+1
-        return raw.shift(1).fillna(0).astype(int)
+        return self._inner.signal(feats, df)
 
 
 class DailyXGBoostStrategy(BaseStrategy):
-    """
-    XGBoost classifier predicting next-day return class using daily features.
-
-    Loads from a pickle with the same structure as DailyLogisticStrategy.
-    No randomness in signal generation — results are deterministic given seeds.
-    """
+    """XGBoost next-day strategy backed by PredictorStrategy."""
 
     def __init__(
         self,
         cfg: StrategyConfig,
-        use_pretrained: bool = True,
-        confidence_threshold: float = 0.55,
         model_path: str = "models/daily_xgboost.pkl",
         spy_df: Optional[pd.DataFrame] = None,
+        **_kwargs,
     ):
         super().__init__(cfg)
         if not HAS_XGBOOST:
-            raise ImportError("xgboost not installed.")
-
-        self.spy_df = spy_df
-        self.model = None
-        self.scaler: Optional[StandardScaler] = None
-        self.confidence_threshold = float(
-            os.environ.get("XGB_CONFIDENCE_THRESHOLD", confidence_threshold)
-        )
-
-        if use_pretrained:
-            data = _load_pickle(model_path, "DailyXGBoostStrategy")
-            self.model = data["model"]
-            self.scaler = data["scaler"]
-            self.confidence_threshold = data.get(
-                "confidence_threshold", self.confidence_threshold
-            )
-            logger.info("DailyXGBoostStrategy: loaded model from %s", model_path)
+            raise ImportError("xgboost is not installed.")
+        predictor = XGBPredictor.load(model_path)
+        decision = ThresholdDecision(predictor.confidence_threshold)
+        self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        daily_feats = make_daily_features(df, spy_df=self.spy_df)
-        X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
+        return self._inner.signal(feats, df)
 
-        if self.model is not None and self.scaler is not None:
-            X_scaled = self.scaler.transform(X)
-            probs = self.model.predict_proba(X_scaled)
-            classes = self.model.classes_
-            preds = classes[np.argmax(probs, axis=1)]
-            preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-            signals = preds - 1
-        else:
-            from daily_features import discretize_labels
-            y_raw = daily_feats["fwd_ret_1d"].values
-            mask = ~np.isnan(y_raw)
-            y = discretize_labels(y_raw)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = xgb.XGBClassifier(
-                n_estimators=200,
-                max_depth=4,
-                learning_rate=0.03,
-                subsample=0.85,
-                colsample_bytree=0.85,
-                min_child_weight=2,
-                gamma=1.0,
-                random_state=42,
-                tree_method="hist",
-                verbosity=0,
-            )
-            model.fit(X_scaled[mask], y[mask])
-            probs = model.predict_proba(X_scaled)
-            classes = model.classes_
-            preds = classes[np.argmax(probs, axis=1)]
-            preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-            signals = preds - 1
 
-        raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
-        return raw.shift(1).fillna(0).astype(int)
-
+# ---------------------------------------------------------------------------
+# Regression-based daily strategy
+# ---------------------------------------------------------------------------
 
 def compute_predictor_signal(
     pred_ret: np.ndarray, signal_quantile: float, threshold_window: int
@@ -345,14 +174,57 @@ class DailyPredictorStrategy(BaseStrategy):
         super().__init__(cfg)
         self.model = None
         self.scaler: Optional[StandardScaler] = None
-        self.signal_quantile = float(os.environ.get("PREDICTOR_SIGNAL_QUANTILE", signal_quantile))
-        self.threshold_window = int(os.environ.get("PREDICTOR_THRESHOLD_WINDOW", threshold_window))
+        # Params set here before pickle load; updated below if pickle has tuned values.
+        self.signal_quantile = signal_quantile
+        self.threshold_window = threshold_window
 
         if use_pretrained:
             data = _load_pickle(model_path, "DailyPredictorStrategy")
             self.model = data["model"]
             self.scaler = data["scaler"]
             logger.info("DailyPredictorStrategy: loaded model from %s", model_path)
+
+            # Three-level priority: env var -> pickle best_* keys -> constructor default
+            sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+            if sq_env is not None:
+                try:
+                    self.signal_quantile = float(sq_env)
+                except ValueError:
+                    # Invalid env var — fall through to pickle key
+                    if "best_signal_quantile" in data:
+                        self.signal_quantile = float(data["best_signal_quantile"])
+                    # else: stays at constructor default
+            else:
+                if "best_signal_quantile" in data:
+                    self.signal_quantile = float(data["best_signal_quantile"])
+                # else: stays at constructor default
+
+            tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+            if tw_env is not None:
+                try:
+                    self.threshold_window = int(tw_env)
+                except ValueError:
+                    # Invalid env var — fall through to pickle key
+                    if "best_threshold_window" in data:
+                        self.threshold_window = int(data["best_threshold_window"])
+                    # else: stays at constructor default
+            else:
+                if "best_threshold_window" in data:
+                    self.threshold_window = int(data["best_threshold_window"])
+                # else: stays at constructor default
+        else:
+            sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
+            if sq_env is not None:
+                try:
+                    self.signal_quantile = float(sq_env)
+                except ValueError:
+                    pass
+            tw_env = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
+            if tw_env is not None:
+                try:
+                    self.threshold_window = int(tw_env)
+                except ValueError:
+                    pass
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         daily_feats = make_daily_features(df)
@@ -362,108 +234,58 @@ class DailyPredictorStrategy(BaseStrategy):
             X_scaled = self.scaler.transform(X)
             pred_ret = self.model.predict(X_scaled)
         else:
-            # In-session training fallback (no pre-trained model)
+            # In-session training fallback (no pre-trained model).
+            #
+            # NOT a full walk-forward re-fit (see walk_forward.py) — this is a
+            # single-split approximation of the same purged-split discipline
+            # used by train_models._prepare_data / train_predictor.prepare_data:
+            # an 80/20 time-ordered train/test split with an embargo gap of
+            # FWD_RET_HORIZON_DAYS rows between them, so no training label's
+            # forward-return horizon overlaps the rows we predict on. The
+            # scaler and model are fit ONLY on the train prefix; predictions
+            # are only emitted for the held-out suffix. Rows before the
+            # embargo (train + embargo gap) get no prediction (HOLD, pred=0)
+            # since they were used for fitting and must never be "predicted".
+            #
+            # This is a non-production toy path: a single stale in-session
+            # fit is far weaker than the walk-forward-tuned pretrained model
+            # and exists only so the strategy still runs end-to-end without
+            # a pickle. Logs a warning every time it's used.
+            logger.warning(
+                "DailyPredictorStrategy: no pretrained model — using in-session "
+                "training fallback (single train/test split with embargo gap, "
+                "NOT walk-forward). This is a toy path for smoke-testing only "
+                "and should not be used to judge live strategy performance."
+            )
             from sklearn.linear_model import Ridge
+
             y_raw = daily_feats["fwd_ret_1d"].values
-            mask = ~np.isnan(y_raw)
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = Ridge(alpha=10.0)
-            model.fit(X_scaled[mask], y_raw[mask])
-            pred_ret = model.predict(X_scaled)
+            n = len(daily_feats)
+            split = int(n * 0.8)
+            test_start = split + FWD_RET_HORIZON_DAYS
+
+            pred_ret = np.zeros(n, dtype=np.float64)
+            if test_start < n:
+                train_mask = ~np.isnan(y_raw[:split])
+                X_train = X[:split][train_mask]
+                y_train = y_raw[:split][train_mask]
+
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                model = Ridge(alpha=10.0)
+                model.fit(X_train_scaled, y_train)
+
+                X_test_scaled = scaler.transform(X[test_start:])
+                pred_ret[test_start:] = model.predict(X_test_scaled)
+            else:
+                logger.warning(
+                    "DailyPredictorStrategy: not enough rows (%d) for an "
+                    "embargoed train/test split — fallback will emit all-HOLD.",
+                    n,
+                )
 
         signals = compute_predictor_signal(
             pred_ret, self.signal_quantile, self.threshold_window
         )
         return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 
-
-# ---------------------------------------------------------------------------
-# Intraday strategies (legacy — not used in daily pipeline)
-# ---------------------------------------------------------------------------
-
-class OrdinalLogisticStrategy(BaseStrategy):
-    """Logistic regression on 5-minute intraday features. Legacy; not in daily pipeline."""
-
-    _INTRADAY_COLS = [
-        "ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z",
-        "momentum_5", "momentum_20", "vp_ratio", "vol_regime", "price_position",
-    ]
-
-    def __init__(self, cfg: StrategyConfig, use_pretrained: bool = True,
-                 confidence_threshold: float = 0.65):
-        super().__init__(cfg)
-        if not HAS_SKLEARN:
-            raise ImportError("scikit-learn not installed.")
-        self.model: Optional[LogisticRegression] = None
-        self.scaler: Optional[StandardScaler] = None
-        self.confidence_threshold = confidence_threshold
-        self._feature_cols: list[str] = []
-
-        if use_pretrained and os.path.exists("models/ordinal_logistic.pkl"):
-            try:
-                with open("models/ordinal_logistic.pkl", "rb") as f:
-                    data = pickle.load(f)
-                self.model = data["model"]
-                self.scaler = data["scaler"]
-                self._feature_cols = data.get("feature_cols", self._INTRADAY_COLS)
-                self.confidence_threshold = data.get("confidence_threshold", confidence_threshold)
-                logger.info("OrdinalLogisticStrategy: loaded intraday model")
-            except Exception as exc:
-                logger.warning("OrdinalLogisticStrategy: failed to load model: %s", exc)
-
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        if self.model is None or self.scaler is None:
-            return pd.Series(0, index=feats.index)
-        cols = [c for c in self._feature_cols if c in feats.columns]
-        if not cols:
-            return pd.Series(0, index=feats.index)
-        X = _preprocess(feats[cols].values.astype(np.float32))
-        X_scaled = self.scaler.transform(X)
-        probs = self.model.predict_proba(X_scaled)
-        preds = np.argmax(probs, axis=1)
-        preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-        signals = preds - 1
-        return self._apply_holding_period(pd.Series(signals, index=feats.index))
-
-
-class XGBoostStrategy(BaseStrategy):
-    """XGBoost on 5-minute intraday features. Legacy; not in daily pipeline."""
-
-    _INTRADAY_COLS = [
-        "ret_1m", "ma_spread", "vol_10", "rsi_14", "vol_z",
-        "momentum_5", "momentum_20", "vp_ratio", "vol_regime", "price_position",
-    ]
-
-    def __init__(self, cfg: StrategyConfig, use_pretrained: bool = True,
-                 confidence_threshold: float = 0.60):
-        super().__init__(cfg)
-        if not HAS_XGBOOST:
-            raise ImportError("xgboost not installed.")
-        self.model = None
-        self.confidence_threshold = confidence_threshold
-        self._feature_cols: list[str] = []
-
-        if use_pretrained and os.path.exists("models/xgboost.pkl"):
-            try:
-                with open("models/xgboost.pkl", "rb") as f:
-                    data = pickle.load(f)
-                self.model = data["model"]
-                self._feature_cols = data.get("feature_cols", self._INTRADAY_COLS)
-                self.confidence_threshold = data.get("confidence_threshold", confidence_threshold)
-                logger.info("XGBoostStrategy: loaded intraday model")
-            except Exception as exc:
-                logger.warning("XGBoostStrategy: failed to load model: %s", exc)
-
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
-        if self.model is None:
-            return pd.Series(0, index=feats.index)
-        cols = [c for c in self._feature_cols if c in feats.columns]
-        if not cols:
-            return pd.Series(0, index=feats.index)
-        X = _preprocess(feats[cols].values.astype(np.float32))
-        probs = self.model.predict_proba(X)
-        preds = np.argmax(probs, axis=1)
-        preds = _apply_confidence_filter(preds, probs, self.confidence_threshold)
-        signals = preds - 1
-        return self._apply_holding_period(pd.Series(signals, index=feats.index))

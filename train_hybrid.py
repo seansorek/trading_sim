@@ -116,16 +116,26 @@ def prepare_data(
     db: DB,
     lookback: int,
     vol_mult: float = 0.5,
+    val_frac: float = 0.15,
 ) -> dict:
     """
-    Build training/test arrays.
+    Build training/validation/test arrays.
+
+    The validation slice is carved out of the TRAIN period only — it is the
+    most recent `val_frac` portion of each symbol's train-period rows, never
+    randomly sampled, so it never looks ahead of the (earlier) train-proper
+    rows it's meant to validate. The test set is only ever used once, after
+    training/checkpoint-selection has completed, for final reporting (see
+    train_hybrid()). Embargo gaps (>= FWD_RET_HORIZON_DAYS rows) separate
+    train-proper/val and val/test so no label's forward-return horizon
+    reaches into the next split.
 
     Returns dict with keys:
-      X_train_seq, X_test_seq        — (M, lookback, n_feat) sequences (scaled)
-      X_train_last, X_test_last      — (M, n_feat) last-bar features (scaled)
-      y_train, y_test                — labels
-      scaler                         — fitted StandardScaler on raw features
-      used_symbols                   — list of symbols that yielded data
+      X_train_seq, X_val_seq, X_test_seq   — (M, lookback, n_feat) sequences (scaled)
+      X_train_last, X_val_last, X_test_last — (M, n_feat) last-bar features (scaled)
+      y_train, y_val, y_test                — labels
+      scaler                                 — fitted StandardScaler on raw features
+      used_symbols                           — list of symbols that yielded data
     """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -136,6 +146,7 @@ def prepare_data(
 
     # First pass: collect per-symbol raw features + labels, do per-symbol temporal split
     train_blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    val_blocks: list[tuple[np.ndarray, np.ndarray]] = []
     test_blocks: list[tuple[np.ndarray, np.ndarray]] = []
     used_symbols: list[str] = []
 
@@ -163,17 +174,32 @@ def prepare_data(
 
         split = int(len(X_sym) * 0.8)
         # Embargo gap: drop rows whose fwd_ret_1d horizon would reach into the
-        # test period, so train labels never depend on test-period prices.
+        # test period, so train/val labels never depend on test-period prices.
         test_start = split + FWD_RET_HORIZON_DAYS
         if test_start + lookback >= len(X_sym):
             logger.warning("  %s: too few rows for embargo gap, skipping", sym)
             continue
-        train_blocks.append((X_sym[:split], y_sym[:split]))
+
+        # Carve a validation slice out of the TRAIN period (the most recent
+        # val_frac portion of it), with its own embargo gap against
+        # train-proper, so early stopping never touches the test set.
+        val_len = max(int(split * val_frac), 1)
+        val_start = split - val_len
+        train_end = val_start - FWD_RET_HORIZON_DAYS
+        if train_end <= lookback:
+            logger.warning(
+                "  %s: too few rows for train/val embargo gap, skipping", sym,
+            )
+            continue
+
+        train_blocks.append((X_sym[:train_end], y_sym[:train_end]))
+        val_blocks.append((X_sym[val_start:split], y_sym[val_start:split]))
         test_blocks.append((X_sym[test_start:], y_sym[test_start:]))
         used_symbols.append(sym)
         logger.info(
-            "  %s: %d rows (train=%d embargo=%d test=%d) class dist %s",
-            sym, len(y_sym), split, FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
+            "  %s: %d rows (train=%d embargo=%d val=%d embargo=%d test=%d) class dist %s",
+            sym, len(y_sym), train_end, val_start - train_end, split - val_start,
+            FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
             np.bincount(y_sym).tolist(),
         )
 
@@ -196,28 +222,38 @@ def prepare_data(
         return np.vstack(out_X), np.concatenate(out_y), starts[:-1]
 
     X_train_flat, y_train_flat, train_starts = _scale(train_blocks)
+    X_val_flat, y_val_flat, val_starts = _scale(val_blocks)
     X_test_flat, y_test_flat, test_starts = _scale(test_blocks)
 
     X_train_seq, X_train_last, y_train = build_sequences(
         X_train_flat, y_train_flat, lookback, train_starts
+    )
+    X_val_seq, X_val_last, y_val = build_sequences(
+        X_val_flat, y_val_flat, lookback, val_starts
     )
     X_test_seq, X_test_last, y_test = build_sequences(
         X_test_flat, y_test_flat, lookback, test_starts
     )
 
     logger.info(
-        "Train: %d sequences  Test: %d sequences  Features per bar: %d  Lookback: %d",
-        len(X_train_seq), len(X_test_seq), X_train_seq.shape[2], lookback,
+        "Train: %d sequences  Val: %d sequences  Test: %d sequences  "
+        "Features per bar: %d  Lookback: %d",
+        len(X_train_seq), len(X_val_seq), len(X_test_seq), X_train_seq.shape[2], lookback,
     )
-    logger.info("Train labels: %s   Test labels: %s",
-                np.bincount(y_train).tolist(), np.bincount(y_test).tolist())
+    logger.info(
+        "Train labels: %s   Val labels: %s   Test labels: %s",
+        np.bincount(y_train).tolist(), np.bincount(y_val).tolist(), np.bincount(y_test).tolist(),
+    )
 
     return {
         "X_train_seq": X_train_seq,
+        "X_val_seq": X_val_seq,
         "X_test_seq": X_test_seq,
         "X_train_last": X_train_last,
+        "X_val_last": X_val_last,
         "X_test_last": X_test_last,
         "y_train": y_train,
+        "y_val": y_val,
         "y_test": y_test,
         "scaler": scaler,
         "used_symbols": used_symbols,
@@ -232,7 +268,9 @@ def train_hybrid(args) -> dict:
     logger.info("Symbols: %s", symbols)
     logger.info("Days: %d  Lookback: %d", args.days, args.lookback)
 
-    data = prepare_data(symbols, args.days, db, args.lookback, vol_mult=args.vol_mult)
+    data = prepare_data(
+        symbols, args.days, db, args.lookback, vol_mult=args.vol_mult, val_frac=args.val_frac,
+    )
 
     # ----- Pretrain transformer -----
     tcfg = TransformerCfg(
@@ -251,10 +289,13 @@ def train_hybrid(args) -> dict:
     logger.info("Transformer params: %d", n_params)
 
     logger.info("Pretraining transformer...")
+    # Early stopping / checkpoint selection uses the validation slice carved
+    # out of the TRAIN period (see prepare_data) — never the test set. The
+    # test set is touched exactly once below, after the model is frozen.
     tr_stats = train_transformer(
         model,
         data["X_train_seq"], data["y_train"],
-        data["X_test_seq"], data["y_test"],
+        data["X_val_seq"], data["y_val"],
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -446,6 +487,9 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--patience", type=int, default=12)
+    p.add_argument("--val-frac", type=float, default=0.15,
+                   help="Fraction of the train period (most recent, time-respecting) "
+                        "held out for early-stopping validation; never touches the test set")
 
     # XGBoost hyperparams
     p.add_argument("--xgb-n-estimators", type=int, default=300)

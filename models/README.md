@@ -2,6 +2,122 @@
 
 This directory contains pre-trained models committed to the repo so GitHub Actions can load them without retraining on every run.
 
+## Model Cards
+
+One entry per model that is trained or deployed in this project. "Live" means the model
+key appears in `prediction.models` in `config/default.yaml` and is loaded by
+`predict_next_day_lite.py` on every GitHub Actions run.
+
+---
+
+### daily_logistic — Live
+
+| Field | Value |
+|---|---|
+| **Status** | Live — in `prediction.models` |
+| **Algorithm** | `sklearn.linear_model.LogisticRegression` (multinomial, 3-class) |
+| **Task** | Classify next-day direction: `SELL=0 / HOLD=1 / BUY=2` |
+| **Feature set** | `daily_v3` — 25 normalized daily technical features (see `daily_features.FEATURE_COLS`) |
+| **Label construction** | 3-day cumulative forward return (`FWD_RET_HORIZON_DAYS=3`) thresholded by volatility-scaled bands (`--vol-mult`) |
+| **Training window** | ~1 000 calendar days (≈ 670 trading bars) per symbol, 10 symbols pooled |
+| **Train/test split** | Purged + embargoed: 3-bar gap at split boundary to prevent label leakage |
+| **Normalization** | `StandardScaler` fit on training data, stored in pickle alongside the model |
+| **Confidence threshold** | 0.55 (softmax probability of the predicted class); non-HOLD signals below this threshold are converted to HOLD |
+| **OOS test accuracy** | At or within ~2 pp of the majority-class (HOLD) baseline — no consistent genuine lift (see "Accuracy" section below for full investigation) |
+| **OOS directional accuracy** | Not meaningfully above 50% |
+| **Backtest Sharpe** | Negative across tested windows (10-symbol, 700-day) |
+| **Known limitations** | Single-bar technical features do not produce genuine classification lift once leakage is correctly excluded. Hyperparameter sweeps (Bayesian via `--optimize`, extensive manual search) confirmed no configuration escapes the baseline. |
+
+**Honest caveat:** The accuracy number printed during training (`~60%`) reflects the HOLD-majority class prior, not predictive skill. Raising `--vol-mult` inflates the number by shrinking SELL/BUY classes toward a constant HOLD predictor — that is not a meaningful accuracy improvement. See the "Accuracy" section for the full investigation.
+
+---
+
+### daily_xgboost — Live
+
+| Field | Value |
+|---|---|
+| **Status** | Live — in `prediction.models` |
+| **Algorithm** | `xgboost.XGBClassifier` (`multi:softprob`, 3-class) |
+| **Task** | Same 3-class direction classification as `daily_logistic` |
+| **Feature set** | `daily_v3` — same 25 features |
+| **Label construction** | Same as `daily_logistic` |
+| **Training window** | Same as `daily_logistic` |
+| **Train/test split** | Same purged + embargoed split |
+| **Normalization** | `StandardScaler` (same pattern) |
+| **Confidence threshold** | 0.55 (softmax probability) |
+| **OOS test accuracy** | At majority-class baseline (~61%); no consistent lift over `daily_logistic` |
+| **Backtest Sharpe** | Negative across tested windows |
+| **Hyperparameters** | `n_estimators=200`, `max_depth=4`, `lr=0.03`, `subsample=0.85`, `colsample_bytree=0.85`, `min_child_weight=2`, `gamma=1.0` (from `config/default.yaml:strategies.xgboost`) |
+| **Known limitations** | Same as `daily_logistic`. XGBoost appears to over-regularize away the weak signal that Ridge can detect on this feature set — XGBoost regressor on the same continuous target also collapses to a near-constant predictor (IC ≈ 0). |
+
+---
+
+### daily_predictor — Live (Preferred)
+
+| Field | Value |
+|---|---|
+| **Status** | Live — in `prediction.models`. Most promising signal of the three live models. |
+| **Algorithm** | `sklearn.linear_model.Ridge` (regression) |
+| **Task** | Forecast continuous 3-day forward return (`fwd_ret_1d` in code — the label horizon is `FWD_RET_HORIZON_DAYS=3` trading bars) |
+| **Feature set** | `daily_v3` — same 25 features |
+| **Label construction** | Continuous cumulative forward return (not discretized) |
+| **Training window** | ~2 500 calendar days (~1 718 trading bars) per symbol, 10 symbols pooled (use `--days 2500` for retraining) |
+| **Train/test split** | Same purged + embargoed split (3-bar gap) |
+| **Normalization** | `StandardScaler` + `±5-std clip` preprocessing (`train_models._preprocess`) |
+| **OOS Spearman IC** | +0.06 (positive, statistically meaningful given n; classifiers show IC ≈ 0) |
+| **OOS R²** | +0.012 (small but real; confirms the regression picks up a signal the classifiers discarded) |
+| **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `|predicted return|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Default: `signal_quantile=0.7`, `threshold_window=60` |
+| **Backtest Sharpe** | +0.27 (10-symbol, 700-day window, untuned defaults) — the only positive Sharpe among the three live models |
+| **Average return** | +0.18% per signal (same window) |
+| **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle |
+| **Live confidence** | Percentile rank of today's `|predicted return|` within the trailing `threshold_window` — NOT a calibrated probability |
+| **Known limitations** | Sharpe 0.27 is weak in absolute terms. Untuned parameters and a single backtest window — not a proven deployable edge. No walk-forward-of-walk-forward validation yet. The positive IC is real but modest. |
+
+**Honest caveat:** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding, but a single untuned backtest is not sufficient validation for capital deployment.
+
+---
+
+### daily_hybrid — Built, Not Deployed
+
+| Field | Value |
+|---|---|
+| **Status** | Pickle exists (`models/daily_hybrid.pkl`), **not** in `prediction.models` — not loaded by live pipeline |
+| **Algorithm** | XGBoost + transformer hybrid (see `hybrid_model.py`, trained via `train_hybrid.py`) |
+| **Task** | Same 3-class direction classification |
+| **Feature set** | `daily_v3` — same 25 features |
+| **OOS accuracy** | At majority-class baseline — transformer component does not improve over `daily_xgboost` alone on this feature set |
+| **Known limitations** | An earlier claim of ~58% accuracy was a data-leakage artifact (pre-leakage-fix). After correcting the train/test split, results converge to the classifier baseline. The transformer adds complexity without signal benefit on single-bar daily features. |
+
+To deploy: add `daily_hybrid` to `prediction.models` in `config/default.yaml` and register `"daily_hybrid": "classifier"` in `predict_next_day_lite.MODEL_KINDS`. Not recommended until an independent leakage-free validation shows consistent lift.
+
+---
+
+### daily_dqn — Built, Not Deployed
+
+| Field | Value |
+|---|---|
+| **Status** | `models/dqn_agent.pt` loaded opportunistically at runtime (if file exists), **not** in `prediction.models` config list |
+| **Algorithm** | PyTorch DQN with target network and experience replay |
+| **Actions** | `HOLD=0, LONG=1, SHORT=2` mapped to `HOLD/BUY/SELL` |
+| **State** | Rolling 20-day window × 25 features (flattened to 500-dim vector) |
+| **Trained via** | `train_dqn.py --symbol SPY --days 500 --episodes 30` |
+| **Known limitations** | RL on noisy daily financial data is extremely sample-inefficient. Not validated OOS; included for research purposes only. |
+
+---
+
+### When to Retrain
+
+Retrain when **any** of the following trigger conditions is met:
+
+| Condition | Details |
+|---|---|
+| **Age** | Any model's pickle `mtime` exceeds `prediction.max_model_age_days` (currently 30 days). `predict_next_day_lite.py` checks this at startup and posts a Discord warning embed. |
+| **IC degradation** | `daily_predictor` trailing-20 Spearman IC (tracked in `ic_history` DB table and displayed in each Discord header) drops below 0.0 for **10 consecutive trading days**. The classifiers are already at baseline — IC monitoring is most meaningful for `daily_predictor`. |
+| **Feature contract bump** | `daily_features.FEATURE_SET_NAME` changes (e.g. `daily_v3` → `daily_v4`). All pickles are immediately incompatible — retrain everything before the next prediction run. Check: `predict_next_day_lite.py` raises `RuntimeError` with "Feature contract mismatch" on the stale model and skips it. |
+| **New symbol universe** | If `prediction.symbols` grows to include securities with very different return characteristics (e.g. crypto assets on a daily equity model), consider retraining on the expanded symbol set. |
+
+See `docs/runbook.md` for the exact retraining commands.
+
 ## Files
 
 - `daily_logistic.pkl` — Trained LogisticRegression model + StandardScaler + feature contract
@@ -103,7 +219,7 @@ proven edge.
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay
 - **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)
-- **State**: Rolling window of last 20 days × 28 features (flattened)
+- **State**: Rolling window of last 20 days × 25 features (flattened to 500-dim vector)
 - **Trained via**: `train_dqn.py`
 
 ## Updating models

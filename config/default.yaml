@@ -19,6 +19,7 @@ symbols:
 # (predict_next_day_lite.py loads exactly this list; a model missing its pickle is
 # logged and skipped, not a hard failure). See models/README.md for what each does.
 prediction:
+  max_model_age_days: 30
   models:
     - daily_logistic
     - daily_xgboost
@@ -109,9 +110,6 @@ strategies:
     q_advantage_threshold: 1.0
     confidence_threshold: 2.0
     transaction_cost_bps: 5.0
-  hybrid:
-    # Hybrid combines logistic + xgboost + dqn with majority voting.
-    require_agreement: 2  # Number of models that must agree for BUY/SELL.
 
 # Bayesian hyperparameter search settings (used when --optimize is passed to train_models.py).
 optimize:

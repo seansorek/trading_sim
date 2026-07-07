@@ -15,10 +15,13 @@ import os
 import pickle
 import random
 import sys
+import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 
 from config import get_config
@@ -27,14 +30,63 @@ from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
 from ml_strategies import compute_predictor_signal
-from signal_monitor import score_realized_ic, check_signal_drift, _signal_to_score
+from signal_monitor import score_realized_ic, check_signal_drift
 from train_models import _preprocess
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        doc = {
+            "ts": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "run_id": getattr(record, "run_id", ""),
+        }
+        if record.exc_info:
+            doc["exc"] = self.formatException(record.exc_info)
+        return json.dumps(doc)
+
+
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = self.run_id
+        return True
+
+
+def _configure_logging(run_id: str) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(_JsonFormatter())
+    handler.addFilter(_RunIdFilter(run_id))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 logger = logging.getLogger(__name__)
+
+
+def check_model_staleness(models: dict[str, Any], max_age_days: int) -> dict[str, int]:
+    """Return {model_key: age_days} for pkl models older than max_age_days."""
+    stale: dict[str, int] = {}
+    now = datetime.utcnow()
+    for model_key, data in models.items():
+        path = data.get("_artifact_path") if isinstance(data, dict) else None
+        if path is None:
+            continue
+        try:
+            mtime = datetime.utcfromtimestamp(os.path.getmtime(path))
+            age_days = (now - mtime).days
+            if age_days > max_age_days:
+                stale[model_key] = age_days
+        except OSError:
+            pass
+    return stale
+
 
 _SIGNAL_NAMES = ["SELL", "HOLD", "BUY"]  # index matches label {0,1,2}
 
@@ -172,8 +224,8 @@ def _predict_regressor_signal(
 
 
 def load_models(
-    db: Optional[DB] = None, model_keys: Optional[list] = None
-) -> dict:
+    db: Optional[DB] = None, model_keys: Optional[list[str]] = None
+) -> dict[str, Any]:
     """
     Load all available daily model pickles.
 
@@ -202,6 +254,7 @@ def load_models(
         path = _resolve_path(model_key, canonical)
         try:
             models[model_key] = _load_pkl(path, model_key)
+            models[model_key]["_artifact_path"] = path
             logger.info("Loaded %s from %s", model_key, path)
         except RuntimeError as exc:
             logger.warning("%s", exc)
@@ -226,12 +279,12 @@ def load_models(
 
 def predict_symbol(
     symbol: str,
-    models: dict,
+    models: dict[str, Any],
     db: Optional[DB] = None,
     dqn_window: int = 20,
     history_days: int = 1000,
-    spy_df=None,
-) -> dict:
+    spy_df: Optional[pd.DataFrame] = None,
+) -> dict[str, Any]:
     result: dict = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
 
     end_date = datetime.now()
@@ -403,6 +456,7 @@ def send_discord(
     webhook_url: str,
     ic_results: dict | None = None,
     drift_warnings: dict | None = None,
+    stale_models: dict[str, int] | None = None,
 ) -> bool:
     if not webhook_url:
         logger.warning("No Discord webhook URL — skipping notification")
@@ -422,11 +476,14 @@ def send_discord(
 
     # Organize by strategy → signal
     by_strategy: dict = {}
+    vote_counts: dict = defaultdict(lambda: {"BUY": 0, "SELL": 0})
+    symbol_prices: dict = {}
     for pred in predictions:
         if "error" in pred:
             continue
         symbol = pred["symbol"]
         price = pred.get("price", 0.0)
+        symbol_prices[symbol] = price
         for model_key, model_pred in pred.get("predictions", {}).items():
             if "signal" not in model_pred:
                 continue
@@ -436,13 +493,37 @@ def send_discord(
             by_strategy[model_key][signal].append(
                 {"symbol": symbol, "price": price, "confidence": confidence}
             )
+            if signal in ("BUY", "SELL"):
+                vote_counts[symbol][signal] += 1
 
     embeds = []
     color_map = {"BUY": 0x00FF00, "SELL": 0xFF0000, "HOLD": 0xFFFF00}
 
+    # Consensus block — symbols where ≥2 models agree, listed first
+    for sig_type in ("BUY", "SELL"):
+        agreed = sorted(
+            [
+                (sym, symbol_prices.get(sym, 0.0))
+                for sym, votes in vote_counts.items()
+                if votes[sig_type] >= 2
+            ],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        if agreed:
+            lines = [f"**{sym}** ${price:.2f}" for sym, price in agreed]
+            embeds.append({
+                "title": f"★ Consensus — {sig_type} ({len(agreed)})",
+                "description": "\n".join(lines),
+                "color": color_map[sig_type],
+            })
+
     for strategy in sorted(by_strategy):
         display = strategy_display.get(strategy, strategy)
+        has_non_hold = bool(by_strategy[strategy]["BUY"] or by_strategy[strategy]["SELL"])
         for sig_type in ("BUY", "SELL", "HOLD"):
+            if sig_type == "HOLD" and not has_non_hold:
+                continue
             recs = sorted(
                 by_strategy[strategy][sig_type],
                 key=lambda x: x["confidence"],
@@ -475,6 +556,19 @@ def send_discord(
                     ),
                     "color": 0xFFFF00,
                 })
+
+    if stale_models:
+        stale_embeds = [
+            {
+                "title": f"⚠️ Stale Model — {model_key}",
+                "description": (
+                    f"The `{model_key}` model is {age_days} days old — consider retraining."
+                ),
+                "color": 0xFFFF00,
+            }
+            for model_key, age_days in sorted(stale_models.items())
+        ]
+        embeds[0:0] = stale_embeds
 
     if not embeds:
         logger.warning("No embeds to send to Discord")
@@ -518,6 +612,9 @@ def send_discord(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    run_id = str(uuid.uuid4())
+    _configure_logging(run_id)
+
     np.random.seed(42)
     random.seed(42)
     torch.manual_seed(42)
@@ -555,6 +652,10 @@ def main() -> None:
     if not models:
         logger.error("No trained models found. Run train_models.py first.")
         sys.exit(1)
+
+    stale = check_model_staleness(models, cfg.prediction.max_model_age_days)
+    for model_key, age_days in stale.items():
+        logger.warning("Model %s is %d days old — consider retraining", model_key, age_days)
 
     # --- Realized IC scoring ---
     ic_results: dict = {}
@@ -606,6 +707,7 @@ def main() -> None:
     drift_warnings: dict = {}
     if args.history:
         try:
+            from signal_monitor import _signal_to_score  # noqa: PLC0415 — deferred to avoid startup ImportError
             today_mean_scores: dict = {}
             for pred in predictions:
                 if "error" in pred:
@@ -652,7 +754,7 @@ def main() -> None:
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
     if webhook:
-        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings):
+        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings, stale_models=stale):
             logger.info("Discord notification sent.")
         else:
             logger.warning("Discord notification failed.")
