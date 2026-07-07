@@ -112,6 +112,60 @@ def test_predictor_strategy_inline_training_produces_valid_signals():
     assert len(sig) > 0
 
 
+def test_predictor_strategy_fallback_no_train_test_overlap(caplog):
+    """Issue #92 regression test: the in-session training fallback (no
+    pretrained model) must not fit and predict on the same rows.
+
+    It should apply the same purged-split discipline as
+    train_models._prepare_data / train_predictor.prepare_data: an 80/20
+    time-ordered split with an embargo gap of FWD_RET_HORIZON_DAYS rows
+    between train and test. We verify this behaviorally by monkeypatching
+    Ridge.fit to record exactly which row-count was used for training, and
+    confirming predictions are only nonzero (i.e., only actually produced)
+    for the held-out suffix, never the rows used to fit the model.
+    """
+    import logging
+    from sklearn.linear_model import Ridge
+
+    df = _make_price_df(n=200)
+    daily_feats = make_daily_features(df)
+    n = len(daily_feats)
+    split = int(n * 0.8)
+    test_start = split + FWD_RET_HORIZON_DAYS
+    assert test_start < n, "fixture must be large enough to exercise the split"
+
+    captured = {}
+    orig_fit = Ridge.fit
+
+    def spy_fit(self, X, y, *args, **kwargs):
+        captured["n_train_rows"] = len(y)
+        return orig_fit(self, X, y, *args, **kwargs)
+
+    cfg = StrategyConfig(name="daily_predictor")
+    strat = DailyPredictorStrategy(cfg, use_pretrained=False, threshold_window=20)
+
+    with caplog.at_level(logging.WARNING):
+        with patch.object(Ridge, "fit", spy_fit):
+            sig = strat.signal(None, df)
+
+    # The model must have been trained on no more than the train-prefix rows
+    # (fewer, once NaNs in fwd_ret_1d within the prefix are masked out) —
+    # never on the full series.
+    assert captured["n_train_rows"] <= split
+
+    # Rows [0, test_start) were used for training (or fall in the embargo
+    # gap) and must never receive a real prediction — the implementation
+    # zero-fills them, which also means they can only ever emit HOLD.
+    # Rows [test_start, n) are the genuinely held-out prediction window.
+    assert len(sig) == n
+    trained_or_embargoed = sig.iloc[:test_start]
+    assert set(trained_or_embargoed.unique()).issubset({0})
+
+    # The fallback must be clearly flagged as a non-production toy path.
+    assert any("toy path" in rec.message or "in-session training fallback" in rec.message
+                for rec in caplog.records)
+
+
 def test_predictor_strategy_raises_without_artifact():
     """Pretrained mode with a missing artifact must raise, not silently
     return all-HOLD — same non-silent-failure contract as the other
