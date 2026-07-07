@@ -25,13 +25,19 @@ import pandas as pd
 import torch
 
 from config import get_config
-from data_loader import load_yfinance
+from data_loader import check_cache_coverage, check_cache_freshness, load_yfinance
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
 from ml_strategies import compute_predictor_signal
 from signal_monitor import score_realized_ic, check_signal_drift
 from train_models import _preprocess
+
+# Maximum number of business days the cached data's latest bar can lag behind
+# the requested end date before we consider the cache stale and re-fetch.
+# Matches train_models._STALE_TOLERANCE_BDAYS so live prediction and training
+# share the same cache-freshness contract.
+_STALE_TOLERANCE_BDAYS = 4
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -274,6 +280,45 @@ def load_models(
 
 
 # ---------------------------------------------------------------------------
+# Cache-aware data loading
+# ---------------------------------------------------------------------------
+
+def _load_bars_cached(
+    symbol: str, start: str, end: str, db: Optional[DB] = None
+) -> Optional[pd.DataFrame]:
+    """Fetch daily bars, reusing the DB cache when it is fresh and complete.
+
+    Mirrors train_models._load_symbol's cache contract: the DB cache is used
+    as-is when its latest bar is within _STALE_TOLERANCE_BDAYS of *end* and
+    its earliest bar covers *start*; otherwise the full window is re-fetched
+    from yfinance and the DB is updated. With no *db*, always fetches the
+    full window directly from yfinance (unchanged legacy behavior).
+    """
+    if db is None:
+        return load_yfinance(symbol, start=start, end=end, interval="1d")
+
+    cached = db.load_bars(symbol, "1d", start, end)
+    if cached is not None and len(cached) >= 50:
+        fresh = check_cache_freshness(cached, end, _STALE_TOLERANCE_BDAYS)
+        covers_start = check_cache_coverage(cached, start)
+        if fresh and covers_start:
+            logger.info("%s: loaded %d bars from DB cache", symbol, len(cached))
+            return cached
+        elif not covers_start:
+            logger.info(
+                "%s: cache missing older history (earliest bar %s, need <= start %s), re-fetching",
+                symbol, cached.index.min().date(), pd.to_datetime(start).date(),
+            )
+        else:
+            logger.info("%s: cache stale, re-fetching", symbol)
+
+    df = load_yfinance(symbol, start=start, end=end, interval="1d")
+    if df is not None and len(df) >= 50:
+        db.upsert_bars(symbol, "1d", df)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Per-symbol prediction
 # ---------------------------------------------------------------------------
 
@@ -291,11 +336,11 @@ def predict_symbol(
     start_date = end_date - timedelta(days=history_days)
 
     try:
-        df = load_yfinance(
+        df = _load_bars_cached(
             symbol,
             start=start_date.strftime("%Y-%m-%d"),
             end=end_date.strftime("%Y-%m-%d"),
-            interval="1d",
+            db=db,
         )
     except Exception as exc:
         result["error"] = f"Data fetch failed: {exc}"
@@ -688,11 +733,11 @@ def main() -> None:
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=cfg.data.history_days)
-        spy_df = load_yfinance(
+        spy_df = _load_bars_cached(
             "SPY",
             start=start_date.strftime("%Y-%m-%d"),
             end=end_date.strftime("%Y-%m-%d"),
-            interval="1d",
+            db=db,
         )
     except Exception as exc:
         logger.warning("Could not load SPY data for relative features: %s", exc)

@@ -197,6 +197,175 @@ class TestPredictSymbol:
 
 
 # ---------------------------------------------------------------------------
+# _load_bars_cached / predict_symbol DB-cache reuse (#93)
+# ---------------------------------------------------------------------------
+
+def _make_ohlcv_ending_today(n: int = 100) -> pd.DataFrame:
+    """Like _make_ohlcv, but the index ends at today's date so the cache
+    lines up with predict_symbol's datetime.now()-based date range."""
+    rng = np.random.default_rng(0)
+    close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.012, n))
+    idx = pd.date_range(end=pd.Timestamp.now().normalize(), periods=n, freq="B")
+    return pd.DataFrame(
+        {
+            "open": close * 0.999,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": rng.integers(500_000, 10_000_000, n).astype(float),
+        },
+        index=idx,
+    )
+
+
+class TestLoadBarsCached:
+    """predict_symbol should reuse the DB bar cache instead of re-fetching
+    the full history_days window from yfinance on every run (#93)."""
+
+    def test_no_db_always_fetches_full_window(self):
+        """With db=None, behavior is unchanged: always fetch directly."""
+        from predict_next_day_lite import _load_bars_cached
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)) as mock_fetch:
+            result = _load_bars_cached("AAPL", "2023-01-01", "2023-06-01", db=None)
+
+        mock_fetch.assert_called_once()
+        assert result is not None and len(result) == 100
+
+    def test_fresh_complete_cache_skips_yfinance_fetch(self, tmp_path):
+        """When the DB cache is fresh and covers the requested start, no
+        network fetch should happen — this is the core optimization."""
+        from db import DB
+        from predict_next_day_lite import _load_bars_cached
+
+        db = DB(str(tmp_path / "test.db"))
+        data = _make_ohlcv(100)
+        db.upsert_bars("AAPL", "1d", data)
+
+        latest_bar = data.index.max()
+        end_date = (latest_bar + pd.tseries.offsets.BDay(1)).strftime("%Y-%m-%d")
+        start_date = data.index.min().strftime("%Y-%m-%d")
+
+        with patch("predict_next_day_lite.load_yfinance") as mock_fetch:
+            result = _load_bars_cached("AAPL", start_date, end_date, db=db)
+
+        mock_fetch.assert_not_called()
+        assert result is not None
+        assert len(result) == 100
+
+    def test_stale_cache_triggers_fetch_and_upsert(self, tmp_path):
+        """When the cache is stale (latest bar too old), fall back to a full
+        yfinance fetch and write the fresh data back into the DB."""
+        from db import DB
+        from predict_next_day_lite import _load_bars_cached
+
+        db = DB(str(tmp_path / "test.db"))
+        old_data = _make_ohlcv(100)
+        db.upsert_bars("AAPL", "1d", old_data)
+
+        # Request an end date far past the cache's latest bar.
+        latest_bar = old_data.index.max()
+        end_date = (latest_bar + pd.tseries.offsets.BDay(30)).strftime("%Y-%m-%d")
+        start_date = old_data.index.min().strftime("%Y-%m-%d")
+
+        fresh_data = _make_ohlcv(130)
+        with patch("predict_next_day_lite.load_yfinance", return_value=fresh_data) as mock_fetch:
+            result = _load_bars_cached("AAPL", start_date, end_date, db=db)
+
+        mock_fetch.assert_called_once()
+        assert result is not None and len(result) == 130
+
+        # The fresh fetch should have been persisted back into the DB cache
+        # (query a wide-open range to avoid an off-by-one at the exact
+        # boundary date).
+        recached = db.load_bars("AAPL", "1d", "1990-01-01", "2100-01-01")
+        assert recached is not None and len(recached) == 130
+
+    def test_cache_missing_older_history_triggers_fetch(self, tmp_path):
+        """A cache that is fresh but doesn't reach back to the requested
+        start must not be silently reused (regression class from #25,
+        applied here to the prediction path)."""
+        from db import DB
+        from predict_next_day_lite import _load_bars_cached
+
+        db = DB(str(tmp_path / "test.db"))
+        short_data = _make_ohlcv(100)
+        db.upsert_bars("AAPL", "1d", short_data)
+
+        latest_bar = short_data.index.max()
+        end_date = (latest_bar + pd.tseries.offsets.BDay(1)).strftime("%Y-%m-%d")
+        # Ask for history starting well before the cache's earliest bar.
+        much_earlier_start = (short_data.index.min() - pd.tseries.offsets.BDay(500)).strftime("%Y-%m-%d")
+
+        long_data = _make_ohlcv(600)
+        with patch("predict_next_day_lite.load_yfinance", return_value=long_data) as mock_fetch:
+            result = _load_bars_cached("AAPL", much_earlier_start, end_date, db=db)
+
+        mock_fetch.assert_called_once()
+        assert result is not None and len(result) == 600
+
+    def test_predict_symbol_uses_cache_and_skips_fetch(self, tmp_path):
+        """End-to-end: predict_symbol with a warm, fresh DB cache should not
+        call yfinance at all."""
+        from db import DB
+
+        db = DB(str(tmp_path / "test.db"))
+        data = _make_ohlcv_ending_today(200)
+        db.upsert_bars("AAPL", "1d", data)
+
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+        models = {
+            "daily_logistic": {
+                "model": clf,
+                "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS),
+                "confidence_threshold": 0.55,
+            }
+        }
+        feats_df = _make_features_df(200)
+
+        # history_days must be short enough that the requested start falls
+        # within the cached window's coverage tolerance.
+        with patch("predict_next_day_lite.load_yfinance") as mock_fetch, \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol(
+                "AAPL", models, db=db, history_days=200,
+            )
+
+        mock_fetch.assert_not_called()
+        assert "error" not in result
+        assert result["predictions"]["daily_logistic"]["signal"] == "BUY"
+
+    def test_predict_symbol_falls_back_to_fetch_when_cache_empty(self, tmp_path):
+        """With an empty DB, predict_symbol must still fetch from yfinance
+        (no regression to 'cache-only, no data' behavior)."""
+        from db import DB
+
+        db = DB(str(tmp_path / "test.db"))
+        models = {
+            "daily_logistic": {
+                "model": MagicMock(predict_proba=MagicMock(return_value=np.array([[0.1, 0.2, 0.7]])),
+                                    classes_=np.array([0, 1, 2])),
+                "scaler": MagicMock(transform=MagicMock(side_effect=lambda x: x)),
+                "feature_contract": list(FEATURE_COLS),
+                "confidence_threshold": 0.55,
+            }
+        }
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)) as mock_fetch, \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models, db=db)
+
+        mock_fetch.assert_called_once()
+        assert "error" not in result
+
+
+# ---------------------------------------------------------------------------
 # send_discord
 # ---------------------------------------------------------------------------
 
