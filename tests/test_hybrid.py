@@ -79,6 +79,19 @@ def test_hybrid_artifact_contract():
     class threshold (vol_mult) until the model rides the class-imbalance
     prior, which is not a meaningful accuracy claim. See daily_logistic /
     daily_xgboost contract tests below for the same reasoning.
+
+    NOTE (issue #90): as of the fix that stops passing the test set in as
+    the validation set for early stopping/checkpoint selection, retraining
+    `models/daily_hybrid.pkl` from scratch on current market data no longer
+    reliably clears 0.50 — the previously committed artifact's ~0.57 was
+    inflated by that leak (confirmed by retraining both the leak-fixed and
+    the pre-fix code against current data: both land around ~0.37-0.39,
+    i.e. at the majority-class baseline). The checked-in artifact here
+    predates the fix and still passes this floor; a maintainer should
+    retrain and re-commit `models/daily_hybrid.pkl` with `train_hybrid.py`
+    at a convenient point, at which point this test may need its floor
+    revisited (see analysis in PR for issue #90) rather than assumed to
+    still hold.
     """
     import os, pickle
     path = "models/daily_hybrid.pkl"
