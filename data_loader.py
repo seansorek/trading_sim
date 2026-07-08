@@ -1,6 +1,5 @@
 
 # data_loader.py
-import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -256,45 +255,3 @@ def load_csv(path: str, interval: str = "1d") -> pd.DataFrame:
         df.index = df.index.tz_localize("UTC")
     is_intraday = interval.endswith("m") or interval.endswith("h")
     return _standardize(df, intraday=is_intraday)
-
-# --- Optional: Alpha Vantage (intraday 1min/5min/15min); requires API key ---
-def load_alpha_vantage(symbol: str, api_key: str, interval: str = "5min", outputsize: str = "full") -> pd.DataFrame:
-    """
-    Fetch intraday bars using Alpha Vantage TIME_SERIES_INTRADAY.
-    NOTE: Free tier has strict rate limits and may have limited historical coverage.
-    """
-    import requests
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": outputsize,
-        "datatype": "json",
-        "apikey": api_key
-    }
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    # Key pattern: "Time Series (1min)" etc.
-    ts_key = f"Time Series ({interval})"
-    if ts_key not in data:
-        raise ValueError(f"Unexpected Alpha Vantage response keys: {list(data.keys())}")
-    ts = data[ts_key]
-    records = []
-    for ts_str, row in ts.items():
-        records.append({
-            "timestamp": pd.to_datetime(ts_str, utc=True),
-            "open": float(row["1. open"]),
-            "high": float(row["2. high"]),
-            "low": float(row["3. low"]),
-            "close": float(row["4. close"]),
-            "volume": float(row["5. volume"])
-        })
-    df = pd.DataFrame.from_records(records).set_index("timestamp").sort_index()
-    return _standardize(df)
-
-# --- Save helper ---
-def save_to_csv(df: pd.DataFrame, path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    df.to_csv(path)
