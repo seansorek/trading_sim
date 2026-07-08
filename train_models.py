@@ -10,7 +10,6 @@ Usage:
     python train_models.py --symbols AAPL,MSFT,SPY --days 1000 --models xgboost --optimize
 """
 import argparse
-import json
 import hashlib
 import logging
 import os

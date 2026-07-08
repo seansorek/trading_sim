@@ -1,16 +1,14 @@
 """test_train_cache.py — Tests for DB cache freshness in _load_symbol (#25)."""
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db import DB
-from data_loader import check_cache_freshness
 from train_models import _load_symbol, _STALE_TOLERANCE_BDAYS
 
 

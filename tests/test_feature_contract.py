@@ -4,7 +4,6 @@ test_feature_contract.py — Guard the feature contract between training and pre
 These tests must pass before any model retrain. If FEATURE_COLS changes,
 all models must be retrained (bump FEATURE_SET_NAME to "daily_v2").
 """
-import os
 import pickle
 import sys
 from pathlib import Path

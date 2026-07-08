@@ -2,10 +2,9 @@
 Enhanced DQN agent with Dueling architecture and prioritized experience replay.
 """
 
-import math
 import random
 from dataclasses import dataclass
-from typing import Deque, Tuple, List, Optional
+from typing import Deque, Tuple
 
 import numpy as np
 import torch

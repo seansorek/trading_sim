@@ -1,7 +1,7 @@
 """test_rl_env.py — Tests for TradingEnv (Issue #24: DQN state dimension fix)."""
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -32,7 +32,6 @@ def _make_raw_ohlcv(n: int = 250, start_price: float = 100.0) -> pd.DataFrame:
 
 def _make_feats_df(raw: pd.DataFrame) -> pd.DataFrame:
     """Return a feature DataFrame that includes all FEATURE_COLS plus extras."""
-    from daily_features import make_daily_features
 
     # make_daily_features may require SPY data; patch it to return a minimal frame
     n = len(raw)
