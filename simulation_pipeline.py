@@ -244,7 +244,8 @@ class Backtester:
                 else:
                     desired = 0  # suppress re-entry
 
-            notional = self.exec_cfg.start_cash * self.exec_cfg.max_position_pct
+            current_equity = cash + position * mid
+            notional = current_equity * self.exec_cfg.max_position_pct
             shares = int(notional / mid) if mid > 0 else 0
             shares = min(shares, self.exec_cfg.max_position)
 

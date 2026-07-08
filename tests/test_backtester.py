@@ -150,6 +150,77 @@ def test_identical_runs_produce_identical_equity_curves():
 
 
 # ---------------------------------------------------------------------------
+# Position sizing off current equity, not fixed start_cash (#91)
+# ---------------------------------------------------------------------------
+
+def test_position_sizing_scales_with_current_equity_not_start_cash():
+    """max_position_pct must be applied to current mark-to-market equity, not
+    the account's original start_cash. We force a large gain on an initial
+    position, exit it (realizing the gain into cash), then re-enter — the
+    re-entry's share count should reflect the grown equity, not start_cash.
+    """
+    n = 5
+    # Bar 0: buy at 100. Bar 1: hold. Bar 2: price jumps to 200 and signal
+    # goes flat, forcing a full exit that realizes a ~50% equity gain into
+    # cash. Bar 3: signal buys again at the new price of 200 — this entry
+    # should be sized off the grown post-exit equity, not start_cash.
+    prices = [100.0, 100.0, 200.0, 200.0, 200.0]
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 1 for p in prices],
+            "low": [p - 1 for p in prices],
+            "close": prices,
+            "volume": [1_000_000.0] * n,
+        },
+        index=idx,
+    )
+
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[0] = 1   # enter long at bar 0 (price 100)
+    signal.iloc[1] = 1   # hold through the price jump to bar 2
+    signal.iloc[2] = 0   # exit at bar 2 (price 200) -> realize gain
+    signal.iloc[3] = 1   # re-enter at bar 3 (price 200)
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.99,
+        take_profit_pct=0.99,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.5,
+        max_position=10_000,
+    )
+    result = _run(signal, df, cfg)
+    trades = result.trades.reset_index() if not result.trades.empty else pd.DataFrame()
+    buys = trades[trades["side"] == "BUY"].reset_index(drop=True)
+
+    assert len(buys) >= 2, f"Expected at least 2 BUY fills, got {len(buys)}"
+    first_entry_shares = buys.loc[0, "shares"]
+    second_entry_shares = buys.loc[1, "shares"]
+
+    # start_cash-based sizing would give floor(100_000 * 0.5 / 200) = 250 shares
+    # for the second entry (same as if equity never grew). Equity-based sizing
+    # must size off the grown post-exit equity (~200_000), giving materially
+    # more shares at the same price.
+    start_cash_based_shares = int((cfg.start_cash * cfg.max_position_pct) / 200.0)
+    assert second_entry_shares > start_cash_based_shares, (
+        f"Second entry sized {second_entry_shares} shares, which matches "
+        f"fixed start_cash-based sizing ({start_cash_based_shares}). Expected "
+        f"sizing to scale with grown current equity instead."
+    )
+    # Sanity: second entry's notional (shares * price) should be larger than
+    # the first entry's, since equity roughly grew 50% between the two
+    # entries (price and share count alone aren't comparable across bars
+    # since the fill price also changed from 100 to 200).
+    first_entry_notional = first_entry_shares * 100.0
+    second_entry_notional = second_entry_shares * 200.0
+    assert second_entry_notional > first_entry_notional
+
+
+# ---------------------------------------------------------------------------
 # Holding period
 # ---------------------------------------------------------------------------
 
