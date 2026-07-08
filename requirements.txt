@@ -1,13 +1,13 @@
-numpy>=1.26
-pandas>=2.1
-pyyaml>=6.0
-yfinance>=0.2.40
-scikit-learn>=1.4
-xgboost>=2.0
-scikit-optimize>=0.9
-torch>=2.2
-requests>=2.31
+numpy>=1.26,<3
+pandas>=2.1,<4
+pyyaml>=6.0,<7
+yfinance>=0.2.40,<2
+scikit-learn>=1.4,<2
+xgboost>=2.0,<4
+scikit-optimize>=0.9,<1
+torch>=2.2,<3
+requests>=2.31,<3
 
 # Dev dependencies
-pytest>=8.0
-pytest-cov>=5.0
+pytest>=8.0,<10
+pytest-cov>=5.0,<8
