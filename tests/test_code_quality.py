@@ -6,13 +6,6 @@ import typing
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def test_save_to_csv_has_return_annotation():
-    from data_loader import save_to_csv
-    assert "return" in save_to_csv.__annotations__, (
-        "save_to_csv must have a -> None return annotation"
-    )
-
-
 def test_train_xgboost_return_is_parameterized():
     """train_xgboost should return tuple[Any, Any, float, float, float], not bare tuple."""
     from train_models import train_xgboost

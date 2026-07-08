@@ -1,6 +1,5 @@
 import numpy as np
-import pandas as pd
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional
 
 from daily_features import make_daily_features, FEATURE_COLS, FWD_RET_HORIZON_DAYS
 from data_loader import load_yfinance

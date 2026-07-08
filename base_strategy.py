@@ -40,7 +40,6 @@ class BaseStrategy:
         sig_array = sig.values.copy().astype(int)
         result = np.zeros_like(sig_array)
         last_trade_loc = -self.cfg.holding_period - 1
-        current_position = 0
 
         for loc in range(len(sig_array)):
             new_signal = sig_array[loc]
@@ -49,6 +48,5 @@ class BaseStrategy:
             if loc >= last_trade_loc + self.cfg.holding_period:
                 result[loc] = new_signal
                 last_trade_loc = loc
-                current_position = new_signal
 
         return pd.Series(result, index=sig.index)

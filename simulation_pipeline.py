@@ -13,7 +13,6 @@ import pandas as pd
 import torch
 
 from base_strategy import BaseStrategy, StrategyConfig
-from data_loader import load_yfinance
 from predictor_strategy import PredictorStrategy
 
 logger = logging.getLogger(__name__)
