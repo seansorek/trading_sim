@@ -821,7 +821,7 @@ class TestPredictClassifierSignal:
         clf.classes_ = np.array([0, 1, 2])
         data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
 
-        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))), 0.55)
 
         assert result["signal"] == "BUY"
         assert abs(result["confidence"] - 0.7) < 1e-6
@@ -834,9 +834,24 @@ class TestPredictClassifierSignal:
         clf.classes_ = np.array([0, 1, 2])
         data = {"model": clf, "scaler": scaler, "confidence_threshold": 0.55}
 
-        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))))
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))), 0.55)
 
         assert result["signal"] == "HOLD"
+
+    def test_missing_pickle_threshold_falls_back_to_default_threshold_arg(self):
+        """Pickles trained before confidence_threshold was stored must fall
+        back to the caller-supplied default (sourced from config), not a
+        hardcoded literal duplicating config/default.yaml."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+        data = {"model": clf, "scaler": scaler}  # no confidence_threshold key
+
+        result = _predict_classifier_signal(data, np.zeros((1, len(FEATURE_COLS))), 0.9)
+
+        assert result["signal"] == "HOLD", "0.7 confidence should collapse to HOLD under a 0.9 default threshold"
 
 
 class TestRegressorConfidence:

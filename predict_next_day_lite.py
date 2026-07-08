@@ -108,6 +108,14 @@ MODEL_KINDS = {
     "daily_predictor": "regressor",
 }
 
+# Maps classifier model_key to its config/default.yaml strategies.* attribute,
+# used to fall back to the configured confidence_threshold for pickles that
+# predate that field instead of duplicating the literal here.
+CLASSIFIER_CFG_ATTR = {
+    "daily_logistic": "logistic",
+    "daily_xgboost": "xgboost",
+}
+
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -138,7 +146,7 @@ def _load_pkl(path: str, model_key: str) -> dict:
     return data
 
 
-def _predict_classifier_signal(data: dict, X_latest: np.ndarray) -> dict:
+def _predict_classifier_signal(data: dict, X_latest: np.ndarray, default_threshold: float) -> dict:
     """
     Predict today's signal for a 3-class classifier model (daily_logistic,
     daily_xgboost). Both share identical prediction logic — only the
@@ -149,7 +157,7 @@ def _predict_classifier_signal(data: dict, X_latest: np.ndarray) -> dict:
     prob = data["model"].predict_proba(X_scaled)[0]
     pred_idx = int(np.argmax(prob))
     confidence = float(prob[pred_idx])
-    threshold = data.get("confidence_threshold", 0.55)
+    threshold = data.get("confidence_threshold", default_threshold)
     pred_class = int(data["model"].classes_[pred_idx])
     signal = _SIGNAL_NAMES[pred_class]
     if signal != "HOLD" and confidence < threshold:
@@ -372,7 +380,9 @@ def predict_symbol(
         try:
             kind = MODEL_KINDS.get(model_key)
             if kind == "classifier":
-                pred = _predict_classifier_signal(data, X_latest)
+                cfg_attr = CLASSIFIER_CFG_ATTR[model_key]
+                default_threshold = getattr(get_config().strategies, cfg_attr).confidence_threshold
+                pred = _predict_classifier_signal(data, X_latest, default_threshold)
             elif kind == "regressor":
                 pred = _predict_regressor_signal(data, X_all)
             else:

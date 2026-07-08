@@ -144,7 +144,14 @@ def _now_utc() -> str:
 
 
 class DB:
-    """SQLite data layer. One instance per process; thread-safe via lock."""
+    """
+    SQLite data layer. One instance per process. The in-process
+    threading.Lock below serializes concurrent threads sharing this
+    instance; it provides no cross-process protection. simulate_multi.py
+    parallelizes via separate OS processes, so multi-process write safety
+    comes from SQLite's WAL mode (PRAGMA journal_mode=WAL, set in the
+    schema), not this lock.
+    """
 
     def __init__(self, path: str = "data/trading_sim.db") -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
