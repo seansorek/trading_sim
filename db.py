@@ -276,23 +276,20 @@ class DB:
         """Register a new model version, returning its version number."""
         now = _now_utc()
         with self._lock, self._connect() as con:
-            row = con.execute(
-                "SELECT COALESCE(MAX(version),0) as v FROM model_registry WHERE model_key=?",
-                (model_key,),
-            ).fetchone()
-            next_version = int(row["v"]) + 1
-
-            con.execute(
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
                 """
                 INSERT INTO model_registry
                   (model_key, version, artifact_path, feature_contract, feature_set_name,
                    trained_on, train_start, train_end, train_samples, test_samples,
                    train_accuracy, test_accuracy, test_f1, label_map, trained_at, is_active)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                SELECT ?, COALESCE(MAX(version),0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+                  FROM model_registry
+                  WHERE model_key=?
+                RETURNING version
                 """,
                 (
                     model_key,
-                    next_version,
                     artifact_path,
                     json.dumps(feature_contract),
                     feature_set_name,
@@ -306,8 +303,10 @@ class DB:
                     test_f1,
                     json.dumps(label_map),
                     now,
+                    model_key,
                 ),
             )
+            next_version = int(cur.fetchone()[0])
         return next_version
 
     def update_artifact_path(self, model_key: str, version: int, artifact_path: str) -> None:
