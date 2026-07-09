@@ -94,9 +94,39 @@ def test_standardize_with_nans(dataframe_with_nan):
     """Test that _standardize correctly fills NaNs."""
     df_dirty = dataframe_with_nan
     assert df_dirty.isnull().values.any()
-    
+
     df_clean = _standardize(df_dirty)
     assert not df_clean.isnull().values.any()
+
+
+def test_standardize_drops_leading_nan_rows_instead_of_backfilling(sample_dataframe):
+    """Regression test for #43: leading NaN rows must be dropped, not
+    back-filled with a later (future) price -- back-filling leaks look-ahead
+    information into backtests/training."""
+    df_dirty = sample_dataframe.copy()
+    future_close = 999.0
+    price_cols = ["open", "high", "low", "close"]
+    df_dirty.iloc[0, [df_dirty.columns.get_loc(c) for c in price_cols]] = np.nan
+    df_dirty.iloc[1, df_dirty.columns.get_loc("close")] = future_close
+
+    df_clean = _standardize(df_dirty)
+
+    # The leading all-NaN row should be dropped entirely rather than
+    # fabricated via back-fill from the next (future) close price.
+    assert len(df_clean) == len(df_dirty) - 1
+    assert not df_clean.isnull().values.any()
+
+
+def test_standardize_raises_when_fill_fraction_exceeds_threshold(sample_dataframe):
+    """Regression test for #43: heavily-missing data should fail loudly
+    rather than being silently fabricated via fill."""
+    df_dirty = sample_dataframe.copy()
+    n = len(df_dirty)
+    # Blank out most rows (after the first, which anchors first_valid).
+    df_dirty.iloc[1: int(n * 0.9), df_dirty.columns.get_loc("close")] = np.nan
+
+    with pytest.raises(ValueError, match="forward-fill"):
+        _standardize(df_dirty)
 
 @patch('yfinance.Ticker')
 def test_load_yfinance(mock_ticker, sample_dataframe):

@@ -1,11 +1,17 @@
 
 # data_loader.py
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+logger = logging.getLogger(__name__)
+
 # --- Utilities ---
 US_TZ = "America/New_York"
+# Max fraction of rows allowed to require forward-fill before we consider the
+# data too unreliable to use silently.
+MAX_FILL_FRAC = 0.10
 
 def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     required = ["open", "high", "low", "close", "volume"]
@@ -29,12 +35,42 @@ def _add_spread(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _standardize(df: pd.DataFrame, intraday: bool = True) -> pd.DataFrame:
-    """Ensure correct columns, sort, drop duplicates, optional US hours, add spread."""
+    """Ensure correct columns, sort, drop duplicates, optional US hours, add spread.
+
+    Gaps are forward-filled only. Back-filling would propagate future prices
+    backward into leading-NaN rows, leaking look-ahead information into
+    backtests/training. Any leading rows before the first valid price are
+    dropped outright rather than fabricated.
+    """
     df = df.sort_index().loc[~df.index.duplicated(keep="last")]
     df = _ensure_cols(df)
     if intraday:
         df = _filter_us_hours(df)
-    df = df.ffill().bfill()  # Fill any gaps
+
+    price_cols = ["open", "high", "low", "close"]
+    if not df.empty:
+        first_valid = df[price_cols].dropna(how="all").index.min()
+        if pd.isna(first_valid):
+            raise ValueError("_standardize: no valid price rows in frame")
+        df = df.loc[first_valid:]
+
+    n_rows = len(df)
+    n_missing = int(df[price_cols + ["volume"]].isna().any(axis=1).sum())
+    df = df.ffill()
+
+    if n_missing:
+        filled_frac = n_missing / n_rows
+        if filled_frac > MAX_FILL_FRAC:
+            raise ValueError(
+                f"_standardize: {n_missing}/{n_rows} rows ({filled_frac:.1%}) "
+                f"required forward-fill, exceeding the {MAX_FILL_FRAC:.0%} "
+                "threshold -- data looks too unreliable to use silently"
+            )
+        logger.warning(
+            "_standardize: forward-filled %d/%d rows (%.1f%%)",
+            n_missing, n_rows, filled_frac * 100,
+        )
+
     df = _add_spread(df)
     df.index.name = "timestamp"
     return df
