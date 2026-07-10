@@ -1,7 +1,7 @@
 """
 daily_features.py — Daily OHLCV feature engineering.
 
-FEATURE_COLS is the canonical ordered list of model input columns.
+FEATURE_COLS is the canonical ordered list of model input columns (30 features).
 All training and prediction code must index features using this list,
 never by DataFrame column iteration order.
 """
@@ -15,7 +15,7 @@ FWD_RET_HORIZON_DAYS = 3
 
 # Version string stored alongside model pickles. Bump when FEATURE_COLS changes;
 # old models become explicitly incompatible.
-FEATURE_SET_NAME: str = "daily_v4"
+FEATURE_SET_NAME: str = "daily_v5"
 
 # Canonical feature order — the contract between training and prediction.
 # All features are dimensionless/normalized so they are comparable across symbols
@@ -31,7 +31,6 @@ FEATURE_COLS: list[str] = [
     "ma_spread_20_50",   # (sma20 - sma50) / close — normalized
     "macd",
     "macd_signal",
-    "macd_hist",
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
@@ -40,7 +39,6 @@ FEATURE_COLS: list[str] = [
     "bb_position",
     "stoch_k",
     "stoch_d",
-    "williams_r",
     "roc_12",
     "atr_normalized",
     "adx_14",             # trend strength (0-100)
@@ -143,7 +141,6 @@ def make_daily_features(
     signal = _safe_ema(macd, 9)
     feats["macd"] = macd
     feats["macd_signal"] = signal
-    feats["macd_hist"] = macd - signal
 
     feats["rsi_14"] = _rsi(df["close"], 14)
 
@@ -166,8 +163,6 @@ def make_daily_features(
     highest_high = df["high"].rolling(14).max()
     feats["stoch_k"] = 100.0 * (df["close"] - lowest_low) / (highest_high - lowest_low + 1e-12)
     feats["stoch_d"] = feats["stoch_k"].rolling(3).mean()
-
-    feats["williams_r"] = -100.0 * (highest_high - df["close"]) / (highest_high - lowest_low + 1e-12)
 
     feats["roc_12"] = (df["close"] - df["close"].shift(12)) / (df["close"].shift(12) + 1e-12)
     feats["atr_normalized"] = _atr(df, 14) / (df["close"] + 1e-12)
@@ -242,5 +237,4 @@ def make_daily_features(
     # fwd_ret_1d is intentionally kept NaN for the last row so training code
     # can remove it with dropna(subset=["fwd_ret_1d"]).
     feats = feats.dropna(subset=FEATURE_COLS)
-    feats[FEATURE_COLS] = feats[FEATURE_COLS].fillna(0.0)
     return feats

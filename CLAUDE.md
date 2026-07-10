@@ -131,7 +131,7 @@ Test coverage:
 |---|---|
 | `config/default.yaml` | Single source of truth for all parameters |
 | `config.py` | Dataclass definitions; `get_config()` returns a cached `AppConfig` |
-| `daily_features.py` | Computes the 25-feature vector; `FEATURE_COLS` is the canonical feature contract |
+| `daily_features.py` | Computes the 30-feature vector; `FEATURE_COLS` is the canonical feature contract |
 | `train_models.py` | **Entry point:** train and save Logistic + XGBoost models |
 | `train_predictor.py` | **Entry point:** train the Ridge return-prediction model (experimental prediction/strategy split) |
 | `train_dqn.py` | **Entry point:** train the DQN agent |
