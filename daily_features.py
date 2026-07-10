@@ -71,6 +71,30 @@ def discretize_labels(
     return y
 
 
+_ZSCORE_WINDOW = 252
+_ZSCORE_MIN_PERIODS = 60
+
+# Unbounded / scale-varying features that get per-symbol rolling z-scoring.
+# Bounded oscillators (rsi_14, stoch_k, stoch_d, adx_14, bb_position,
+# atr_normalized) and already-z-scored features (turnover_z, bb_width,
+# vpt/ad/obv_normalized) are intentionally excluded.
+_ZSCORE_FEATURES: list[str] = [
+    "ret_1d", "ret_5d", "ret_10d", "ret_21d", "vol_20d",
+    "macd", "macd_signal", "ma_spread_10_20", "ma_spread_20_50",
+    "price_vs_sma20", "price_vs_sma50", "roc_12", "gap", "hl_ratio",
+    "vol_regime", "rel_volume", "ret_1d_vs_spy", "ret_5d_vs_spy",
+]
+
+
+def _rolling_zscore(
+    s: pd.Series, window: int = _ZSCORE_WINDOW, min_periods: int = _ZSCORE_MIN_PERIODS
+) -> pd.Series:
+    """Causal per-symbol z-score: (x - rolling_mean) / rolling_std. Uses past+present only."""
+    mean = s.rolling(window, min_periods=min_periods).mean()
+    std = s.rolling(window, min_periods=min_periods).std()
+    return (s - mean) / (std + 1e-12)
+
+
 def _safe_ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
@@ -226,6 +250,9 @@ def make_daily_features(
     # advances idx by 1 per step) must divide by FWD_RET_HORIZON_DAYS to avoid
     # inflating reward magnitude and double-counting overlapping windows.
     feats["fwd_ret_1d"] = (df["close"].shift(-FWD_RET_HORIZON_DAYS) / df["close"]) - 1
+
+    for col in _ZSCORE_FEATURES:
+        feats[col] = _rolling_zscore(feats[col])
 
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.

@@ -31,7 +31,7 @@ def _synthetic_df(n: int = 150) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def test_make_daily_features_shape(capsys):
-    df = _synthetic_df(100)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)
     # Warmup rows (up to ~50 for sma_50) are dropped, so output is shorter than input
     assert len(feats) < len(df)
@@ -125,14 +125,14 @@ def test_spy_relative_features_default_to_zero():
 
 def test_spy_relative_features_nonzero_when_spy_provided():
     rng = np.random.default_rng(99)
-    idx = pd.date_range("2023-01-02", periods=100, freq="B")
-    close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.012, 100))
-    spy_close = 100 * np.cumprod(1 + rng.normal(0.0002, 0.008, 100))
+    idx = pd.date_range("2023-01-02", periods=200, freq="B")
+    close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.012, 200))
+    spy_close = 100 * np.cumprod(1 + rng.normal(0.0002, 0.008, 200))
     df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
-                       "close": close, "volume": np.ones(100) * 1e6}, index=idx)
+                       "close": close, "volume": np.ones(200) * 1e6}, index=idx)
     spy_df = pd.DataFrame({"open": spy_close, "high": spy_close * 1.01,
                            "low": spy_close * 0.99, "close": spy_close,
-                           "volume": np.ones(100) * 1e6}, index=idx)
+                           "volume": np.ones(200) * 1e6}, index=idx)
     feats = make_daily_features(df, spy_df=spy_df)
     # With different price paths, relative returns should be non-zero for most rows
     assert not (feats["ret_1d_vs_spy"] == 0.0).all()

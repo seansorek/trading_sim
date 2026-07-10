@@ -102,6 +102,21 @@ def test_hybrid_prepare_data_has_embargo_gap(tmp_path):
     assert gap == FWD_RET_HORIZON_DAYS
 
 
+def test_rolling_zscore_is_causal():
+    import numpy as np
+    import pandas as pd
+    from daily_features import _rolling_zscore
+
+    rng = np.random.default_rng(3)
+    s = pd.Series(rng.normal(0, 1, 400).cumsum())
+    full = _rolling_zscore(s)
+    for i in (120, 250, 399):
+        truncated = _rolling_zscore(s.iloc[: i + 1])
+        assert np.isclose(full.iloc[i], truncated.iloc[i], equal_nan=True), (
+            f"row {i}: full={full.iloc[i]} truncated={truncated.iloc[i]} — look-ahead!"
+        )
+
+
 def test_hybrid_prepare_data_val_carved_from_train_not_test(tmp_path):
     """The validation slice used for early stopping must be carved out of the
     TRAIN period (most recent portion of it), never overlap the test set, and
