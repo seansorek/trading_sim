@@ -28,7 +28,8 @@ import pandas as pd
 import torch
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, classification_report, f1_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
+from predictors.base import _scale
 
 from daily_features import (
     FEATURE_COLS,
@@ -76,12 +77,6 @@ def _seed_all(seed: int = 42) -> None:
 def _preprocess(X: np.ndarray) -> np.ndarray:
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
     return X
 
 
@@ -208,22 +203,21 @@ def prepare_data(
 
     # Fit scaler on training features only (concatenated across symbols)
     X_train_raw_all = np.vstack([b[0] for b in train_blocks])
-    scaler = StandardScaler()
+    scaler = RobustScaler()
     scaler.fit(_preprocess(X_train_raw_all.copy()))
 
-    def _scale(blocks):
+    def _scale_blocks(blocks):
         out_X, out_y, starts = [], [], [0]
         for Xb, yb in blocks:
-            Xb_clip = _preprocess(Xb.copy())
-            Xb_scaled = scaler.transform(Xb_clip).astype(np.float32)
+            Xb_scaled = _scale(scaler, Xb).astype(np.float32)
             out_X.append(Xb_scaled)
             out_y.append(yb)
             starts.append(starts[-1] + len(Xb_scaled))
         return np.vstack(out_X), np.concatenate(out_y), starts[:-1]
 
-    X_train_flat, y_train_flat, train_starts = _scale(train_blocks)
-    X_val_flat, y_val_flat, val_starts = _scale(val_blocks)
-    X_test_flat, y_test_flat, test_starts = _scale(test_blocks)
+    X_train_flat, y_train_flat, train_starts = _scale_blocks(train_blocks)
+    X_val_flat, y_val_flat, val_starts = _scale_blocks(val_blocks)
+    X_test_flat, y_test_flat, test_starts = _scale_blocks(test_blocks)
 
     X_train_seq, X_train_last, y_train = build_sequences(
         X_train_flat, y_train_flat, lookback, train_starts
