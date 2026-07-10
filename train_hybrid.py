@@ -75,6 +75,7 @@ def _seed_all(seed: int = 42) -> None:
 
 
 def _preprocess(X: np.ndarray) -> np.ndarray:
+    X = X.copy()
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
     return X
