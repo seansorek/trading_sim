@@ -1,7 +1,7 @@
 """
 daily_features.py — Daily OHLCV feature engineering.
 
-FEATURE_COLS is the canonical ordered list of model input columns (30 features).
+FEATURE_COLS is the canonical ordered list of model input columns (29 features).
 All training and prediction code must index features using this list,
 never by DataFrame column iteration order.
 """
@@ -34,7 +34,6 @@ FEATURE_COLS: list[str] = [
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
-    "vol_z_20",
     "bb_width",          # (bb_upper - bb_lower) / close — normalized
     "bb_position",
     "stoch_k",
@@ -146,10 +145,6 @@ def make_daily_features(
 
     feats["price_vs_sma20"] = (df["close"] - sma_20) / (sma_20 + 1e-12)
     feats["price_vs_sma50"] = (df["close"] - sma_50) / (sma_50 + 1e-12)
-
-    feats["vol_z_20"] = (df["volume"] - df["volume"].rolling(20).mean()) / (
-        df["volume"].rolling(20).std() + 1e-12
-    )
 
     bb_mid = df["close"].rolling(20).mean()
     bb_std_dev = df["close"].rolling(20).std()

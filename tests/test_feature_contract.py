@@ -33,7 +33,6 @@ _EXPECTED_FEATURE_COLS = [
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
-    "vol_z_20",
     "bb_width",
     "bb_position",
     "stoch_k",
@@ -187,9 +186,9 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_30():
-    assert len(FEATURE_COLS) == 30, (
-        f"Expected 30 features, got {len(FEATURE_COLS)}. "
+def test_feature_cols_count_is_29():
+    assert len(FEATURE_COLS) == 29, (
+        f"Expected 29 features, got {len(FEATURE_COLS)}. "
         "Update CLAUDE.md and all docs if you intentionally changed the count."
     )
 
