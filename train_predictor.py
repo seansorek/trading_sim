@@ -3,8 +3,8 @@
 train_predictor.py — Train the daily return *prediction* model.
 
 This is the prediction half of the prediction/strategy split: a regression
-model that forecasts continuous forward return (fwd_ret_1d, a
-FWD_RET_HORIZON_DAYS-bar cumulative return), evaluated by forecast-quality
+model that forecasts vol-adjusted forward return (fwd_ret_vol_adj =
+fwd_ret_1d / (vol_20d + 1e-6), a scaled FWD_RET_HORIZON_DAYS-bar cumulative return), evaluated by forecast-quality
 metrics (Spearman IC, R^2, directional accuracy) — not classification
 accuracy.
 
@@ -146,18 +146,6 @@ def _forecast_metrics(pred: np.ndarray, actual: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 # Trainers
 # ---------------------------------------------------------------------------
-
-def train_elasticnet(X_train, X_test, y_train, y_test, alpha: float, l1_ratio: float):
-    scaler = RobustScaler()
-    scaler.fit(X_train)
-    X_tr = _scale(scaler, X_train)
-    X_te = _scale(scaler, X_test)
-    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
-    model.fit(X_tr, y_train)
-    train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
-    test_metrics = _forecast_metrics(model.predict(X_te), y_test)
-    return model, scaler, train_metrics, test_metrics
-
 
 def train_xgb_regressor(X_train, X_test, y_train, y_test):
     if not HAS_XGBOOST:
