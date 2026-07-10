@@ -38,13 +38,21 @@ Remove the two **exact** linear dependencies from `FEATURE_COLS`:
   (`daily_features.py:146`).
 
 Keep `stoch_d` (≈0.9 correlation with `stoch_k`; carries 3-bar smoothing, below
-the guard threshold). Feature count: **32 → 30**.
+the guard threshold). Feature count: **32 → 30**, then **→ 29** after the guard
+below exposed a third near-duplicate (see note).
 
 Stop computing the two dropped series entirely (remove their assignments).
 
 **Guard:** add a regression test asserting no feature pair in `FEATURE_COLS`
 exceeds `|corr| > 0.98` on a representative sample, so future additions cannot
 silently reintroduce an exact duplicate.
+
+**Implementation note (added during execution):** the `|corr| > 0.98` guard
+exposed a real near-duplicate the design missed — `vol_z_20` ~ `turnover_z`
+(r = 0.997), since share-volume and dollar-volume z-scores track almost
+perfectly. Per decision, `vol_z_20` was dropped (kept `turnover_z`, the richer
+dollar-volume measure), so the final feature count is **29**, not 30. All
+"30-feature" references elsewhere in this doc should read **29**.
 
 ### #2 — Per-symbol rolling z-score (unbounded features only)
 
@@ -66,8 +74,10 @@ Applied to **unbounded** features:
 **Left at native scale** (already bounded oscillators): `rsi_14`, `stoch_k`,
 `stoch_d`, `adx_14`, `bb_position`, `atr_normalized`.
 
-**Left unchanged** (already per-symbol z-scores): `vol_z_20`, `turnover_z`,
+**Left unchanged** (already per-symbol z-scores): `turnover_z`,
 `vpt_normalized`, `ad_normalized`, `obv_normalized`, `bb_width`.
+(`vol_z_20` was in this set in the original design but was dropped — see the #1
+implementation note.)
 
 Rationale for rolling (not expanding): adapts to regime shifts. Uses only
 current + past bars → **no look-ahead**. Extends the warmup period; absorbed by
@@ -135,7 +145,7 @@ preserving displayed semantics.
 
 ### #6 — Cleanup
 
-- Fix the stale "25-feature" wording → "30-feature" in `daily_features.py`
+- Fix the stale "25-feature" wording → "29-feature" in `daily_features.py`
   module docstring, `CLAUDE.md`, and `models/README.md`.
 - Delete the dead line `feats[FEATURE_COLS] = feats[FEATURE_COLS].fillna(0.0)`
   (`daily_features.py:238`) — `dropna(subset=FEATURE_COLS)` already guarantees
@@ -195,7 +205,7 @@ together:
   bounded.
 - **Vol target (#5):** `fwd_ret_vol_adj ≈ fwd_ret_1d / vol_20d`; the regressor
   is fit on this column, and the sweep reads the same column.
-- **Feature contract:** `len(FEATURE_COLS) == 30`; `FEATURE_SET_NAME ==
+- **Feature contract:** `len(FEATURE_COLS) == 29`; `FEATURE_SET_NAME ==
   "daily_v5"`. Update `tests/test_feature_contract.py`, `tests/test_features.py`,
   `tests/test_config.py` as needed.
 - **No NaN/inf** in output features (existing check still passes).
