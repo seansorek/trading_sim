@@ -45,7 +45,7 @@ def test_make_daily_features_no_inf():
 
 
 def test_make_daily_features_has_fwd_ret():
-    df = _synthetic_df(60)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)
     assert "fwd_ret_1d" in feats.columns
     # Last 3 rows have no 3-day forward close, so fwd_ret_1d is NaN (not zero-filled)

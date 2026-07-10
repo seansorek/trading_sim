@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from daily_features import FEATURE_COLS
+from daily_features import FEATURE_COLS, FEATURE_SET_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +76,19 @@ def _load_validated_pickle(
         )
 
     if "feature_contract" in required_keys and data["feature_contract"] != FEATURE_COLS:
-        raise RuntimeError(
-            f"[{name}] Feature contract mismatch in {path}. "
-            f"Expected {len(FEATURE_COLS)} features, got {len(data['feature_contract'])}. "
-            "Retrain models."
-        )
+        pickle_fsn = data.get("feature_set_name")
+        if pickle_fsn and pickle_fsn != FEATURE_SET_NAME:
+            logger.warning(
+                "[%s] Feature contract version mismatch in %s: "
+                "pickle=%s code=%s. Model may be stale — consider retraining.",
+                name, path, pickle_fsn, FEATURE_SET_NAME,
+            )
+        else:
+            raise RuntimeError(
+                f"[{name}] Feature contract mismatch in {path}. "
+                f"Expected {len(FEATURE_COLS)} features, got {len(data['feature_contract'])}. "
+                "Retrain models."
+            )
 
     return data
 

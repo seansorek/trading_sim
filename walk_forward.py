@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.preprocessing import StandardScaler
 
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
@@ -36,7 +36,9 @@ class WalkForwardConfig:
     test_bars: int = 63
     step_bars: int = 21
     min_train_bars: int = 252
-    ridge_alpha: float = 10.0
+    ridge_alpha: float = 1.0
+    l1_ratio: float = 0.5
+    use_elasticnet: bool = True
 
 
 def _ic(pred: np.ndarray, actual: np.ndarray) -> float:
@@ -94,7 +96,11 @@ def run_walk_forward_on_df(
         X_tr_s = scaler.fit_transform(X_tr)
         X_te_s = scaler.transform(X_te)
 
-        model = Ridge(alpha=config.ridge_alpha)
+        if config.use_elasticnet:
+            model = ElasticNet(alpha=config.ridge_alpha, l1_ratio=config.l1_ratio,
+                              max_iter=5000, random_state=42)
+        else:
+            model = Ridge(alpha=config.ridge_alpha)
         model.fit(X_tr_s, y_tr)
         pred = model.predict(X_te_s)
 
@@ -186,6 +192,9 @@ def sweep_params(
             X_window_s = scaler.transform(X_window)
 
             model = Ridge(alpha=config.ridge_alpha)
+            if config.use_elasticnet:
+                model = ElasticNet(alpha=config.ridge_alpha, l1_ratio=config.l1_ratio,
+                                  max_iter=5000, random_state=42)
             model.fit(X_window_s[:config.train_bars], y_all[train_start_idx:train_end_idx])
             pred_window = model.predict(X_window_s)
             test_offset = config.train_bars + FWD_RET_HORIZON_DAYS

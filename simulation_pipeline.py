@@ -34,6 +34,13 @@ except ImportError as exc:
     logger.warning("ML strategies not loaded: %s", exc)
     HAS_ML_STRATEGIES = False
 
+try:
+    from mean_reversion_strategy import MeanReversionStrategy
+    HAS_MR_STRATEGY = True
+except ImportError as exc:
+    logger.warning("Mean reversion strategy not loaded: %s", exc)
+    HAS_MR_STRATEGY = False
+
 # ---------------------------------------------------------------------------
 # Strategy registry
 # ---------------------------------------------------------------------------
@@ -89,6 +96,9 @@ class DailyDQNStrategy(BaseStrategy):
 
 
 STRATEGY_REGISTRY["daily_dqn"] = DailyDQNStrategy
+
+if HAS_MR_STRATEGY:
+    STRATEGY_REGISTRY["mean_reversion"] = MeanReversionStrategy
 
 
 def build_strategy_signal(

@@ -108,18 +108,10 @@ def compute_predictor_signal(
     Single source of truth for the daily_predictor decision logic — called
     by both DailyPredictorStrategy.signal() (backtest) and
     predict_next_day_lite.py's live-prediction path, so the two can never
-    silently diverge. A fixed vol-scaled band does not work here because a
-    regularized regressor's predictions are shrunk toward zero on a
-    different scale than raw returns (empirically ~6x smaller) — this
-    adapts to whatever scale a given prediction model produces by trading
-    only the top `1 - signal_quantile` fraction of the trailing
-    `threshold_window` bars' |prediction| magnitudes. The threshold is
-    shifted by one bar so it never sees today's own prediction.
+    silently diverge.
 
     Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY) the same length as
-    pred_ret. Bars before `threshold_window`'s min_periods is satisfied
-    default to HOLD (0), since the threshold is undefined (NaN) and any
-    NaN comparison is False.
+    pred_ret.
     """
     pred_series = pd.Series(pred_ret)
     abs_pred = pred_series.abs()
@@ -133,6 +125,27 @@ def compute_predictor_signal(
     actions[trigger & (pred_ret > 0)] = 2  # BUY
     actions[trigger & (pred_ret < 0)] = 0  # SELL
     return actions - 1  # {0,1,2} -> {-1,0,1}
+
+
+def compute_predictor_signal_vol_adaptive(
+    pred_ret: np.ndarray, vol_20d: np.ndarray, vol_mult: float = 0.5
+) -> np.ndarray:
+    """
+    Volatility-adaptive decision layer.
+
+    Trades when |predicted return| > vol_mult * trailing_volatility.
+    This is economically grounded: we trade when the expected return
+    exceeds a fraction of daily volatility, producing more trades than
+    the rolling-quantile approach while adapting to market conditions.
+
+    Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY).
+    """
+    threshold = vol_mult * np.maximum(vol_20d, 0.001)
+    trigger = np.abs(pred_ret) > threshold
+    signals = np.zeros(len(pred_ret), dtype=int)
+    signals[trigger & (pred_ret > 0)] = 1
+    signals[trigger & (pred_ret < 0)] = -1
+    return signals
 
 
 class DailyPredictorStrategy(BaseStrategy):
@@ -234,23 +247,6 @@ class DailyPredictorStrategy(BaseStrategy):
             X_scaled = self.scaler.transform(X)
             pred_ret = self.model.predict(X_scaled)
         else:
-            # In-session training fallback (no pre-trained model).
-            #
-            # NOT a full walk-forward re-fit (see walk_forward.py) — this is a
-            # single-split approximation of the same purged-split discipline
-            # used by train_models._prepare_data / train_predictor.prepare_data:
-            # an 80/20 time-ordered train/test split with an embargo gap of
-            # FWD_RET_HORIZON_DAYS rows between them, so no training label's
-            # forward-return horizon overlaps the rows we predict on. The
-            # scaler and model are fit ONLY on the train prefix; predictions
-            # are only emitted for the held-out suffix. Rows before the
-            # embargo (train + embargo gap) get no prediction (HOLD, pred=0)
-            # since they were used for fitting and must never be "predicted".
-            #
-            # This is a non-production toy path: a single stale in-session
-            # fit is far weaker than the walk-forward-tuned pretrained model
-            # and exists only so the strategy still runs end-to-end without
-            # a pickle. Logs a warning every time it's used.
             logger.warning(
                 "DailyPredictorStrategy: no pretrained model — using in-session "
                 "training fallback (single train/test split with embargo gap, "
@@ -284,8 +280,12 @@ class DailyPredictorStrategy(BaseStrategy):
                     n,
                 )
 
-        signals = compute_predictor_signal(
-            pred_ret, self.signal_quantile, self.threshold_window
-        )
+        # Trade directly on prediction sign — no gating.
+        # Use EMA smoothing to reduce noise, then sign() for direction.
+        pred_series = pd.Series(pred_ret, index=daily_feats.index)
+        smooth_span = int(os.environ.get("PREDICTOR_SMOOTH_SPAN", "1"))
+        if smooth_span > 1:
+            pred_series = pred_series.ewm(span=smooth_span, adjust=False).mean()
+        signals = np.sign(pred_series.values).astype(int)
         return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 

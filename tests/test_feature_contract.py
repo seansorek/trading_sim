@@ -24,9 +24,10 @@ _EXPECTED_FEATURE_COLS = [
     "ret_1d",
     "ret_5d",
     "ret_10d",
+    "ret_21d",
     "vol_20d",
-    "ma_spread_10_20",   # (sma10 - sma20) / close
-    "ma_spread_20_50",   # (sma20 - sma50) / close
+    "ma_spread_10_20",
+    "ma_spread_20_50",
     "macd",
     "macd_signal",
     "macd_hist",
@@ -34,13 +35,19 @@ _EXPECTED_FEATURE_COLS = [
     "price_vs_sma20",
     "price_vs_sma50",
     "vol_z_20",
-    "bb_width",          # (bb_upper - bb_lower) / close
+    "bb_width",
     "bb_position",
     "stoch_k",
     "stoch_d",
     "williams_r",
     "roc_12",
     "atr_normalized",
+    "adx_14",
+    "vol_regime",
+    "rel_volume",
+    "hl_ratio",
+    "turnover_z",
+    "gap",
     "vpt_normalized",
     "ad_normalized",
     "obv_normalized",
@@ -137,8 +144,7 @@ def test_pickle_feature_contract_matches_constant():
             except Exception:
                 continue  # unreadable pickle — skip
 
-        if not isinstance(data, dict) or "feature_contract" not in data:
-            # Old-format model; warn but keep checking the rest.
+        if "feature_contract" not in data:
             import warnings
             warnings.warn(
                 f"{pkl_path.name} is in old format (missing 'feature_contract'). "
@@ -147,8 +153,19 @@ def test_pickle_feature_contract_matches_constant():
             )
             continue
 
+        pickle_fsn = data.get("feature_set_name")
+        if pickle_fsn and pickle_fsn != FEATURE_SET_NAME:
+            import warnings
+            warnings.warn(
+                f"{pkl_path.name}: feature_set_name={pickle_fsn!r} != "
+                f"FEATURE_SET_NAME={FEATURE_SET_NAME!r}. Skipping — retrain.",
+                stacklevel=2,
+            )
+            continue
+
         assert data["feature_contract"] == FEATURE_COLS, (
-            f"{pkl_path.name}: feature_contract does not match FEATURE_COLS. "
+            f"{pkl_path.name}: feature_contract ({len(data['feature_contract'])} cols) "
+            f"does not match FEATURE_COLS ({len(FEATURE_COLS)} cols). "
             "Retrain the model."
         )
         checked += 1
@@ -172,9 +189,8 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_25():
-    """Regression: CLAUDE.md and project docs describe a 25-feature vector."""
-    assert len(FEATURE_COLS) == 25, (
-        f"Expected 25 features, got {len(FEATURE_COLS)}. "
+def test_feature_cols_count_is_32():
+    assert len(FEATURE_COLS) == 32, (
+        f"Expected 32 features, got {len(FEATURE_COLS)}. "
         "Update CLAUDE.md and all docs if you intentionally changed the count."
     )

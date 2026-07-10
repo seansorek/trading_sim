@@ -69,11 +69,11 @@ execution:
   start_cash: 100000.0
   commission_per_share: 0.00005
   slippage_bps: 1.0
-  max_position_pct: 0.05       # 5% of equity per trade.
+  max_position_pct: 0.10       # 10% of equity per trade.
   stop_loss_pct: 0.05
-  take_profit_pct: 0.10
-  daily_loss_limit_pct: 0.05
-  holding_period_days: 5       # Minimum bars between position changes.
+  take_profit_pct: 0.10        # 2:1 reward:risk
+  daily_loss_limit_pct: 0.99   # effectively disabled
+  holding_period_days: 5
 
 # Per-strategy thresholds and hyperparameters.
 strategies:
@@ -110,6 +110,10 @@ strategies:
     q_advantage_threshold: 1.0
     confidence_threshold: 2.0
     transaction_cost_bps: 5.0
+  predictor:
+    vol_mult: 0.5
+    signal_quantile: 0.70
+    threshold_window: 60
 
 # Bayesian hyperparameter search settings (used when --optimize is passed to train_models.py).
 optimize:

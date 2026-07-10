@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.stats import spearmanr
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
@@ -146,11 +146,11 @@ def _forecast_metrics(pred: np.ndarray, actual: np.ndarray) -> dict:
 # Trainers
 # ---------------------------------------------------------------------------
 
-def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
+def train_elasticnet(X_train, X_test, y_train, y_test, alpha: float, l1_ratio: float):
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(X_train)
     X_te = scaler.transform(X_test)
-    model = Ridge(alpha=alpha)
+    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
     model.fit(X_tr, y_train)
     train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
     test_metrics = _forecast_metrics(model.predict(X_te), y_test)
@@ -173,6 +173,96 @@ def train_xgb_regressor(X_train, X_test, y_train, y_test):
     return model, scaler, train_metrics, test_metrics
 
 
+def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train)
+    X_te = scaler.transform(X_test)
+    model = Ridge(alpha=alpha)
+    model.fit(X_tr, y_train)
+    train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
+    test_metrics = _forecast_metrics(model.predict(X_te), y_test)
+    return model, scaler, train_metrics, test_metrics
+
+
+def train_elasticnet(X_train, X_test, y_train, y_test, alpha: float, l1_ratio: float):
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train)
+    X_te = scaler.transform(X_test)
+    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
+    model.fit(X_tr, y_train)
+    train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
+    test_metrics = _forecast_metrics(model.predict(X_te), y_test)
+    return model, scaler, train_metrics, test_metrics
+
+
+def _sweep_model_params(symbols: list[str], days: int, db) -> tuple[float, float]:
+    """Walk-forward sweep of alpha and l1_ratio. Returns (best_alpha, best_l1_ratio)."""
+    alphas = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]
+    l1_ratios = [0.1, 0.3, 0.5, 0.7, 0.9]
+    from datetime import datetime, timedelta
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    spy_df = _load_symbol("SPY", start, end, db)
+
+    fold_data = []
+    for symbol in symbols:
+        df = _load_symbol(symbol, start, end, db)
+        if df is None:
+            continue
+        try:
+            spy_arg = spy_df if symbol != "SPY" else None
+            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_1d"])
+        except Exception:
+            continue
+        n = len(feats)
+        config = WalkForwardConfig()
+        if n < config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars:
+            continue
+        X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
+        y_all = feats["fwd_ret_1d"].values.astype(np.float64)
+        train_start_idx = 0
+        while True:
+            train_end_idx = train_start_idx + config.train_bars
+            test_start_idx = train_end_idx + FWD_RET_HORIZON_DAYS
+            test_end_idx = test_start_idx + config.test_bars
+            if test_end_idx > n:
+                break
+            fold_data.append((X_all[train_start_idx:train_end_idx], y_all[train_start_idx:train_end_idx],
+                             X_all[test_start_idx:test_end_idx], y_all[test_start_idx:test_end_idx]))
+            train_start_idx += config.step_bars
+
+    if not fold_data:
+        logger.warning("_sweep_model_params: no folds — returning defaults")
+        return 1.0, 0.5
+
+    best_ic = -np.inf
+    best_pair = (1.0, 0.5)
+    for alpha in alphas:
+        for l1r in l1_ratios:
+            fold_ics = []
+            for X_tr, y_tr, X_te, y_te in fold_data:
+                scaler = StandardScaler()
+                X_tr_s = scaler.fit_transform(X_tr)
+                X_te_s = scaler.transform(X_te)
+                model = ElasticNet(alpha=alpha, l1_ratio=l1r, max_iter=5000, random_state=42)
+                model.fit(X_tr_s, y_tr)
+                pred = model.predict(X_te_s)
+                if np.std(pred) < 1e-12:
+                    continue
+                ic, _ = spearmanr(pred, y_te)
+                if not np.isnan(ic):
+                    fold_ics.append(float(ic))
+            if not fold_ics:
+                continue
+            median_ic = float(np.median(fold_ics))
+            if median_ic > best_ic:
+                best_ic = median_ic
+                best_pair = (alpha, l1r)
+    logger.info("_sweep_model_params: best alpha=%.4f l1_ratio=%.2f median_IC=%.4f",
+                best_pair[0], best_pair[1], best_ic)
+    return best_pair
+
+
 # ---------------------------------------------------------------------------
 # Save / register
 # ---------------------------------------------------------------------------
@@ -182,6 +272,8 @@ def _save_and_register(
     train_symbols: list[str], days: int, db: DB, train_samples: int, test_samples: int,
     best_signal_quantile: float = 0.7,
     best_threshold_window: int = 60,
+    best_model_alpha: float = 0.0,
+    best_l1_ratio: float = 0.0,
 ) -> int:
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -229,6 +321,8 @@ def _save_and_register(
         "test_f1": test_metrics["ic"],
         "best_signal_quantile": best_signal_quantile,
         "best_threshold_window": best_threshold_window,
+        "best_model_alpha": best_model_alpha,
+        "best_l1_ratio": best_l1_ratio,
     }
     with open(artifact_path, "wb") as f:
         pickle.dump(artifact, f)
@@ -256,13 +350,13 @@ def main() -> None:
     )
     parser.add_argument("--days", type=int, default=2500, help="Days of history to use")
     parser.add_argument(
-        "--model", choices=["ridge", "xgboost", "both"], default="ridge",
-        help="Which regressor to train. XGBoost has shown no detectable signal on this "
-             "feature set in testing (collapses to a near-constant predictor) but is kept "
-             "available for honest comparison.",
+        "--model", choices=["ridge", "xgboost", "elasticnet", "both"], default="elasticnet",
+        help="Which regressor to train.",
     )
-    parser.add_argument("--alpha", type=float, default=10.0, help="Ridge regularization strength")
+    parser.add_argument("--alpha", type=float, default=1.0, help="Regularization strength")
+    parser.add_argument("--l1-ratio", type=float, default=0.5, help="ElasticNet L1 ratio (0=Ridge, 1=Lasso)")
     parser.add_argument("--db", default="data/trading_sim.db", help="Path to SQLite DB")
+    parser.add_argument("--sweep-model", action="store_true", help="Walk-forward sweep model hyperparams")
     args = parser.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -279,9 +373,16 @@ def main() -> None:
         len(X_train) + len(X_test), X_train.shape[1], len(X_train), len(X_test),
     )
 
+    best_alpha = args.alpha
+    best_l1_ratio = args.l1_ratio
+    if args.sweep_model and args.model in ("elasticnet", "both", "ridge"):
+        logger.info("Running walk-forward model-parameter sweep...")
+        best_alpha, best_l1_ratio = _sweep_model_params(symbols, args.days, db)
+        logger.info("Best model params: alpha=%.4f l1_ratio=%.2f", best_alpha, best_l1_ratio)
+
     logger.info("Running walk-forward parameter sweep...")
     try:
-        wf_config = WalkForwardConfig()
+        wf_config = WalkForwardConfig(ridge_alpha=best_alpha)
         best_q, best_w = sweep_params(symbols, args.days, db, wf_config)
         logger.info("Parameter sweep complete: signal_quantile=%.2f threshold_window=%d", best_q, best_w)
     except Exception as exc:
@@ -293,15 +394,22 @@ def main() -> None:
     for model_type in models_to_train:
         logger.info("--- Training %s ---", model_type)
         if model_type == "ridge":
-            model, scaler, train_m, test_m = train_ridge(X_train, X_test, y_train, y_test, args.alpha)
+            model, scaler, train_m, test_m = train_ridge(X_train, X_test, y_train, y_test, best_alpha)
+            ma, lr = best_alpha, 0.0
+        elif model_type == "elasticnet":
+            model, scaler, train_m, test_m = train_elasticnet(X_train, X_test, y_train, y_test, best_alpha, best_l1_ratio)
+            ma, lr = best_alpha, best_l1_ratio
         else:
             model, scaler, train_m, test_m = train_xgb_regressor(X_train, X_test, y_train, y_test)
+            ma, lr = 0.0, 0.0
         _save_and_register(
             model, scaler, model_type, train_m, test_m,
             data["used_symbols"], args.days, db,
             train_samples=len(X_train), test_samples=len(X_test),
             best_signal_quantile=best_q,
             best_threshold_window=best_w,
+            best_model_alpha=ma,
+            best_l1_ratio=lr,
         )
 
     logger.info("Training complete.")
