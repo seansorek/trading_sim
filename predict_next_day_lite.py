@@ -31,7 +31,7 @@ from db import DB
 from dqn_signal import gate_dqn_signal
 from ml_strategies import compute_predictor_signal
 from signal_monitor import score_realized_ic, check_signal_drift
-from train_models import _preprocess
+from predictors.base import _scale
 
 # Maximum number of business days the cached data's latest bar can lag behind
 # the requested end date before we consider the cache stale and re-fetch.
@@ -153,7 +153,7 @@ def _predict_classifier_signal(data: dict, X_latest: np.ndarray, default_thresho
     trained model object differs — so this one function serves both,
     instead of two copy-pasted blocks.
     """
-    X_scaled = data["scaler"].transform(X_latest)
+    X_scaled = _scale(data["scaler"], X_latest)
     prob = data["model"].predict_proba(X_scaled)[0]
     pred_idx = int(np.argmax(prob))
     confidence = float(prob[pred_idx])
@@ -200,13 +200,11 @@ def _predict_regressor_signal(
     decision logic used in backtesting (ml_strategies.DailyPredictorStrategy),
     so live and backtest predictions can't silently diverge.
 
-    Applies the same ±5-std-clip preprocessing (train_models._preprocess)
-    daily_predictor was trained on (see train_predictor.prepare_data) —
-    skipping this would feed the model out-of-distribution inputs it never
-    saw in training.
+    Cleans inf/nan, applies the frozen-scaler transform, then clips to ±5
+    via `predictors.base._scale` — matching the training-time contract so
+    live inference never sees out-of-distribution scaled values.
     """
-    X_clean = _preprocess(X_all.copy())
-    X_scaled = data["scaler"].transform(X_clean)
+    X_scaled = _scale(data["scaler"], X_all.copy())
     pred_ret = data["model"].predict(X_scaled)
 
     sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")

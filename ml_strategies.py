@@ -22,7 +22,7 @@ from base_strategy import BaseStrategy, StrategyConfig
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from decision_layers.threshold import ThresholdDecision
 from predictor_strategy import PredictorStrategy
-from predictors.base import _preprocess, _load_validated_pickle
+from predictors.base import _preprocess, _load_validated_pickle, _scale
 from predictors.logistic import LogisticPredictor
 from predictors.xgboost_pred import XGBPredictor
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _load_pickle = _load_validated_pickle
 
 try:
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import StandardScaler, RobustScaler
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -248,12 +248,13 @@ class DailyPredictorStrategy(BaseStrategy):
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         daily_feats = make_daily_features(df)
-        X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
 
         if self.model is not None and self.scaler is not None:
-            X_scaled = self.scaler.transform(X)
-            pred_ret = self.model.predict(X_scaled)
+            pred_ret = self.model.predict(
+                _scale(self.scaler, daily_feats[FEATURE_COLS].values.astype(np.float32))
+            )
         else:
+            X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
             logger.warning(
                 "DailyPredictorStrategy: no pretrained model — using in-session "
                 "training fallback (single train/test split with embargo gap, "
@@ -273,12 +274,12 @@ class DailyPredictorStrategy(BaseStrategy):
                 X_train = X[:split][train_mask]
                 y_train = y_raw[:split][train_mask]
 
-                scaler = StandardScaler()
+                scaler = RobustScaler()
                 X_train_scaled = scaler.fit_transform(X_train)
                 model = Ridge(alpha=10.0)
                 model.fit(X_train_scaled, y_train)
 
-                X_test_scaled = scaler.transform(X[test_start:])
+                X_test_scaled = _scale(scaler, X[test_start:])
                 pred_ret[test_start:] = model.predict(X_test_scaled)
             else:
                 logger.warning(
