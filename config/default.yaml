@@ -72,7 +72,7 @@ execution:
   max_position_pct: 0.10       # 10% of equity per trade.
   stop_loss_pct: 0.05
   take_profit_pct: 0.10        # 2:1 reward:risk
-  daily_loss_limit_pct: 0.99   # effectively disabled
+  daily_loss_limit_pct: 0.10
   holding_period_days: 5
 
 # Per-strategy thresholds and hyperparameters.
