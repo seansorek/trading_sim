@@ -7,7 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_features import FEATURE_COLS, discretize_labels, make_daily_features
+from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, discretize_labels, make_daily_features
 
 
 def _synthetic_df(n: int = 150) -> pd.DataFrame:
@@ -33,14 +33,17 @@ def _synthetic_df(n: int = 150) -> pd.DataFrame:
 def test_make_daily_features_shape(capsys):
     df = _synthetic_df(200)
     feats = make_daily_features(df)
-    # Warmup rows (up to ~50 for sma_50) are dropped, so output is shorter than input
+    # Output is shorter than input due to warmup (z-score, sma_50, etc.)
     assert len(feats) < len(df)
-    assert len(feats) > 0
+    # Warmup-drift lower bound: at most ~123 bars lost to z-scored vol_regime
+    # plus the forward-return horizon. Adjust this if the bottleneck column changes.
+    assert len(feats) >= len(df) - FWD_RET_HORIZON_DAYS - 130
 
 
 def test_make_daily_features_no_inf():
-    df = _synthetic_df(100)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)
+    assert len(feats) > 0, "Empty features DataFrame — test would be vacuous"
     assert not np.isinf(feats[FEATURE_COLS].values).any(), "Features contain inf values"
 
 
@@ -55,17 +58,18 @@ def test_make_daily_features_has_fwd_ret():
 
 
 def test_feature_cols_indexing_gives_correct_shape():
-    df = _synthetic_df(80)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)
     X = feats[FEATURE_COLS].values
-    # Row count is < 80 due to warmup-row removal; column count must be exact
-    assert X.shape[0] < 80
+    assert X.shape[0] > 0, "Empty feature array — test would be vacuous"
+    # Column count must be exact
     assert X.shape[1] == len(FEATURE_COLS)
 
 
 def test_no_nan_after_fillna():
-    df = _synthetic_df(120)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)
+    assert len(feats) > 0, "Empty features DataFrame — test would be vacuous"
     assert not feats[FEATURE_COLS].isna().any().any(), "Features still contain NaN"
 
 
@@ -117,8 +121,9 @@ def test_discretize_labels_default_hold_majority():
 # ---------------------------------------------------------------------------
 
 def test_spy_relative_features_default_to_zero():
-    df = _synthetic_df(100)
+    df = _synthetic_df(200)
     feats = make_daily_features(df)  # no spy_df
+    assert len(feats) > 0, "Empty features DataFrame — test would be vacuous"
     assert (feats["ret_1d_vs_spy"] == 0.0).all()
     assert (feats["ret_5d_vs_spy"] == 0.0).all()
 
