@@ -173,14 +173,21 @@ def make_daily_features(
     feats["atr_normalized"] = _atr(df, 14) / (df["close"] + 1e-12)
 
     # --- ADX (trend strength, 0-100) ---
-    tr = _atr(df, 14) * 14
+    # Wilder's smoothing (ewm alpha=1/14) applied once to raw TR/DM, matching
+    # the standard formula — _atr() already applies its own smoothing, so
+    # reusing it here would double-smooth the DI+/DI- denominator.
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [(df["high"] - df["low"]), (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
     up_move = df["high"].diff()
     down_move = -df["low"].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
-    atr_14_raw = tr  # already 14-period sum, use rolling sum of TR
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw.ewm(alpha=1/14, adjust=False).mean() + 1e-12))
-    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw.ewm(alpha=1/14, adjust=False).mean() + 1e-12))
+    atr_14_raw = tr.ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw + 1e-12))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw + 1e-12))
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-12)
     feats["adx_14"] = dx.ewm(alpha=1/14, adjust=False).mean()
 

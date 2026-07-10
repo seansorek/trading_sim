@@ -184,17 +184,6 @@ def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
     return model, scaler, train_metrics, test_metrics
 
 
-def train_elasticnet(X_train, X_test, y_train, y_test, alpha: float, l1_ratio: float):
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
-    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
-    model.fit(X_tr, y_train)
-    train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
-    test_metrics = _forecast_metrics(model.predict(X_te), y_test)
-    return model, scaler, train_metrics, test_metrics
-
-
 def _sweep_model_params(symbols: list[str], days: int, db) -> tuple[float, float]:
     """Walk-forward sweep of alpha and l1_ratio. Returns (best_alpha, best_l1_ratio)."""
     alphas = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]

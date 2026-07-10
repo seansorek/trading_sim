@@ -105,10 +105,11 @@ def compute_predictor_signal(
     """
     Causal rolling-quantile decision layer for a continuous return forecast.
 
-    Single source of truth for the daily_predictor decision logic — called
-    by both DailyPredictorStrategy.signal() (backtest) and
-    predict_next_day_lite.py's live-prediction path, so the two can never
-    silently diverge.
+    Used by predict_next_day_lite.py's live-prediction path.
+
+    NOTE: DailyPredictorStrategy (backtest) now uses
+    compute_predictor_signal_raw_sign instead — the two decision layers
+    currently diverge. See compute_predictor_signal_raw_sign's docstring.
 
     Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY) the same length as
     pred_ret.
@@ -127,25 +128,31 @@ def compute_predictor_signal(
     return actions - 1  # {0,1,2} -> {-1,0,1}
 
 
-def compute_predictor_signal_vol_adaptive(
-    pred_ret: np.ndarray, vol_20d: np.ndarray, vol_mult: float = 0.5
+def compute_predictor_signal_raw_sign(
+    pred_ret: np.ndarray, smooth_span: int = 1
 ) -> np.ndarray:
     """
-    Volatility-adaptive decision layer.
+    Maximum-breadth decision layer: trade on sign(prediction) directly,
+    optionally EMA-smoothed first to reduce noise. No gating — every
+    non-zero (post-smoothing) forecast becomes a trade.
 
-    Trades when |predicted return| > vol_mult * trailing_volatility.
-    This is economically grounded: we trade when the expected return
-    exceeds a fraction of daily volatility, producing more trades than
-    the rolling-quantile approach while adapting to market conditions.
+    Used by DailyPredictorStrategy.signal() (backtest) as of the Sharpe
+    0.27->0.83 rework.
 
-    Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY).
+    KNOWN GAP: predict_next_day_lite.py's live path still calls
+    compute_predictor_signal (rolling-quantile gating), not this function —
+    live daily_predictor signals no longer match what was backtested here.
+    Flagged for a maintainer decision (align live to raw-sign, or revert
+    the strategy to quantile gating) rather than silently changed, since
+    it changes real trading signals sent to Discord.
+
+    Returns an int array of {-1, 0, 1} (SELL/HOLD/BUY) the same length as
+    pred_ret.
     """
-    threshold = vol_mult * np.maximum(vol_20d, 0.001)
-    trigger = np.abs(pred_ret) > threshold
-    signals = np.zeros(len(pred_ret), dtype=int)
-    signals[trigger & (pred_ret > 0)] = 1
-    signals[trigger & (pred_ret < 0)] = -1
-    return signals
+    pred_series = pd.Series(pred_ret)
+    if smooth_span > 1:
+        pred_series = pred_series.ewm(span=smooth_span, adjust=False).mean()
+    return np.sign(pred_series.values).astype(int)
 
 
 class DailyPredictorStrategy(BaseStrategy):
@@ -280,12 +287,7 @@ class DailyPredictorStrategy(BaseStrategy):
                     n,
                 )
 
-        # Trade directly on prediction sign — no gating.
-        # Use EMA smoothing to reduce noise, then sign() for direction.
-        pred_series = pd.Series(pred_ret, index=daily_feats.index)
         smooth_span = int(os.environ.get("PREDICTOR_SMOOTH_SPAN", "1"))
-        if smooth_span > 1:
-            pred_series = pred_series.ewm(span=smooth_span, adjust=False).mean()
-        signals = np.sign(pred_series.values).astype(int)
+        signals = compute_predictor_signal_raw_sign(pred_ret, smooth_span)
         return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
 
