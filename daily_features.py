@@ -254,6 +254,10 @@ def make_daily_features(
     for col in _ZSCORE_FEATURES:
         feats[col] = _rolling_zscore(feats[col])
 
+    # ponytail: vol_20d is already per-symbol z-scored by the loop above.
+    # Dividing by z-scored vol_20d is intentional — see task-4-brief.
+    feats["fwd_ret_vol_adj"] = feats["fwd_ret_1d"] / (feats["vol_20d"] + 1e-6)
+
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.
     # fwd_ret_1d is intentionally kept NaN for the last row so training code

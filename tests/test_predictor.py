@@ -250,6 +250,22 @@ def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
                 os.environ[k] = v
 
 
+def test_fwd_ret_vol_adj_column():
+    """fwd_ret_vol_adj must equal fwd_ret_1d / (vol_20d + 1e-6)."""
+    rng = np.random.default_rng(11)
+    n = 400
+    close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, n))
+    idx = pd.date_range("2023-01-01", periods=n, freq="B")
+    df = pd.DataFrame({
+        "open": close, "high": close * 1.01, "low": close * 0.99,
+        "close": close, "volume": rng.integers(1e6, 5e6, n).astype(float),
+    }, index=idx)
+    feats = make_daily_features(df).dropna(subset=["fwd_ret_1d"])
+    assert len(feats) > 0
+    expected = feats["fwd_ret_1d"] / (feats["vol_20d"] + 1e-6)
+    assert np.allclose(feats["fwd_ret_vol_adj"], expected, equal_nan=True)
+
+
 def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
     """Pickle without best_signal_quantile/best_threshold_window keys must
     fall back to hardcoded defaults without raising."""
