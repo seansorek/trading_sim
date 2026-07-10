@@ -17,7 +17,8 @@ Task 8: complete (commits 6654a7a..c4f083f, review clean after 1 fix loop — de
 Task 9: complete (commits c4f083f..dfd56c0, review clean)
 Task 10: complete (commits dfd56c0..6e2094b, review clean; minors: redundant _preprocess in ml_strategies fallback line ~250, non-discriminative test)
 Task 11: complete (commits 6e2094b..54bbed8, review clean after 1 fix loop — copy + discriminative test)
-(pending) Task 12: full suite, retrain, re-tune, recommit models
+Final whole-branch review: complete (fix wave 90c50f6, review clean — Ready to merge). Code = Tasks 1-11 done.
+Task 12: complete (commits 2b4ce6b..6aec507, review clean after root-cause fix — vol-adj target now uses raw volatility; elasticnet test_ic 0.0480 recovered from -0.007; pickle bloat cleaned; 305 passing, pickle-contract PASS).
 
 ## Minor findings (for final review triage)
 - Task 2 (test_features.py:176): guard test uses `spy = df.copy()`, so ret_*_vs_spy cols are zero-variance and filtered out (not correlation-tested). Brief comment wrong. Could use independent random SPY to actually cover those cols.
