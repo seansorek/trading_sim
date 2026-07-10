@@ -247,6 +247,23 @@ class TestRidgePredictor:
         assert scores[0] > 0
         assert scores[1] < 0
 
+    def test_ridge_predictor_uses_scale(self):
+        import numpy as np
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import RobustScaler
+        from predictors.ridge import RidgePredictor
+        from daily_features import FEATURE_COLS
+        rng = np.random.default_rng(1)
+        F = len(FEATURE_COLS)
+        Xtr = rng.normal(0, 1, (200, F))
+        scaler = RobustScaler().fit(Xtr)
+        model = Ridge().fit(scaler.transform(Xtr), rng.normal(0, 1, 200))
+        pred = RidgePredictor(model=model, scaler=scaler)
+        scores, proba = pred.predict(np.full((3, F), 1e6))  # extreme input
+        assert np.isfinite(scores).all() and proba is None
+        # With _scale, extreme inputs are clipped to ±CLIP before the model sees them,
+        # so predictions stay bounded/finite rather than exploding.
+
     def test_metadata_attributes_available(self):
         pred = self._create_mock_predictor()
         assert pred.train_ic == pytest.approx(0.06)
