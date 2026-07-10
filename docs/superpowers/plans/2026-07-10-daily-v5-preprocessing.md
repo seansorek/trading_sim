@@ -509,7 +509,7 @@ Add to `tests/test_predictor.py`:
 
 ```python
 def test_prepare_data_uses_vol_adj_target(monkeypatch):
-    # y_train must equal fwd_ret_vol_adj, not raw fwd_ret_1d.
+    # y_train must equal fwd_ret_vol_adj, NOT raw fwd_ret_1d.
     import numpy as np, pandas as pd
     import train_predictor as tp
     from daily_features import make_daily_features
@@ -520,13 +520,23 @@ def test_prepare_data_uses_vol_adj_target(monkeypatch):
                        "close": close, "volume": rng.integers(1e6,5e6,n).astype(float)}, index=idx)
     monkeypatch.setattr(tp, "_load_symbol", lambda *a, **k: df)
     data = tp.prepare_data(["AAA"], 2500, db=None)
-    feats = make_daily_features(df).dropna(subset=["fwd_ret_1d"])
-    assert np.allclose(np.sort(data["y_train"])[:5],
-                       np.sort(feats["fwd_ret_vol_adj"].values[: len(data["y_train"])])[:5],
-                       atol=1e-6) or data["y_train"].std() > 0  # target is vol-adj scaled
-```
 
-(The assertion's core intent: `prepare_data` reads `fwd_ret_vol_adj`. Keep it simple — the reviewer verifies the source column in Step 3.)
+    # Reference mirrors prepare_data exactly: monkeypatched _load_symbol returns
+    # df for SPY too (so ret_*_vs_spy == 0), same dropna subset, same 80% split.
+    feats = make_daily_features(df, spy_df=df).dropna(subset=["fwd_ret_vol_adj"])
+    split = int(len(feats) * 0.8)
+    expected_train = feats["fwd_ret_vol_adj"].values[:split]
+
+    assert len(data["y_train"]) == len(expected_train)
+    assert np.allclose(data["y_train"], expected_train, atol=1e-9), (
+        "prepare_data must train on fwd_ret_vol_adj, not raw fwd_ret_1d"
+    )
+    # Explicitly guard against silent regression to the raw target:
+    raw_train = feats["fwd_ret_1d"].values[:split]
+    assert not np.allclose(data["y_train"], raw_train, atol=1e-9), (
+        "y_train equals raw fwd_ret_1d — vol-adjustment was not applied"
+    )
+```
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -708,22 +718,30 @@ git commit -m "feat: route live prediction + strategy through _scale/RobustScale
 **Interfaces:**
 - Consumes: `RobustScaler`, `_scale`.
 
-- [ ] **Step 1: Write/adjust a smoke test**
+- [ ] **Step 1: Write a behavioral test for the preprocessing change**
 
 Add to `tests/test_hybrid.py`:
 
 ```python
-def test_hybrid_scaler_is_robust():
-    from sklearn.preprocessing import RobustScaler
-    import inspect, train_hybrid
-    src = inspect.getsource(train_hybrid)
-    assert "RobustScaler" in src and "StandardScaler" not in src
+def test_hybrid_preprocess_no_longer_clips():
+    import numpy as np
+    from train_hybrid import _preprocess
+    # #4: clipping moved out of _preprocess into _scale — _preprocess must now
+    # only sanitize inf/nan and leave finite extremes untouched.
+    X = np.zeros((20, 3)); X[0, 0] = 1000.0
+    out = _preprocess(X.copy())
+    assert out[0, 0] == 1000.0, "hybrid _preprocess must not clip finite values"
+    X2 = np.array([[np.inf, -np.inf, np.nan, 2.0]])
+    out2 = _preprocess(X2.copy())
+    assert np.isfinite(out2).all(), "hybrid _preprocess must replace inf/nan with finite values"
 ```
+
+Note: the `StandardScaler` → `RobustScaler` swap (also part of Step 3) is verified by the review diff plus the shared `_scale` behavioral tests from Task 5; this test locks in the concrete behavioral change to hybrid's own `_preprocess`.
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `pytest tests/test_hybrid.py::test_hybrid_scaler_is_robust -v`
-Expected: FAIL — uses `StandardScaler`.
+Run: `pytest tests/test_hybrid.py::test_hybrid_preprocess_no_longer_clips -v`
+Expected: FAIL — current `_preprocess` clips at ±5σ, so `out[0, 0]` is pulled well below 1000.
 
 - [ ] **Step 3: Edit `train_hybrid.py`**
 
