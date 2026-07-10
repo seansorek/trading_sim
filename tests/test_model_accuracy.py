@@ -36,6 +36,19 @@ import pickle
 import pytest
 
 
+def test_train_logistic_scaler_is_robust_and_clipped():
+    import numpy as np
+    from sklearn.preprocessing import RobustScaler
+    from train_models import train_logistic
+    from daily_features import FEATURE_COLS
+    rng = np.random.default_rng(2)
+    F = len(FEATURE_COLS)
+    Xtr, Xte = rng.normal(0, 1, (300, F)), rng.normal(0, 1, (80, F))
+    ytr = rng.integers(0, 3, 300); yte = rng.integers(0, 3, 80)
+    model, scaler, *_ = train_logistic(Xtr, Xte, ytr, yte, cfg={})
+    assert isinstance(scaler, RobustScaler)
+
+
 def _load_artifact(path):
     if not os.path.exists(path):
         pytest.skip(f"No {path} yet — run train_models.py first")
