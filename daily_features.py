@@ -251,12 +251,17 @@ def make_daily_features(
     # inflating reward magnitude and double-counting overlapping windows.
     feats["fwd_ret_1d"] = (df["close"].shift(-FWD_RET_HORIZON_DAYS) / df["close"]) - 1
 
+    # Capture raw vol_20d before the z-score loop (the z-scored vol_20d is
+    # still a valid model feature; only the target denominator needs raw vol).
+    raw_vol_20d = feats["vol_20d"].copy()
+
     for col in _ZSCORE_FEATURES:
         feats[col] = _rolling_zscore(feats[col])
 
-    # ponytail: vol_20d is already per-symbol z-scored by the loop above.
-    # Dividing by z-scored vol_20d is intentional — see task-4-brief.
-    feats["fwd_ret_vol_adj"] = feats["fwd_ret_1d"] / (feats["vol_20d"] + 1e-6)
+    # ponytail: divides by RAW vol_20d, not the z-scored column (which
+    # crosses zero). The z-scored vol_20d remains a model feature — only
+    # the target denominator changes. See task-12-fix-brief.
+    feats["fwd_ret_vol_adj"] = feats["fwd_ret_1d"] / (raw_vol_20d + 1e-6)
 
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.

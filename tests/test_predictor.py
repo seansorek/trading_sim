@@ -251,7 +251,7 @@ def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
 
 
 def test_fwd_ret_vol_adj_column():
-    """fwd_ret_vol_adj must equal fwd_ret_1d / (vol_20d + 1e-6)."""
+    """fwd_ret_vol_adj must divide by RAW volatility, not the z-scored vol_20d column."""
     rng = np.random.default_rng(11)
     n = 400
     close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, n))
@@ -262,8 +262,11 @@ def test_fwd_ret_vol_adj_column():
     }, index=idx)
     feats = make_daily_features(df).dropna(subset=["fwd_ret_1d"])
     assert len(feats) > 0
-    expected = feats["fwd_ret_1d"] / (feats["vol_20d"] + 1e-6)
-    assert np.allclose(feats["fwd_ret_vol_adj"], expected, equal_nan=True)
+    # fwd_ret_vol_adj must divide by RAW volatility (pre-z-score), not the
+    # z-scored vol_20d column that make_daily_features outputs.
+    raw_vol = df["close"].pct_change().rolling(20).std()
+    expected = feats["fwd_ret_1d"].values / (raw_vol.loc[feats.index].values + 1e-6)
+    assert np.allclose(feats["fwd_ret_vol_adj"].values, expected, equal_nan=True)
 
 
 def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
