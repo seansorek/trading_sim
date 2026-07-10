@@ -36,7 +36,7 @@ import pickle
 import pytest
 
 
-def test_train_logistic_scaler_is_robust_and_clipped():
+def test_train_logistic_scaler_is_robust():
     import numpy as np
     from sklearn.preprocessing import RobustScaler
     from train_models import train_logistic

@@ -12,7 +12,7 @@ class LogisticPredictor(BasePredictor):
     """Logistic regression predictor for next-day return class.
 
     Loads from a pickle produced by train_models.py.
-    Handles its own StandardScaler and _preprocess pass.
+    Handles its own scaling via the shared _scale helper (frozen RobustScaler + fixed clip).
     """
 
     def __init__(self, model, scaler, confidence_threshold: float = 0.55):

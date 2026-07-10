@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _load_pickle = _load_validated_pickle
 
 try:
-    from sklearn.preprocessing import StandardScaler, RobustScaler
+    from sklearn.preprocessing import RobustScaler
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -178,7 +178,7 @@ class DailyPredictorStrategy(BaseStrategy):
     whatever scale a given prediction model produces.
 
     Loads from a pickle with structure:
-      {'model': Ridge, 'scaler': StandardScaler, 'feature_contract': FEATURE_COLS, ...}
+      {'model': Ridge, 'scaler': RobustScaler, 'feature_contract': FEATURE_COLS, ...}
 
     Raises RuntimeError on load failure — never silently returns all-HOLD.
     """
@@ -193,7 +193,7 @@ class DailyPredictorStrategy(BaseStrategy):
     ):
         super().__init__(cfg)
         self.model = None
-        self.scaler: Optional[StandardScaler] = None
+        self.scaler: Optional[RobustScaler] = None
         # Params set here before pickle load; updated below if pickle has tuned values.
         self.signal_quantile = signal_quantile
         self.threshold_window = threshold_window
@@ -263,7 +263,7 @@ class DailyPredictorStrategy(BaseStrategy):
             )
             from sklearn.linear_model import Ridge
 
-            y_raw = daily_feats["fwd_ret_1d"].values
+            y_raw = daily_feats["fwd_ret_vol_adj"].values
             n = len(daily_feats)
             split = int(n * 0.8)
             test_start = split + FWD_RET_HORIZON_DAYS

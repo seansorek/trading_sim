@@ -178,7 +178,15 @@ def test_no_pairwise_feature_correlation_above_098():
         "close": close,
         "volume": rng.integers(1_000_000, 5_000_000, n).astype(float),
     }, index=idx)
-    spy = df.copy()  # non-constant SPY so ret_*_vs_spy has variance
+    srng = np.random.default_rng(99)
+    sclose = 100 * np.cumprod(1 + srng.normal(0.0004, 0.010, n))
+    spy = pd.DataFrame({
+        "open": sclose * srng.uniform(0.99, 1.01, n),
+        "high": sclose * srng.uniform(1.00, 1.02, n),
+        "low":  sclose * srng.uniform(0.98, 1.00, n),
+        "close": sclose,
+        "volume": srng.integers(1_000_000, 5_000_000, n).astype(float),
+    }, index=idx)
 
     feats = make_daily_features(df, spy_df=spy)[FEATURE_COLS]
     # Drop near-constant columns (correlation undefined)

@@ -130,7 +130,7 @@ def prepare_data(
       X_train_seq, X_val_seq, X_test_seq   — (M, lookback, n_feat) sequences (scaled)
       X_train_last, X_val_last, X_test_last — (M, n_feat) last-bar features (scaled)
       y_train, y_val, y_test                — labels
-      scaler                                 — fitted StandardScaler on raw features
+      scaler                                 — fitted RobustScaler on raw features
       used_symbols                           — list of symbols that yielded data
     """
     end = datetime.now().strftime("%Y-%m-%d")
