@@ -151,3 +151,38 @@ def test_ad_normalized_bounded_std():
     vals = feats["ad_normalized"].dropna()
     std = float(vals.std())
     assert 0.1 < std < 5.0, f"ad_normalized std {std:.3f} looks wrong"
+
+
+# ---------------------------------------------------------------------------
+# Feature correlation guard
+# ---------------------------------------------------------------------------
+
+def test_no_pairwise_feature_correlation_above_098():
+    import numpy as np
+    import pandas as pd
+    from daily_features import FEATURE_COLS, make_daily_features
+
+    rng = np.random.default_rng(7)
+    n = 500
+    close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, n))
+    idx = pd.date_range("2023-01-01", periods=n, freq="B")
+    df = pd.DataFrame({
+        "open": close * rng.uniform(0.99, 1.01, n),
+        "high": close * rng.uniform(1.00, 1.02, n),
+        "low": close * rng.uniform(0.98, 1.00, n),
+        "close": close,
+        "volume": rng.integers(1_000_000, 5_000_000, n).astype(float),
+    }, index=idx)
+    spy = df.copy()  # non-constant SPY so ret_*_vs_spy has variance
+
+    feats = make_daily_features(df, spy_df=spy)[FEATURE_COLS]
+    # Drop near-constant columns (correlation undefined)
+    keep = [c for c in FEATURE_COLS if feats[c].std() > 1e-9]
+    corr = feats[keep].corr().abs()
+    # Use a writable copy of the underlying array for the off-diagonal mask
+    off_diag = np.where(~np.eye(len(keep), dtype=bool), corr.values, 0.0)
+    worst = off_diag.max()
+    offenders = [(keep[i], keep[j], off_diag[i, j])
+                 for i in range(len(keep)) for j in range(i + 1, len(keep))
+                 if off_diag[i, j] > 0.98]
+    assert worst <= 0.98, f"Feature pairs with |corr|>0.98: {offenders}"
