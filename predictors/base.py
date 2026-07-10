@@ -15,18 +15,20 @@ from daily_features import FEATURE_COLS, FEATURE_SET_NAME
 logger = logging.getLogger(__name__)
 
 
+CLIP = 5.0
+
+
 def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0, clip to ±5 std per column. Returns a copy."""
+    """Replace inf/nan with 0. Returns a copy. (Clipping now lives in _scale.)"""
     X = X.copy()
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
     return X
+
+
+def _scale(scaler, X: np.ndarray) -> np.ndarray:
+    """Frozen-scaler transform + fixed clip. Consistent at train and serve time."""
+    return np.clip(scaler.transform(_preprocess(X)), -CLIP, CLIP)
 
 
 def _load_validated_pickle(
