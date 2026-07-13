@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_features import FWD_RET_HORIZON_DAYS, make_daily_features
+from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 import train_predictor
 from base_strategy import StrategyConfig
 from ml_strategies import DailyPredictorStrategy, compute_predictor_signal
@@ -76,6 +76,28 @@ def test_forecast_metrics_perfect_rank_correlation():
     pred = actual * 2 + 1  # monotonic transform -> IC should be 1.0
     m = train_predictor._forecast_metrics(pred, actual)
     assert m["ic"] == pytest.approx(1.0)
+
+
+def test_train_elasticnet_returns_fitted_model_and_scaler():
+    """--model elasticnet is the CLI default (train_predictor.py's --model
+    choices), so a regression here (e.g. train_elasticnet undefined or
+    mis-wired) breaks the default training path outright."""
+    from sklearn.linear_model import ElasticNet
+    from sklearn.preprocessing import RobustScaler
+
+    rng = np.random.default_rng(3)
+    F = len(FEATURE_COLS)
+    X_train, X_test = rng.normal(0, 1, (200, F)), rng.normal(0, 1, (60, F))
+    y_train, y_test = rng.normal(0, 1, 200), rng.normal(0, 1, 60)
+
+    model, scaler, train_m, test_m = train_predictor.train_elasticnet(
+        X_train, X_test, y_train, y_test, alpha=1.0, l1_ratio=0.5
+    )
+
+    assert isinstance(model, ElasticNet)
+    assert isinstance(scaler, RobustScaler)
+    assert {"ic", "dir_acc", "r2", "mae"}.issubset(train_m.keys())
+    assert {"ic", "dir_acc", "r2", "mae"}.issubset(test_m.keys())
 
 
 def test_predictor_artifact_contract():
