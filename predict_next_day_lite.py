@@ -9,6 +9,7 @@ Key design contract:
 - Fails loudly on model load errors instead of silently returning HOLD.
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -253,11 +254,32 @@ def _load_hybrid_pkl(path: str) -> dict:
     reconstructs the TransformerEncoder here, once, at load time, so
     predict_symbol just runs it — it doesn't rebuild the network on every
     call. Raises RuntimeError on any failure, matching _load_pkl's contract.
+
+    Verifies SHA-256 integrity against a sibling `.sha256` file before
+    unpickling, same contract as predictors.base._load_validated_pickle
+    (issue #72) — every other model pickle goes through that check.
     """
     if not os.path.exists(path):
         raise RuntimeError(
             f"[daily_hybrid] Model file not found: {path}. Run train_hybrid.py first."
         )
+
+    hash_path = path + ".sha256"
+    if os.path.exists(hash_path):
+        with open(hash_path, encoding="ascii") as fh:
+            expected_hash = fh.read().strip()
+        with open(path, "rb") as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                f"[daily_hybrid] Integrity check failed for {path}: SHA-256 mismatch. Retrain."
+            )
+    else:
+        logger.warning(
+            "[daily_hybrid] No hash file for %s — skipping integrity check. Retrain to enable it.",
+            path,
+        )
+
     try:
         with open(path, "rb") as f:
             data = pickle.load(f)

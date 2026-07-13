@@ -1125,6 +1125,44 @@ class TestLoadHybridPkl:
         with pytest.raises(RuntimeError, match="Feature contract mismatch"):
             _load_hybrid_pkl(path)
 
+    def test_correct_hash_loads_successfully(self):
+        import hashlib
+
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        with open(path + ".sha256", "w", encoding="ascii") as f:
+            f.write(digest)
+
+        loaded = _load_hybrid_pkl(path)
+        assert "transformer" in loaded
+
+    def test_hash_mismatch_raises(self):
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with open(path + ".sha256", "w", encoding="ascii") as f:
+            f.write("0" * 64)
+
+        with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+            _load_hybrid_pkl(path)
+
+    def test_missing_hash_file_logs_warning_and_still_loads(self, caplog):
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+
+        with caplog.at_level(logging.WARNING):
+            loaded = _load_hybrid_pkl(path)
+
+        assert "transformer" in loaded
+        assert any("skipping integrity check" in rec.message for rec in caplog.records)
+
 
 class TestLoadModelsHybrid:
     def test_loads_daily_hybrid_when_pickle_present(self, tmp_path, monkeypatch):
