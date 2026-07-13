@@ -22,7 +22,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
+from predictors.base import _scale
 
 try:
     import xgboost as xgb
@@ -85,15 +86,10 @@ def _pickle_and_hash(artifact: dict, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0; clip to ±5 std per column."""
+    """Replace inf/nan with 0. Returns a copy. (Clipping now lives in _scale.)"""
+    X = X.copy()
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
     return X
 
 
@@ -235,7 +231,7 @@ def _make_artifact_path(model_key: str, version: int) -> str:
 def _save_and_register(
     model_key: str,
     model_obj,
-    scaler: StandardScaler,
+    scaler: RobustScaler,
     train_accuracy: float,
     test_accuracy: float,
     test_f1: float,
@@ -309,10 +305,11 @@ def train_logistic(
     cfg: dict,
     optimize: bool = False,
     opt_cfg=None,
-) -> tuple[LogisticRegression, StandardScaler, float, float, float]:
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+) -> tuple[LogisticRegression, RobustScaler, float, float, float]:
+    scaler = RobustScaler()
+    scaler.fit(_preprocess(X_train))
+    X_tr = _scale(scaler, X_train)
+    X_te = _scale(scaler, X_test)
 
     if optimize and HAS_SKOPT and opt_cfg is not None:
         logger.info("Running Bayesian hyperparameter search for Logistic Regression...")
@@ -385,9 +382,10 @@ def train_xgboost(
     if not HAS_XGBOOST:
         raise ImportError("xgboost not installed. pip install xgboost")
 
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    scaler = RobustScaler()
+    scaler.fit(_preprocess(X_train))
+    X_tr = _scale(scaler, X_train)
+    X_te = _scale(scaler, X_test)
 
     if optimize and not HAS_SKOPT:
         logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")

@@ -80,18 +80,19 @@ class TestPredictorStrategy:
         assert isinstance(sig, pd.Series)
 
     def test_signal_values_are_in_minus1_0_1(self):
-        df = _make_ohlcv(50)
+        df = _make_ohlcv(200)
         n = len(df)
         signals = np.array([1, -1, 0] * (n // 3) + [0] * (n % 3))
         pred = _mock_predictor(signals.astype(float))
         dec = _mock_decision(signals)
         strat = PredictorStrategy(_cfg(), pred, dec)
         sig = strat.signal(pd.DataFrame(), df)
+        assert len(sig) > 0, "Empty signal series — test would be vacuous"
         assert set(sig.dropna().unique()).issubset({-1, 0, 1})
 
     def test_signal_applies_one_bar_execution_lag(self):
         """Signal at bar i should appear at bar i+1 in the output."""
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)
         n = len(df)
         # Decision emits BUY (1) at bar index 5 (relative to daily_feats), HOLD elsewhere
         raw = np.zeros(n, dtype=int)
@@ -105,7 +106,7 @@ class TestPredictorStrategy:
         assert sig.iloc[5] == 0
 
     def test_predictor_receives_correct_feature_shape(self):
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)
         n = len(df)
         pred = _mock_predictor(np.zeros(n))
         dec = _mock_decision(np.zeros(n, dtype=int))
@@ -113,11 +114,12 @@ class TestPredictorStrategy:
         strat.signal(pd.DataFrame(), df)
         call_args = pred.predict.call_args
         X = call_args[0][0]
+        assert X.shape[0] > 0, "Empty feature matrix — test would be vacuous"
         assert X.shape[1] == len(FEATURE_COLS)
         assert X.dtype == np.float32
 
     def test_decision_receives_scores_and_proba(self):
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)
         n = len(df)
         # We need proba sized to the actual daily_feats length; use a dynamic mock
         captured_proba = {}
@@ -141,10 +143,12 @@ class TestPredictorStrategy:
 
         call_kwargs = dec.decide.call_args
         _, proba_arg, _ = call_kwargs[0]
+        assert len(proba_arg) > 0, "Empty proba array — test would be vacuous"
+        assert len(captured_proba["value"]) > 0, "Empty captured proba — test would be vacuous"
         np.testing.assert_array_equal(proba_arg, captured_proba["value"])
 
     def test_holding_period_is_enforced(self):
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)
         n = len(df)
         # BUY signals at bars 0, 1, 2 — with holding_period=5, only first should fire
         raw = np.array([1, 1, 1] + [0] * (n - 3), dtype=int)

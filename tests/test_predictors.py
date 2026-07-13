@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from daily_features import FEATURE_COLS
-from predictors.base import BasePredictor, _preprocess
+from predictors.base import BasePredictor, _preprocess, _scale, CLIP
 from predictors.logistic import LogisticPredictor
 from predictors.xgboost_pred import XGBPredictor
 from predictors.ridge import RidgePredictor
@@ -33,12 +33,23 @@ class TestBasePredictor:
         out = _preprocess(X)
         assert not np.isnan(out).any()
 
-    def test_preprocess_clips_outliers_per_column(self):
+    def test_preprocess_no_longer_clips(self):
+        X = np.zeros((50, 3))
+        X[0, 0] = 1000.0  # extreme but finite
+        out = _preprocess(X)
+        assert out[0, 0] == 1000.0  # _preprocess must NOT clip anymore
+
+    def test_scale_clips_scaled_output_and_uses_frozen_stats(self):
+        from sklearn.preprocessing import RobustScaler
         rng = np.random.default_rng(0)
-        X = rng.standard_normal((100, 3))
-        X[0, 0] = 1_000.0  # extreme outlier in col 0
-        out = _preprocess(X.copy())
-        assert out[0, 0] < 1_000.0
+        X_train = rng.normal(0, 1, (200, 3))
+        scaler = RobustScaler().fit(X_train)
+        X_new = np.full((5, 3), 100.0)  # far outside train distribution
+        out = _scale(scaler, X_new)
+        assert out.max() <= CLIP and out.min() >= -CLIP
+        # frozen: transforming via _scale must match manual frozen-scaler path
+        manual = np.clip(scaler.transform(np.nan_to_num(X_new)), -CLIP, CLIP)
+        assert np.allclose(out, manual)
 
     def test_preprocess_preserves_shape(self):
         X = np.ones((50, 10))
@@ -235,6 +246,23 @@ class TestRidgePredictor:
         scores, _ = pred.predict(X)
         assert scores[0] > 0
         assert scores[1] < 0
+
+    def test_ridge_predictor_uses_scale(self):
+        import numpy as np
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import RobustScaler
+        from predictors.ridge import RidgePredictor
+        from daily_features import FEATURE_COLS
+        rng = np.random.default_rng(1)
+        F = len(FEATURE_COLS)
+        Xtr = rng.normal(0, 1, (200, F))
+        scaler = RobustScaler().fit(Xtr)
+        model = Ridge().fit(scaler.transform(Xtr), rng.normal(0, 1, 200))
+        pred = RidgePredictor(model=model, scaler=scaler)
+        scores, proba = pred.predict(np.full((3, F), 1e6))  # extreme input
+        assert np.isfinite(scores).all() and proba is None
+        # With _scale, extreme inputs are clipped to ±CLIP before the model sees them,
+        # so predictions stay bounded/finite rather than exploding.
 
     def test_metadata_attributes_available(self):
         pred = self._create_mock_predictor()

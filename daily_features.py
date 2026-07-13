@@ -1,7 +1,7 @@
 """
 daily_features.py — Daily OHLCV feature engineering.
 
-FEATURE_COLS is the canonical ordered list of model input columns.
+FEATURE_COLS is the canonical ordered list of model input columns (29 features).
 All training and prediction code must index features using this list,
 never by DataFrame column iteration order.
 """
@@ -15,7 +15,7 @@ FWD_RET_HORIZON_DAYS = 3
 
 # Version string stored alongside model pickles. Bump when FEATURE_COLS changes;
 # old models become explicitly incompatible.
-FEATURE_SET_NAME: str = "daily_v4"
+FEATURE_SET_NAME: str = "daily_v5"
 
 # Canonical feature order — the contract between training and prediction.
 # All features are dimensionless/normalized so they are comparable across symbols
@@ -31,16 +31,13 @@ FEATURE_COLS: list[str] = [
     "ma_spread_20_50",   # (sma20 - sma50) / close — normalized
     "macd",
     "macd_signal",
-    "macd_hist",
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
-    "vol_z_20",
     "bb_width",          # (bb_upper - bb_lower) / close — normalized
     "bb_position",
     "stoch_k",
     "stoch_d",
-    "williams_r",
     "roc_12",
     "atr_normalized",
     "adx_14",             # trend strength (0-100)
@@ -72,6 +69,30 @@ def discretize_labels(
     y[returns > pos_thr] = 2              # BUY
     y[returns < neg_thr] = 0              # SELL
     return y
+
+
+_ZSCORE_WINDOW = 252
+_ZSCORE_MIN_PERIODS = 60
+
+# Unbounded / scale-varying features that get per-symbol rolling z-scoring.
+# Bounded oscillators (rsi_14, stoch_k, stoch_d, adx_14, bb_position,
+# atr_normalized) and already-z-scored features (turnover_z, bb_width,
+# vpt/ad/obv_normalized) are intentionally excluded.
+_ZSCORE_FEATURES: list[str] = [
+    "ret_1d", "ret_5d", "ret_10d", "ret_21d", "vol_20d",
+    "macd", "macd_signal", "ma_spread_10_20", "ma_spread_20_50",
+    "price_vs_sma20", "price_vs_sma50", "roc_12", "gap", "hl_ratio",
+    "vol_regime", "rel_volume", "ret_1d_vs_spy", "ret_5d_vs_spy",
+]
+
+
+def _rolling_zscore(
+    s: pd.Series, window: int = _ZSCORE_WINDOW, min_periods: int = _ZSCORE_MIN_PERIODS
+) -> pd.Series:
+    """Causal per-symbol z-score: (x - rolling_mean) / rolling_std. Uses past+present only."""
+    mean = s.rolling(window, min_periods=min_periods).mean()
+    std = s.rolling(window, min_periods=min_periods).std()
+    return (s - mean) / (std + 1e-12)
 
 
 def _safe_ema(series: pd.Series, span: int) -> pd.Series:
@@ -143,16 +164,11 @@ def make_daily_features(
     signal = _safe_ema(macd, 9)
     feats["macd"] = macd
     feats["macd_signal"] = signal
-    feats["macd_hist"] = macd - signal
 
     feats["rsi_14"] = _rsi(df["close"], 14)
 
     feats["price_vs_sma20"] = (df["close"] - sma_20) / (sma_20 + 1e-12)
     feats["price_vs_sma50"] = (df["close"] - sma_50) / (sma_50 + 1e-12)
-
-    feats["vol_z_20"] = (df["volume"] - df["volume"].rolling(20).mean()) / (
-        df["volume"].rolling(20).std() + 1e-12
-    )
 
     bb_mid = df["close"].rolling(20).mean()
     bb_std_dev = df["close"].rolling(20).std()
@@ -166,8 +182,6 @@ def make_daily_features(
     highest_high = df["high"].rolling(14).max()
     feats["stoch_k"] = 100.0 * (df["close"] - lowest_low) / (highest_high - lowest_low + 1e-12)
     feats["stoch_d"] = feats["stoch_k"].rolling(3).mean()
-
-    feats["williams_r"] = -100.0 * (highest_high - df["close"]) / (highest_high - lowest_low + 1e-12)
 
     feats["roc_12"] = (df["close"] - df["close"].shift(12)) / (df["close"].shift(12) + 1e-12)
     feats["atr_normalized"] = _atr(df, 14) / (df["close"] + 1e-12)
@@ -237,10 +251,21 @@ def make_daily_features(
     # inflating reward magnitude and double-counting overlapping windows.
     feats["fwd_ret_1d"] = (df["close"].shift(-FWD_RET_HORIZON_DAYS) / df["close"]) - 1
 
+    # Capture raw vol_20d before the z-score loop (the z-scored vol_20d is
+    # still a valid model feature; only the target denominator needs raw vol).
+    raw_vol_20d = feats["vol_20d"].copy()
+
+    for col in _ZSCORE_FEATURES:
+        feats[col] = _rolling_zscore(feats[col])
+
+    # ponytail: divides by RAW vol_20d, not the z-scored column (which
+    # crosses zero). The z-scored vol_20d remains a model feature — only
+    # the target denominator changes. See task-12-fix-brief.
+    feats["fwd_ret_vol_adj"] = feats["fwd_ret_1d"] / (raw_vol_20d + 1e-6)
+
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.
     # fwd_ret_1d is intentionally kept NaN for the last row so training code
     # can remove it with dropna(subset=["fwd_ret_1d"]).
     feats = feats.dropna(subset=FEATURE_COLS)
-    feats[FEATURE_COLS] = feats[FEATURE_COLS].fillna(0.0)
     return feats

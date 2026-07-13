@@ -30,16 +30,13 @@ _EXPECTED_FEATURE_COLS = [
     "ma_spread_20_50",
     "macd",
     "macd_signal",
-    "macd_hist",
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
-    "vol_z_20",
     "bb_width",
     "bb_position",
     "stoch_k",
     "stoch_d",
-    "williams_r",
     "roc_12",
     "atr_normalized",
     "adx_14",
@@ -189,8 +186,13 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_32():
-    assert len(FEATURE_COLS) == 32, (
-        f"Expected 32 features, got {len(FEATURE_COLS)}. "
+def test_feature_cols_count_is_29():
+    assert len(FEATURE_COLS) == 29, (
+        f"Expected 29 features, got {len(FEATURE_COLS)}. "
         "Update CLAUDE.md and all docs if you intentionally changed the count."
     )
+
+
+def test_dropped_exact_duplicates_absent():
+    assert "williams_r" not in FEATURE_COLS, "williams_r == stoch_k-100 (exact dup)"
+    assert "macd_hist" not in FEATURE_COLS, "macd_hist == macd-macd_signal (exact dup)"

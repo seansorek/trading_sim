@@ -250,6 +250,25 @@ def test_predictor_strategy_reads_best_params_from_pickle(tmp_path):
                 os.environ[k] = v
 
 
+def test_fwd_ret_vol_adj_column():
+    """fwd_ret_vol_adj must divide by RAW volatility, not the z-scored vol_20d column."""
+    rng = np.random.default_rng(11)
+    n = 400
+    close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, n))
+    idx = pd.date_range("2023-01-01", periods=n, freq="B")
+    df = pd.DataFrame({
+        "open": close, "high": close * 1.01, "low": close * 0.99,
+        "close": close, "volume": rng.integers(1e6, 5e6, n).astype(float),
+    }, index=idx)
+    feats = make_daily_features(df).dropna(subset=["fwd_ret_1d"])
+    assert len(feats) > 0
+    # fwd_ret_vol_adj must divide by RAW volatility (pre-z-score), not the
+    # z-scored vol_20d column that make_daily_features outputs.
+    raw_vol = df["close"].pct_change().rolling(20).std()
+    expected = feats["fwd_ret_1d"].values / (raw_vol.loc[feats.index].values + 1e-6)
+    assert np.allclose(feats["fwd_ret_vol_adj"].values, expected, equal_nan=True)
+
+
 def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
     """Pickle without best_signal_quantile/best_threshold_window keys must
     fall back to hardcoded defaults without raising."""
@@ -278,3 +297,31 @@ def test_predictor_strategy_old_pickle_falls_back_to_defaults(tmp_path):
         for k, v in env_backup.items():
             if v is not None:
                 os.environ[k] = v
+
+
+def test_prepare_data_uses_vol_adj_target(monkeypatch):
+    """y_train must equal fwd_ret_vol_adj, NOT raw fwd_ret_1d."""
+    rng = np.random.default_rng(5)
+    n = 400
+    close = 100 * np.cumprod(1 + rng.normal(0.0005, 0.012, n))
+    idx = pd.date_range("2022-01-01", periods=n, freq="B")
+    df = pd.DataFrame({"open": close, "high": close*1.01, "low": close*0.99,
+                       "close": close, "volume": rng.integers(1e6,5e6,n).astype(float)}, index=idx)
+    monkeypatch.setattr(train_predictor, "_load_symbol", lambda *a, **k: df)
+    data = train_predictor.prepare_data(["AAA"], 2500, db=None)
+
+    # Reference mirrors prepare_data exactly: monkeypatched _load_symbol returns
+    # df for SPY too (so ret_*_vs_spy == 0), same dropna subset, same 80% split.
+    feats = make_daily_features(df, spy_df=df).dropna(subset=["fwd_ret_vol_adj"])
+    split = int(len(feats) * 0.8)
+    expected_train = feats["fwd_ret_vol_adj"].values[:split]
+
+    assert len(data["y_train"]) == len(expected_train)
+    assert np.allclose(data["y_train"], expected_train, atol=1e-9), (
+        "prepare_data must train on fwd_ret_vol_adj, not raw fwd_ret_1d"
+    )
+    # Explicitly guard against silent regression to the raw target:
+    raw_train = feats["fwd_ret_1d"].values[:split]
+    assert not np.allclose(data["y_train"], raw_train, atol=1e-9), (
+        "y_train equals raw fwd_ret_1d — vol-adjustment was not applied"
+    )

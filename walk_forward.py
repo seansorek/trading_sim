@@ -21,7 +21,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import ElasticNet, Ridge
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
+from predictors.base import _scale
 
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from ml_strategies import compute_predictor_signal
@@ -62,7 +63,7 @@ def run_walk_forward_on_df(
     Raises ValueError if there are fewer bars than one complete fold
     (train_bars + FWD_RET_HORIZON_DAYS + test_bars).
     """
-    feats = make_daily_features(df, spy_df=spy_df).dropna(subset=["fwd_ret_1d"])
+    feats = make_daily_features(df, spy_df=spy_df).dropna(subset=["fwd_ret_vol_adj"])
     n = len(feats)
     min_bars = config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars
     if n < min_bars:
@@ -73,7 +74,7 @@ def run_walk_forward_on_df(
         )
 
     X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
-    y_all = feats["fwd_ret_1d"].values.astype(np.float64)
+    y_all = feats["fwd_ret_vol_adj"].values.astype(np.float64)
     dates = feats.index
 
     records = []
@@ -92,9 +93,9 @@ def run_walk_forward_on_df(
         X_te = X_all[test_start_idx:test_end_idx]
         y_te = y_all[test_start_idx:test_end_idx]
 
-        scaler = StandardScaler()
-        X_tr_s = scaler.fit_transform(X_tr)
-        X_te_s = scaler.transform(X_te)
+        scaler = RobustScaler().fit(X_tr)
+        X_tr_s = _scale(scaler, X_tr)
+        X_te_s = _scale(scaler, X_te)
 
         if config.use_elasticnet:
             model = ElasticNet(alpha=config.ridge_alpha, l1_ratio=config.l1_ratio,
@@ -164,7 +165,7 @@ def sweep_params(
             continue
         try:
             spy_arg = spy_df if symbol != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_1d"])
+            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_vol_adj"])
         except Exception as exc:
             logger.warning("sweep_params: feature error for %s: %s", symbol, exc)
             continue
@@ -175,7 +176,7 @@ def sweep_params(
             continue
 
         X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
-        y_all = feats["fwd_ret_1d"].values.astype(np.float64)
+        y_all = feats["fwd_ret_vol_adj"].values.astype(np.float64)
         train_start_idx = 0
 
         while True:
@@ -187,9 +188,8 @@ def sweep_params(
 
             # Fit scaler only on train, transform full window for causal rolling quantile
             X_window = X_all[train_start_idx:test_end_idx]
-            scaler = StandardScaler()
-            scaler.fit(X_all[train_start_idx:train_end_idx])
-            X_window_s = scaler.transform(X_window)
+            scaler = RobustScaler().fit(X_all[train_start_idx:train_end_idx])
+            X_window_s = _scale(scaler, X_window)
 
             model = Ridge(alpha=config.ridge_alpha)
             if config.use_elasticnet:

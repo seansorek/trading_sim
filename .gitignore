@@ -52,4 +52,8 @@ simulation_output.log
 !models/*.pkl
 !models/metadata.json
 !models/README.md
+
+# Do not track per-version training copies (DB-registry scratch); keep only canonical daily_<key>.pkl
+models/*_v*.pkl
+models/*_v*.pkl.sha256
 logs/

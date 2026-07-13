@@ -956,6 +956,23 @@ class TestPredictRegressorSignal:
         assert result["signal"] == "BUY"
         assert 0.0 <= result["confidence"] <= 1.0
 
+    def test_regressor_live_path_bounded(self):
+        """Extreme input values must produce a valid bounded signal when
+        routed through the real RobustScaler + Ridge path (live prediction
+        scaling must clip to ±5 before the model sees the data)."""
+        from sklearn.linear_model import Ridge
+        from sklearn.preprocessing import RobustScaler
+
+        F = len(FEATURE_COLS)
+        rng = np.random.default_rng(4)
+        Xtr = rng.normal(0, 1, (200, F))
+        scaler = RobustScaler().fit(Xtr)
+        model = Ridge().fit(scaler.transform(Xtr), rng.normal(0, 1, 200))
+        data = {"model": model, "scaler": scaler,
+                "best_signal_quantile": 0.7, "best_threshold_window": 60}
+        out = _predict_regressor_signal(data, np.full((100, F), 1e6))
+        assert out["signal"] in ("BUY", "SELL", "HOLD")
+
 
 # ---------------------------------------------------------------------------
 # predict_symbol with daily_predictor (end-to-end through the dispatch loop)

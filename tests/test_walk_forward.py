@@ -117,3 +117,16 @@ def test_sweep_params_no_valid_symbols_returns_defaults():
         q, w = sweep_params(["AAPL"], days=900, db=None)
     assert q == 0.7
     assert w == 60
+
+
+def test_walk_forward_targets_vol_adj():
+    """Structural check: walk-forward folds produce IC on vol-adjusted target."""
+    import numpy as np, pandas as pd
+    from walk_forward import run_walk_forward_on_df, WalkForwardConfig
+    rng = np.random.default_rng(9); n = 900
+    close = 100 * np.cumprod(1 + rng.normal(0.0004, 0.012, n))
+    idx = pd.date_range("2020-01-01", periods=n, freq="B")
+    df = pd.DataFrame({"open": close, "high": close*1.01, "low": close*0.99,
+                       "close": close, "volume": rng.integers(1e6,5e6,n).astype(float)}, index=idx)
+    res = run_walk_forward_on_df(df, None, WalkForwardConfig())
+    assert len(res) >= 1 and "ic" in res.columns

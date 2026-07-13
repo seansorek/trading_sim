@@ -3,8 +3,8 @@
 train_predictor.py — Train the daily return *prediction* model.
 
 This is the prediction half of the prediction/strategy split: a regression
-model that forecasts continuous forward return (fwd_ret_1d, a
-FWD_RET_HORIZON_DAYS-bar cumulative return), evaluated by forecast-quality
+model that forecasts vol-adjusted forward return (fwd_ret_vol_adj =
+fwd_ret_1d / (vol_20d + 1e-6), a scaled FWD_RET_HORIZON_DAYS-bar cumulative return), evaluated by forecast-quality
 metrics (Spearman IC, R^2, directional accuracy) — not classification
 accuracy.
 
@@ -39,7 +39,8 @@ import numpy as np
 from scipy.stats import spearmanr
 from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
+from predictors.base import _scale
 
 try:
     import xgboost as xgb
@@ -86,13 +87,13 @@ def prepare_data(symbols: list[str], days: int, db: DB) -> dict:
             logger.warning("  %s: feature computation failed: %s", symbol, exc)
             continue
 
-        feats = feats.dropna(subset=["fwd_ret_1d"])
+        feats = feats.dropna(subset=["fwd_ret_vol_adj"])
         if len(feats) < 50:
             logger.warning("  %s: too few valid rows (%d) after dropna", symbol, len(feats))
             continue
 
         X_sym = feats[FEATURE_COLS].values.astype(np.float32)
-        y_sym = feats["fwd_ret_1d"].values.astype(np.float64)
+        y_sym = feats["fwd_ret_vol_adj"].values.astype(np.float64)
         vol_sym = feats["vol_20d"].values.astype(np.float64)
 
         split = int(len(X_sym) * 0.8)
@@ -146,37 +147,29 @@ def _forecast_metrics(pred: np.ndarray, actual: np.ndarray) -> dict:
 # Trainers
 # ---------------------------------------------------------------------------
 
-def train_elasticnet(X_train, X_test, y_train, y_test, alpha: float, l1_ratio: float):
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
-    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000, random_state=42)
+def train_xgb_regressor(X_train, X_test, y_train, y_test):
+    if not HAS_XGBOOST:
+        raise ImportError("xgboost not installed.")
+    scaler = RobustScaler()  # kept for artifact-shape consistency; XGBoost is scale-invariant
+    scaler.fit(X_train)
+    X_tr = _scale(scaler, X_train)
+    X_te = _scale(scaler, X_test)
+    model = xgb.XGBRegressor(
+        n_estimators=300, max_depth=3, learning_rate=0.03,
+        subsample=0.85, colsample_bytree=0.7, min_child_weight=5,
+        gamma=1.0, random_state=42, tree_method="hist", verbosity=0,
+    )
     model.fit(X_tr, y_train)
     train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
     test_metrics = _forecast_metrics(model.predict(X_te), y_test)
     return model, scaler, train_metrics, test_metrics
 
 
-def train_xgb_regressor(X_train, X_test, y_train, y_test):
-    if not HAS_XGBOOST:
-        raise ImportError("xgboost not installed.")
-    scaler = StandardScaler()  # kept for artifact-shape consistency; XGBoost is scale-invariant
-    scaler.fit(X_train)
-    model = xgb.XGBRegressor(
-        n_estimators=300, max_depth=3, learning_rate=0.03,
-        subsample=0.85, colsample_bytree=0.7, min_child_weight=5,
-        gamma=1.0, random_state=42, tree_method="hist", verbosity=0,
-    )
-    model.fit(X_train, y_train)
-    train_metrics = _forecast_metrics(model.predict(X_train), y_train)
-    test_metrics = _forecast_metrics(model.predict(X_test), y_test)
-    return model, scaler, train_metrics, test_metrics
-
-
 def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    scaler = RobustScaler()
+    scaler.fit(X_train)
+    X_tr = _scale(scaler, X_train)
+    X_te = _scale(scaler, X_test)
     model = Ridge(alpha=alpha)
     model.fit(X_tr, y_train)
     train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
@@ -200,7 +193,7 @@ def _sweep_model_params(symbols: list[str], days: int, db) -> tuple[float, float
             continue
         try:
             spy_arg = spy_df if symbol != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_1d"])
+            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_vol_adj"])
         except Exception:
             continue
         n = len(feats)
@@ -208,7 +201,7 @@ def _sweep_model_params(symbols: list[str], days: int, db) -> tuple[float, float
         if n < config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars:
             continue
         X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
-        y_all = feats["fwd_ret_1d"].values.astype(np.float64)
+        y_all = feats["fwd_ret_vol_adj"].values.astype(np.float64)
         train_start_idx = 0
         while True:
             train_end_idx = train_start_idx + config.train_bars
@@ -230,9 +223,10 @@ def _sweep_model_params(symbols: list[str], days: int, db) -> tuple[float, float
         for l1r in l1_ratios:
             fold_ics = []
             for X_tr, y_tr, X_te, y_te in fold_data:
-                scaler = StandardScaler()
-                X_tr_s = scaler.fit_transform(X_tr)
-                X_te_s = scaler.transform(X_te)
+                scaler = RobustScaler()
+                scaler.fit(X_tr)
+                X_tr_s = _scale(scaler, X_tr)
+                X_te_s = _scale(scaler, X_te)
                 model = ElasticNet(alpha=alpha, l1_ratio=l1r, max_iter=5000, random_state=42)
                 model.fit(X_tr_s, y_tr)
                 pred = model.predict(X_te_s)

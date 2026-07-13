@@ -115,3 +115,17 @@ def test_hybrid_artifact_contract():
     assert art["xgboost_test_acc"] > 0.50, (
         f"XGBoost-only test accuracy {art['xgboost_test_acc']:.4f} not above 0.50"
     )
+
+
+def test_hybrid_preprocess_no_longer_clips():
+    from train_hybrid import _preprocess
+    # #4: clipping moved out of _preprocess into _scale — _preprocess must now
+    # only sanitize inf/nan and leave finite extremes untouched.
+    # A single huge value among zeros: old ±5σ clip would pull this far down;
+    # inf/nan-only _preprocess must leave it exactly intact.
+    X = np.zeros((20, 3)); X[0, 0] = 1e12
+    out = _preprocess(X.copy())
+    assert out[0, 0] == 1e12, "hybrid _preprocess must not clip finite values"
+    X2 = np.array([[np.inf, -np.inf, np.nan, 2.0]])
+    out2 = _preprocess(X2.copy())
+    assert np.isfinite(out2).all(), "hybrid _preprocess must replace inf/nan with finite values"

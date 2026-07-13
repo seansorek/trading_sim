@@ -122,7 +122,7 @@ strategies:
 
 ## Feature engineering
 
-25 normalized features are computed in [`daily_features.py`](daily_features.py) from daily OHLCV data. All features are dimensionless so they're comparable across symbols at different price levels.
+29 normalized features are computed in [`daily_features.py`](daily_features.py) from daily OHLCV data. All features are dimensionless so they're comparable across symbols at different price levels.
 
 | Category | Features |
 |---|---|
@@ -130,7 +130,7 @@ strategies:
 | Volatility | `vol_20d`, `atr_normalized`, `bb_width`, `bb_position` |
 | Trend | `ma_spread_10_20`, `ma_spread_20_50`, `price_vs_sma20`, `price_vs_sma50` |
 | Momentum | `macd`, `macd_signal`, `macd_hist`, `rsi_14`, `stoch_k`, `stoch_d`, `williams_r`, `roc_12` |
-| Volume | `vol_z_20`, `vpt_normalized`, `ad_normalized`, `obv_normalized` |
+| Volume | `turnover_z`, `vpt_normalized`, `ad_normalized`, `obv_normalized` |
 | Market-relative | `ret_1d_vs_spy`, `ret_5d_vs_spy` |
 
 Labels are discretized from 3-day forward returns: BUY (>+0.2%), SELL (<-0.2%), HOLD otherwise.
