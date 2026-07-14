@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_features import FWD_RET_HORIZON_DAYS, make_daily_features
+from daily_features import FWD_RET_HORIZON_DAYS, _rolling_zscore, make_daily_features
 import train_models
 
 
@@ -34,6 +34,21 @@ def _make_price_df(n: int = 300, seed: int = 3) -> pd.DataFrame:
         },
         index=idx,
     )
+
+
+def test_rolling_zscore_is_causal():
+    import numpy as np
+    import pandas as pd
+    from daily_features import _rolling_zscore
+
+    rng = np.random.default_rng(3)
+    s = pd.Series(rng.normal(0, 1, 400).cumsum())
+    full = _rolling_zscore(s)
+    for i in (120, 250, 399):
+        truncated = _rolling_zscore(s.iloc[: i + 1])
+        assert np.isclose(full.iloc[i], truncated.iloc[i], equal_nan=True), (
+            f"row {i}: full={full.iloc[i]} truncated={truncated.iloc[i]} — look-ahead!"
+        )
 
 
 def test_prepare_data_has_embargo_gap(tmp_path):

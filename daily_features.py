@@ -1,7 +1,7 @@
 """
 daily_features.py — Daily OHLCV feature engineering.
 
-FEATURE_COLS is the canonical ordered list of model input columns.
+FEATURE_COLS is the canonical ordered list of model input columns (29 features).
 All training and prediction code must index features using this list,
 never by DataFrame column iteration order.
 """
@@ -15,7 +15,7 @@ FWD_RET_HORIZON_DAYS = 3
 
 # Version string stored alongside model pickles. Bump when FEATURE_COLS changes;
 # old models become explicitly incompatible.
-FEATURE_SET_NAME: str = "daily_v3"
+FEATURE_SET_NAME: str = "daily_v6"
 
 # Canonical feature order — the contract between training and prediction.
 # All features are dimensionless/normalized so they are comparable across symbols
@@ -25,23 +25,27 @@ FEATURE_COLS: list[str] = [
     "ret_1d",
     "ret_5d",
     "ret_10d",
+    "ret_21d",            # 1-month return
     "vol_20d",
     "ma_spread_10_20",   # (sma10 - sma20) / close — normalized
     "ma_spread_20_50",   # (sma20 - sma50) / close — normalized
     "macd",
     "macd_signal",
-    "macd_hist",
     "rsi_14",
     "price_vs_sma20",
     "price_vs_sma50",
-    "vol_z_20",
     "bb_width",          # (bb_upper - bb_lower) / close — normalized
     "bb_position",
     "stoch_k",
     "stoch_d",
-    "williams_r",
     "roc_12",
     "atr_normalized",
+    "adx_14",             # trend strength (0-100)
+    "vol_regime",         # 20d vol / 63d vol
+    "rel_volume",         # 5d avg vol / 20d avg vol
+    "hl_ratio",           # (high - low) / close
+    "turnover_z",         # z-score of close * volume
+    "gap",                # (open - prev_close) / prev_close
     "vpt_normalized",
     "ad_normalized",
     "obv_normalized",
@@ -65,6 +69,30 @@ def discretize_labels(
     y[returns > pos_thr] = 2              # BUY
     y[returns < neg_thr] = 0              # SELL
     return y
+
+
+_ZSCORE_WINDOW = 252
+_ZSCORE_MIN_PERIODS = 60
+
+# Unbounded / scale-varying features that get per-symbol rolling z-scoring.
+# Bounded oscillators (rsi_14, stoch_k, stoch_d, adx_14, bb_position,
+# atr_normalized) and already-z-scored features (turnover_z, bb_width,
+# vpt/ad/obv_normalized) are intentionally excluded.
+_ZSCORE_FEATURES: list[str] = [
+    "ret_1d", "ret_5d", "ret_10d", "ret_21d", "vol_20d",
+    "macd", "macd_signal", "ma_spread_10_20", "ma_spread_20_50",
+    "price_vs_sma20", "price_vs_sma50", "roc_12", "gap", "hl_ratio",
+    "vol_regime", "rel_volume", "ret_1d_vs_spy", "ret_5d_vs_spy",
+]
+
+
+def _rolling_zscore(
+    s: pd.Series, window: int = _ZSCORE_WINDOW, min_periods: int = _ZSCORE_MIN_PERIODS
+) -> pd.Series:
+    """Causal per-symbol z-score: (x - rolling_mean) / rolling_std. Uses past+present only."""
+    mean = s.rolling(window, min_periods=min_periods).mean()
+    std = s.rolling(window, min_periods=min_periods).std()
+    return (s - mean) / (std + 1e-12)
 
 
 def _safe_ema(series: pd.Series, span: int) -> pd.Series:
@@ -136,16 +164,11 @@ def make_daily_features(
     signal = _safe_ema(macd, 9)
     feats["macd"] = macd
     feats["macd_signal"] = signal
-    feats["macd_hist"] = macd - signal
 
     feats["rsi_14"] = _rsi(df["close"], 14)
 
     feats["price_vs_sma20"] = (df["close"] - sma_20) / (sma_20 + 1e-12)
     feats["price_vs_sma50"] = (df["close"] - sma_50) / (sma_50 + 1e-12)
-
-    feats["vol_z_20"] = (df["volume"] - df["volume"].rolling(20).mean()) / (
-        df["volume"].rolling(20).std() + 1e-12
-    )
 
     bb_mid = df["close"].rolling(20).mean()
     bb_std_dev = df["close"].rolling(20).std()
@@ -160,10 +183,46 @@ def make_daily_features(
     feats["stoch_k"] = 100.0 * (df["close"] - lowest_low) / (highest_high - lowest_low + 1e-12)
     feats["stoch_d"] = feats["stoch_k"].rolling(3).mean()
 
-    feats["williams_r"] = -100.0 * (highest_high - df["close"]) / (highest_high - lowest_low + 1e-12)
-
     feats["roc_12"] = (df["close"] - df["close"].shift(12)) / (df["close"].shift(12) + 1e-12)
     feats["atr_normalized"] = _atr(df, 14) / (df["close"] + 1e-12)
+
+    # --- ADX (trend strength, 0-100) ---
+    # Wilder's smoothing (ewm alpha=1/14) applied once to raw TR/DM, matching
+    # the standard formula — _atr() already applies its own smoothing, so
+    # reusing it here would double-smooth the DI+/DI- denominator.
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [(df["high"] - df["low"]), (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    up_move = df["high"].diff()
+    down_move = -df["low"].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+    atr_14_raw = tr.ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw + 1e-12))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / (atr_14_raw + 1e-12))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-12)
+    feats["adx_14"] = dx.ewm(alpha=1/14, adjust=False).mean()
+
+    # --- Volatility regime ---
+    vol_63d = df["close"].pct_change().rolling(63).std()
+    feats["vol_regime"] = feats["vol_20d"] / (vol_63d + 1e-12)
+
+    # --- Relative volume ---
+    feats["rel_volume"] = df["volume"].rolling(5).mean() / (df["volume"].rolling(20).mean() + 1e-12)
+
+    # --- High-low ratio ---
+    feats["hl_ratio"] = (df["high"] - df["low"]) / (df["close"] + 1e-12)
+
+    # --- Turnover z-score ---
+    dollar_vol = df["close"] * df["volume"]
+    feats["turnover_z"] = (dollar_vol - dollar_vol.rolling(20).mean()) / (dollar_vol.rolling(20).std() + 1e-12)
+
+    # --- Overnight gap ---
+    feats["gap"] = (df["open"] - df["close"].shift(1)) / (df["close"].shift(1) + 1e-12)
+
+    feats["ret_21d"] = df["close"].pct_change(21)
 
     # Cumsum-based indicators kept for internal computation but normalized before
     # being included in FEATURE_COLS (raw cumsum is non-stationary)
@@ -192,10 +251,12 @@ def make_daily_features(
     # inflating reward magnitude and double-counting overlapping windows.
     feats["fwd_ret_1d"] = (df["close"].shift(-FWD_RET_HORIZON_DAYS) / df["close"]) - 1
 
+    for col in _ZSCORE_FEATURES:
+        feats[col] = _rolling_zscore(feats[col])
+
     feats = feats.replace([np.inf, -np.inf], np.nan)
     # Drop warmup rows where rolling indicators are still NaN.
     # fwd_ret_1d is intentionally kept NaN for the last row so training code
     # can remove it with dropna(subset=["fwd_ret_1d"]).
     feats = feats.dropna(subset=FEATURE_COLS)
-    feats[FEATURE_COLS] = feats[FEATURE_COLS].fillna(0.0)
     return feats

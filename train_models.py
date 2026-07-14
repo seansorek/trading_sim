@@ -325,7 +325,6 @@ def train_logistic(
         base = LogisticRegression(
             solver="saga",
             class_weight="balanced",
-            multi_class="multinomial",
             max_iter=2000,
             random_state=42,
         )
@@ -344,7 +343,6 @@ def train_logistic(
             **best_params,
             solver="saga",
             class_weight="balanced",
-            multi_class="multinomial",
             max_iter=2000,
             random_state=42,
         )
@@ -361,7 +359,6 @@ def train_logistic(
             solver="lbfgs",
             class_weight=cfg.get("class_weight"),
             random_state=42,
-            multi_class="multinomial",
         )
         model.fit(X_tr, y_train)
 
