@@ -71,12 +71,12 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Average return** | +0.07% avg per round-trip (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.18%) |
 | **Alpha vs. benchmark** | -8.94% avg; avg information ratio -0.62 (strategy underperforms buy-and-hold on most symbols over the 365-day post-fix window) |
 | **PBO** | 0.513 (CPCV, 16 folds, 20 configs) — high-overfitting zone: IS-selected params expected to underperform OOS in >50% of paths |
-| **Median DSR** | 0.000 across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval) — no statistically significant edge after multiple-testing correction |
+| **Median DSR** | 0.800 across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval, corrected 2026-07-14) — per-symbol DSR range 0.290–0.943; prior 0.000 was a unit-mismatch bug (annualized variance used in per-period deflation) |
 | **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle |
 | **Live confidence** | Percentile rank of today's `|predicted return|` within the trailing `threshold_window` — NOT a calibrated probability |
-| **Known limitations** | Sharpe 0.16 (post-fix) is weak in absolute terms. PBO=0.513 and median DSR=0.000 confirm no statistically significant edge. Untuned parameters and a single backtest window — not a proven deployable edge. The positive IC (+0.06) is real but insufficient to survive multiple-testing correction at the decision-layer level. |
+| **Known limitations** | Sharpe 0.16 (post-fix) is weak in absolute terms. PBO=0.513 (high-overfitting zone) remains a concern. Corrected DSR median=0.800 suggests genuine per-symbol signal after unit-mismatch fix, but PBO indicates the selected (q,w) pair is still unreliable OOS. Not a proven deployable edge. |
 
-**Honest caveat (updated 2026-07-13 post look-ahead fix):** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding (IC=+0.06), but PBO=0.513 and median DSR=0.000 confirm the decision-layer parameters are over-fit and no statistically significant edge is present at this stage. A 1-bar execution look-ahead was fixed in the backtest pipeline on 2026-07-13 — the figures above are the corrected post-fix baseline. A single untuned backtest is not sufficient validation for capital deployment.
+**Honest caveat (updated 2026-07-14 post DSR unit-mismatch fix):** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding (IC=+0.06). PBO=0.513 confirms the selected (q,w) pair is unreliable OOS. Corrected median DSR=0.800 (range 0.290–0.943 across 5 symbols) is more encouraging than the prior erroneous DSR=0.000, which resulted from a unit-mismatch bug where annualized Sharpe variance was passed to the per-period deflation formula — fixed 2026-07-14. A 1-bar execution look-ahead was fixed in the backtest pipeline on 2026-07-13. A single untuned backtest is not sufficient validation for capital deployment.
 
 ---
 
@@ -216,9 +216,11 @@ strategy underperforms passive ownership on most symbols over this window.
 - **PBO = 0.513** (CPCV, 16 folds, 20 `(signal_quantile, threshold_window)` configs, 12 870
   IS/OOS combinations) — the IS-selected parameter pair is expected to underperform in >50% of
   out-of-sample paths. This is firmly in the high-overfitting zone.
-- **Median DSR = 0.000** across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval window, 5 symbols)
-  — no symbol's Sharpe is statistically distinguishable from zero after multiple-testing
-  correction (all SR < SR0).
+- **Median DSR = 0.800** across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval window, 5 symbols,
+  corrected 2026-07-14 after unit-mismatch fix) — per-symbol: AAPL 0.943, MSFT 0.290, SPY
+  0.539, QQQ 0.800, NVDA 0.859. Prior value of 0.000 was an artifact of passing annualized
+  Sharpe variance (scale ~252×) into the per-period deflation formula, driving sr0 ~15.9× too
+  large and stat deeply negative.
 
 These results confirm that while the prediction/strategy split surfaces a real IC signal
 (+0.06, R² = +0.012) that the classification framing discards, the decision-layer parameter

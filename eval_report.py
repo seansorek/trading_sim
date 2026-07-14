@@ -46,11 +46,19 @@ def compute_pbo(symbols, days, db, config=None):
 
 
 def _backtest_sharpe(df, q, w):
-    """Daily returns array + annualized Sharpe for one (q, w) config on one price frame.
+    """Daily returns array, annualized Sharpe, and per-period Sharpe for one (q, w) config.
 
     Forces the config via the env-var override that DailyPredictorStrategy reads
     at highest priority, so pickle best_* keys do not shadow it.  Saves and
     restores env vars so calls are independent and never leak state.
+
+    Returns:
+        (daily_values, annualized_sharpe, per_period_sharpe)
+
+    The annualized_sharpe (sqrt(252) * mean/std) is used for ranking configs.
+    The per_period_sharpe (mean/std, no annualization) must be used for
+    trial_sharpe_var so it stays consistent with deflated_sharpe's internal sr
+    computation which is also per-period.
     """
     prev_q = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
     prev_w = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
@@ -64,7 +72,10 @@ def _backtest_sharpe(df, q, w):
         bt = Backtester(ExecutionConfig())
         res = bt.run(df, df, sig, artifact_paths={})
         daily = res.equity_curve.resample("1D").last().dropna().pct_change().dropna()
-        return daily.values, res.metrics.get("daily_sharpe", 0.0)
+        ann_sharpe = res.metrics.get("daily_sharpe", 0.0)
+        sd = daily.std(ddof=1)
+        per_period_sr = float(daily.mean() / sd) if sd > 0 else 0.0
+        return daily.values, ann_sharpe, per_period_sr
     finally:
         for key, prev in (("PREDICTOR_SIGNAL_QUANTILE", prev_q),
                           ("PREDICTOR_THRESHOLD_WINDOW", prev_w)):
@@ -86,15 +97,18 @@ def compute_dsr_for_symbol(symbol, df, quantiles=None, windows=None):
     windows = windows or _DEFAULT_WINDOWS
     configs = [(q, w) for q in quantiles for w in windows]
 
-    per_config = []       # [(config, daily_returns, annualized_sharpe), ...]
+    per_config = []       # [(config, daily_returns, annualized_sharpe, per_period_sharpe), ...]
     for (q, w) in configs:
-        daily, sharpe = _backtest_sharpe(df, q, w)
-        per_config.append(((q, w), daily, sharpe))
+        daily, ann_sr, pp_sr = _backtest_sharpe(df, q, w)
+        per_config.append(((q, w), daily, ann_sr, pp_sr))
 
-    sharpes = np.array([s for _, _, s in per_config], dtype=float)
-    trial_var = float(np.var(sharpes, ddof=1)) if len(sharpes) > 1 else 0.0
-    best_i = int(np.argmax(sharpes))
-    sel_config, sel_daily, _ = per_config[best_i]
+    # Use per-period Sharpes for trial_var so it stays in the same units as
+    # deflated_sharpe's internal sr (mean/std, no sqrt(252) annualization).
+    sharpes_pp = np.array([pp for _, _, _, pp in per_config], dtype=float)
+    trial_var = float(np.var(sharpes_pp, ddof=1)) if len(sharpes_pp) > 1 else 0.0
+    # Rank by annualized Sharpe (same ordering; we just keep units consistent for DSR).
+    best_i = int(np.argmax([ann for _, _, ann, _ in per_config]))
+    sel_config, sel_daily, _, _ = per_config[best_i]
 
     dsr = deflated_sharpe(sel_daily, n_trials=len(configs), trial_sharpe_var=trial_var)
     dsr["selected"] = sel_config
