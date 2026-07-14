@@ -489,6 +489,7 @@ def predict_symbol(
     dqn_window: int = 20,
     history_days: int = 1000,
     spy_df: Optional[pd.DataFrame] = None,
+    vix_df: Optional[pd.DataFrame] = None,
 ) -> dict[str, Any]:
     result: dict = {"symbol": symbol, "timestamp": datetime.utcnow().isoformat()}
 
@@ -512,7 +513,7 @@ def predict_symbol(
 
     try:
         spy_arg = spy_df if symbol != "SPY" else None
-        feats = make_daily_features(df, spy_df=spy_arg)
+        feats = make_daily_features(df, spy_df=spy_arg, vix_df=vix_df)
     except Exception as exc:
         result["error"] = f"Feature computation failed: {exc}"
         return result
@@ -922,9 +923,23 @@ def main() -> None:
     except Exception as exc:
         logger.warning("Could not load SPY data for relative features: %s", exc)
 
+    # Load VIX once for implied-vol regime features
+    vix_df = None
+    try:
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=cfg.data.history_days)
+        vix_df = _load_bars_cached(
+            "^VIX",
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            db=db,
+        )
+    except Exception as exc:
+        logger.warning("Could not load ^VIX data for implied-vol features: %s", exc)
+
     logger.info("Predicting for %d symbols using %d models...", len(symbols), len(models))
     predictions = [
-        predict_symbol(s, models, db=db, history_days=cfg.data.history_days, spy_df=spy_df)
+        predict_symbol(s, models, db=db, history_days=cfg.data.history_days, spy_df=spy_df, vix_df=vix_df)
         for s in symbols
     ]
 

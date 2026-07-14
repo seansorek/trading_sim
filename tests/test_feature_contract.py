@@ -28,6 +28,7 @@ _EXPECTED_FEATURE_COLS = [
     "vol_regime", "rel_volume", "hl_ratio", "turnover_z", "amihud_illiq", "gap",
     "vpt_normalized", "ad_normalized", "obv_normalized",
     "ret_1d_vs_spy", "ret_5d_vs_spy",
+    "vix_z", "vix_chg_5d",
 ]
 
 
@@ -165,9 +166,9 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_30():
-    assert len(FEATURE_COLS) == 30, (
-        f"Expected 30 features, got {len(FEATURE_COLS)}. Update CLAUDE.md and docs."
+def test_feature_cols_count_is_32():
+    assert len(FEATURE_COLS) == 32, (
+        f"Expected 32 features, got {len(FEATURE_COLS)}. Update CLAUDE.md and docs."
     )
 
 
