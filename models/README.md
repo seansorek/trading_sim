@@ -67,13 +67,16 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **OOS Spearman IC** | +0.06 (positive, statistically meaningful given n; classifiers show IC ≈ 0) |
 | **OOS R²** | +0.012 (small but real; confirms the regression picks up a signal the classifiers discarded) |
 | **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `|predicted return|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Default: `signal_quantile=0.7`, `threshold_window=60` |
-| **Backtest Sharpe** | +0.27 (10-symbol, 700-day window, untuned defaults) — the only positive Sharpe among the three live models |
-| **Average return** | +0.18% per signal (same window) |
+| **Backtest Sharpe** | +0.16 avg (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.27 on 700-day window) — the only positive Sharpe among the three live models; see PBO/DSR below |
+| **Average return** | +0.07% avg per round-trip (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.18%) |
+| **Alpha vs. benchmark** | -8.94% avg; avg information ratio -0.62 (strategy underperforms buy-and-hold on most symbols over the 365-day post-fix window) |
+| **PBO** | 0.513 (CPCV, 16 folds, 20 configs) — high-overfitting zone: IS-selected params expected to underperform OOS in >50% of paths |
+| **Median DSR** | 0.800 across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval, corrected 2026-07-14) — per-symbol DSR range 0.290–0.943; prior 0.000 was a unit-mismatch bug (annualized variance used in per-period deflation) |
 | **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle |
 | **Live confidence** | Percentile rank of today's `|predicted return|` within the trailing `threshold_window` — NOT a calibrated probability |
-| **Known limitations** | Sharpe 0.27 is weak in absolute terms. Untuned parameters and a single backtest window — not a proven deployable edge. No walk-forward-of-walk-forward validation yet. The positive IC is real but modest. |
+| **Known limitations** | Sharpe 0.16 (post-fix) is weak in absolute terms. PBO=0.513 (high-overfitting zone) remains a concern. Corrected DSR median=0.800 suggests genuine per-symbol signal after unit-mismatch fix, but PBO indicates the selected (q,w) pair is still unreliable OOS. Not a proven deployable edge. |
 
-**Honest caveat:** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding, but a single untuned backtest is not sufficient validation for capital deployment.
+**Honest caveat (updated 2026-07-14 post DSR unit-mismatch fix):** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding (IC=+0.06). PBO=0.513 confirms the selected (q,w) pair is unreliable OOS. Corrected median DSR=0.800 (range 0.290–0.943 across 5 symbols) is more encouraging than the prior erroneous DSR=0.000, which resulted from a unit-mismatch bug where annualized Sharpe variance was passed to the per-period deflation formula — fixed 2026-07-14. A 1-bar execution look-ahead was fixed in the backtest pipeline on 2026-07-13. A single untuned backtest is not sufficient validation for capital deployment.
 
 ---
 
@@ -196,15 +199,34 @@ trade only the most extreme `1 - signal_quantile` fraction of the trailing `thre
 bars' predictions. Both `signal_quantile` and `threshold_window` are strategy parameters,
 independently tunable from the prediction model.
 
-Backtested head-to-head against `daily_logistic`/`daily_xgboost` over the same 10-symbol,
-700-day window (`simulate_multi.py --strategies daily_logistic,daily_xgboost,daily_predictor`),
-`daily_predictor` was the only one of the three with a **positive average return (+0.18%) and
-positive average Sharpe (+0.27)** — both classifiers were solidly negative. This is a single,
-untuned backtest window, not a validated edge: Sharpe 0.27 is still weak in absolute terms, the
-default `signal_quantile=0.7`/`threshold_window=60` were not optimized, and there's been no
-walk-forward or out-of-sample-of-out-of-sample validation yet. Treat this as a promising lead
-that the prediction/strategy split surfaces real signal the classification framing was
-discarding, not as a finished, deployable edge.
+**[Look-ahead fix applied 2026-07-13]** The original backtest results below carried a 1-bar
+execution look-ahead: the strategy was inadvertently using the same-bar signal for execution
+rather than the prior bar's signal, inflating the pre-fix figures (pre-fix: avg return +0.18%,
+avg Sharpe +0.27 on a 700-day window). The fix was applied to `simulate_multi.py` /
+`ml_strategies.py` and the figures below are the corrected post-fix baseline.
+
+Backtested over a 10-symbol, 365-day window (`simulate_multi.py --strategies daily_predictor
+--symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 365`, run 2026-07-13),
+`daily_predictor` still had a **positive average return (+0.07%) and positive average Sharpe
+(+0.16)** post-fix — a reduction from the pre-fix figures, as expected. Average alpha vs.
+buy-and-hold benchmark: **-8.94%** (average information ratio: **-0.62**), confirming the
+strategy underperforms passive ownership on most symbols over this window.
+
+**Honest eval results (2026-07-13):**
+- **PBO = 0.513** (CPCV, 16 folds, 20 `(signal_quantile, threshold_window)` configs, 12 870
+  IS/OOS combinations) — the IS-selected parameter pair is expected to underperform in >50% of
+  out-of-sample paths. This is firmly in the high-overfitting zone.
+- **Median DSR = 0.800** across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval window, 5 symbols,
+  corrected 2026-07-14 after unit-mismatch fix) — per-symbol: AAPL 0.943, MSFT 0.290, SPY
+  0.539, QQQ 0.800, NVDA 0.859. Prior value of 0.000 was an artifact of passing annualized
+  Sharpe variance (scale ~252×) into the per-period deflation formula, driving sr0 ~15.9× too
+  large and stat deeply negative.
+
+These results confirm that while the prediction/strategy split surfaces a real IC signal
+(+0.06, R² = +0.012) that the classification framing discards, the decision-layer parameter
+selection is unreliable at current data volumes. The positive Sharpe (+0.16) is encouraging as
+a direction but is not a proven edge. Treat this as a promising lead under active validation,
+not a finished, deployable strategy.
 
 **Deployment status:** `daily_predictor` is wired into `predict_next_day_lite.py` and the live
 Discord pipeline (`prediction.models` in `config/default.yaml`), alongside `daily_logistic` and

@@ -287,5 +287,10 @@ class DailyPredictorStrategy(BaseStrategy):
         signals = compute_predictor_signal(
             pred_ret, self.signal_quantile, self.threshold_window
         )
-        return self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
+        # Execution lag: decide on close[t], trade at close[t+1]. Matches
+        # PredictorStrategy.signal (predictor_strategy.py:45). Backtest-only —
+        # the live path (_predict_regressor_signal) takes signals[-1] and trades
+        # the next session, so it is already correct and must NOT be shifted.
+        return raw.shift(1).fillna(0).astype(int)
 

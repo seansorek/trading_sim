@@ -117,3 +117,22 @@ def test_sweep_params_no_valid_symbols_returns_defaults():
         q, w = sweep_params(["AAPL"], days=900, db=None)
     assert q == 0.7
     assert w == 60
+
+
+def test_build_fold_data_matches_matrix_shape():
+    from walk_forward import build_fold_data, fold_config_ic_matrix, WalkForwardConfig
+    import numpy as np
+    # Synthetic fold_data: 10 folds, each a length-120 prediction window.
+    rng = np.random.default_rng(0)
+    fold_data = []
+    for _ in range(10):
+        pred = rng.standard_normal(120)
+        y_te = rng.standard_normal(60)      # test slice length
+        test_offset = 60
+        fold_data.append((pred, y_te, test_offset))
+    quantiles = [0.6, 0.7]
+    windows = [40, 60]
+    matrix, configs = fold_config_ic_matrix(fold_data, quantiles, windows)
+    assert matrix.shape == (10, 4)
+    assert configs == [(0.6, 40), (0.6, 60), (0.7, 40), (0.7, 60)]
+    assert np.isfinite(matrix).all()
