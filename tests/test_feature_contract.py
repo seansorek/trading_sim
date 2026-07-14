@@ -25,7 +25,7 @@ _EXPECTED_FEATURE_COLS = [
     "ma_spread_10_20", "ma_spread_20_50", "macd", "macd_signal",
     "rsi_14", "price_vs_sma20", "price_vs_sma50", "bb_width", "bb_position",
     "stoch_k", "stoch_d", "roc_12", "atr_normalized", "adx_14",
-    "vol_regime", "rel_volume", "hl_ratio", "turnover_z", "gap",
+    "vol_regime", "rel_volume", "hl_ratio", "turnover_z", "amihud_illiq", "gap",
     "vpt_normalized", "ad_normalized", "obv_normalized",
     "ret_1d_vs_spy", "ret_5d_vs_spy",
 ]
@@ -165,9 +165,9 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_29():
-    assert len(FEATURE_COLS) == 29, (
-        f"Expected 29 features, got {len(FEATURE_COLS)}. Update CLAUDE.md and docs."
+def test_feature_cols_count_is_30():
+    assert len(FEATURE_COLS) == 30, (
+        f"Expected 30 features, got {len(FEATURE_COLS)}. Update CLAUDE.md and docs."
     )
 
 

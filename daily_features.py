@@ -1,7 +1,7 @@
 """
 daily_features.py — Daily OHLCV feature engineering.
 
-FEATURE_COLS is the canonical ordered list of model input columns (29 features).
+FEATURE_COLS is the canonical ordered list of model input columns (30 features).
 All training and prediction code must index features using this list,
 never by DataFrame column iteration order.
 """
@@ -45,6 +45,7 @@ FEATURE_COLS: list[str] = [
     "rel_volume",         # 5d avg vol / 20d avg vol
     "hl_ratio",           # (high - low) / close
     "turnover_z",         # z-score of close * volume
+    "amihud_illiq",       # |return| / dollar_volume (price impact proxy), z-scored
     "gap",                # (open - prev_close) / prev_close
     "vpt_normalized",
     "ad_normalized",
@@ -82,7 +83,7 @@ _ZSCORE_FEATURES: list[str] = [
     "ret_1d", "ret_5d", "ret_10d", "ret_21d", "vol_20d",
     "macd", "macd_signal", "ma_spread_10_20", "ma_spread_20_50",
     "price_vs_sma20", "price_vs_sma50", "roc_12", "gap", "hl_ratio",
-    "vol_regime", "rel_volume", "ret_1d_vs_spy", "ret_5d_vs_spy",
+    "vol_regime", "rel_volume", "amihud_illiq", "ret_1d_vs_spy", "ret_5d_vs_spy",
 ]
 
 
@@ -218,6 +219,10 @@ def make_daily_features(
     # --- Turnover z-score ---
     dollar_vol = df["close"] * df["volume"]
     feats["turnover_z"] = (dollar_vol - dollar_vol.rolling(20).mean()) / (dollar_vol.rolling(20).std() + 1e-12)
+
+    # --- Amihud illiquidity: |return| per dollar traded (price impact) ---
+    # Raw magnitude is tiny/heavy-tailed; the _ZSCORE_FEATURES loop normalizes it.
+    feats["amihud_illiq"] = feats["ret_1d"].abs() / (dollar_vol + 1e-12)
 
     # --- Overnight gap ---
     feats["gap"] = (df["open"] - df["close"].shift(1)) / (df["close"].shift(1) + 1e-12)

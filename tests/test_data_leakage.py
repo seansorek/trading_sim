@@ -150,3 +150,15 @@ def test_hybrid_prepare_data_val_carved_from_train_not_test(tmp_path):
     assert val_start < split <= split + FWD_RET_HORIZON_DAYS
     # Train-proper/val embargo gap must be at least the forward-return horizon.
     assert val_start - train_end == FWD_RET_HORIZON_DAYS
+
+
+def test_amihud_is_causal():
+    import numpy as np
+    from daily_features import make_daily_features
+    from tests.test_feature_correlation_guard import _synthetic_ohlcv
+
+    df = _synthetic_ohlcv(n=500, seed=7)
+    full = make_daily_features(df)["amihud_illiq"]
+    trunc = make_daily_features(df.iloc[:300])["amihud_illiq"]
+    common = full.index.intersection(trunc.index)[-1]
+    assert np.isclose(full.loc[common], trunc.loc[common], equal_nan=True)
