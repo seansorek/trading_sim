@@ -25,13 +25,28 @@ dev = [
     "pytest-cov>=5.0,<8",
 ]
 
-[project.scripts]
-trading-sim-train = "trading_sim.cli.train:main"
-trading-sim-predict = "trading_sim.cli.predict:main"
-trading-sim-simulate = "trading_sim.cli.simulate:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+py-modules = [
+    "base_strategy",
+    "config",
+    "daily_features",
+    "data_loader",
+    "db",
+    "dqn_agent",
+    "dqn_signal",
+    "hybrid_model",
+    "ml_strategies",
+    "predict_next_day_lite",
+    "predictor_strategy",
+    "rl_env",
+    "signal_monitor",
+    "simulate_multi",
+    "simulation_pipeline",
+    "train_hybrid",
+    "train_models",
+    "train_predictor",
+    "walk_forward",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
