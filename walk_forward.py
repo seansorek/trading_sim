@@ -130,6 +130,81 @@ _FALLBACK_QUANTILE = 0.7
 _FALLBACK_WINDOW = 60
 
 
+def build_fold_data(symbols, days, db, config=None):
+    """Pool per-fold (pred_window, y_te, test_offset) tuples across symbols.
+
+    Extracted verbatim from sweep_params' inner loop so sweep_params and the
+    CPCV matrix builder derive folds identically (single source of truth).
+    """
+    if config is None:
+        config = WalkForwardConfig()
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    spy_df = _load_symbol("SPY", start, end, db)
+
+    fold_data = []
+    for symbol in symbols:
+        df = _load_symbol(symbol, start, end, db)
+        if df is None:
+            continue
+        try:
+            spy_arg = spy_df if symbol != "SPY" else None
+            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_vol_adj"])
+        except Exception as exc:
+            logger.warning("build_fold_data: feature error for %s: %s", symbol, exc)
+            continue
+        n = len(feats)
+        min_bars = config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars
+        if n < min_bars:
+            continue
+        X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
+        y_all = feats["fwd_ret_vol_adj"].values.astype(np.float64)
+        train_start_idx = 0
+        while True:
+            train_end_idx = train_start_idx + config.train_bars
+            test_start_idx = train_end_idx + FWD_RET_HORIZON_DAYS
+            test_end_idx = test_start_idx + config.test_bars
+            if test_end_idx > n:
+                break
+            # Fit scaler only on train, transform full window for causal rolling quantile
+            X_window = X_all[train_start_idx:test_end_idx]
+            scaler = RobustScaler().fit(X_all[train_start_idx:train_end_idx])
+            X_window_s = _scale(scaler, X_window)
+            if config.use_elasticnet:
+                model = ElasticNet(alpha=config.ridge_alpha, l1_ratio=config.l1_ratio,
+                                  max_iter=5000, random_state=42)
+            else:
+                model = Ridge(alpha=config.ridge_alpha)
+            model.fit(X_window_s[:config.train_bars], y_all[train_start_idx:train_end_idx])
+            pred_window = model.predict(X_window_s)
+            test_offset = config.train_bars + FWD_RET_HORIZON_DAYS
+            y_te = y_all[test_start_idx:test_end_idx]
+            fold_data.append((pred_window, y_te, test_offset))
+            train_start_idx += config.step_bars
+    return fold_data
+
+
+def fold_config_ic_matrix(fold_data, quantiles, windows):
+    """(n_folds x n_configs) matrix of per-fold OOS IC; columns = (q, w) configs."""
+    configs = [(q, w) for q in quantiles for w in windows]
+    rows = []
+    for pred_window, y_te, test_offset in fold_data:
+        row = []
+        for (q, w) in configs:
+            if len(pred_window) < w:
+                row.append(0.0)
+                continue
+            signals_window = compute_predictor_signal(pred_window, q, w)
+            signals_test = signals_window[test_offset:]
+            active = signals_test != 0
+            if active.sum() < 5:
+                row.append(0.0)
+            else:
+                row.append(_ic(pred_window[test_offset:][active], y_te[active]))
+        rows.append(row)
+    return np.array(rows, dtype=float), configs
+
+
 def sweep_params(
     symbols: list[str],
     days: int,
@@ -150,95 +225,25 @@ def sweep_params(
     if windows is None:
         windows = _DEFAULT_WINDOWS
 
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-    spy_df = _load_symbol("SPY", start, end, db)
-
-    # Per fold: store (pred_window, y_te, test_offset) so the rolling quantile
-    # has history before the test window — matches live production behaviour.
-    fold_data: list[tuple[np.ndarray, np.ndarray, int]] = []
-
-    for symbol in symbols:
-        df = _load_symbol(symbol, start, end, db)
-        if df is None:
-            continue
-        try:
-            spy_arg = spy_df if symbol != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_vol_adj"])
-        except Exception as exc:
-            logger.warning("sweep_params: feature error for %s: %s", symbol, exc)
-            continue
-
-        n = len(feats)
-        min_bars = config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars
-        if n < min_bars:
-            continue
-
-        X_all = _preprocess(feats[FEATURE_COLS].values.astype(np.float32))
-        y_all = feats["fwd_ret_vol_adj"].values.astype(np.float64)
-        train_start_idx = 0
-
-        while True:
-            train_end_idx = train_start_idx + config.train_bars
-            test_start_idx = train_end_idx + FWD_RET_HORIZON_DAYS
-            test_end_idx = test_start_idx + config.test_bars
-            if test_end_idx > n:
-                break
-
-            # Fit scaler only on train, transform full window for causal rolling quantile
-            X_window = X_all[train_start_idx:test_end_idx]
-            scaler = RobustScaler().fit(X_all[train_start_idx:train_end_idx])
-            X_window_s = _scale(scaler, X_window)
-
-            model = Ridge(alpha=config.ridge_alpha)
-            if config.use_elasticnet:
-                model = ElasticNet(alpha=config.ridge_alpha, l1_ratio=config.l1_ratio,
-                                  max_iter=5000, random_state=42)
-            model.fit(X_window_s[:config.train_bars], y_all[train_start_idx:train_end_idx])
-            pred_window = model.predict(X_window_s)
-            test_offset = config.train_bars + FWD_RET_HORIZON_DAYS
-            y_te = y_all[test_start_idx:test_end_idx]
-            fold_data.append((pred_window, y_te, test_offset))
-            train_start_idx += config.step_bars
-
+    fold_data = build_fold_data(symbols, days, db, config)
     if not fold_data:
         logger.warning("sweep_params: no valid folds — returning defaults (%s, %d)",
                        _FALLBACK_QUANTILE, _FALLBACK_WINDOW)
         return _FALLBACK_QUANTILE, _FALLBACK_WINDOW
 
-    best_ic = -np.inf
-    best_pair = (_FALLBACK_QUANTILE, _FALLBACK_WINDOW)
-
-    for q in quantiles:
-        for w in windows:
-            fold_ics = []
-            for pred_window, y_te, test_offset in fold_data:
-                if len(pred_window) < w:
-                    continue
-                signals_window = compute_predictor_signal(pred_window, q, w)
-                signals_test = signals_window[test_offset:]
-                active = signals_test != 0
-                if active.sum() < 5:
-                    fold_ics.append(0.0)
-                    continue
-                fold_ics.append(_ic(pred_window[test_offset:][active], y_te[active]))
-            if not fold_ics:
-                continue
-            median_ic = float(np.median(fold_ics))
-            if median_ic > best_ic:
-                best_ic = median_ic
-                best_pair = (q, w)
-
+    matrix, configs = fold_config_ic_matrix(fold_data, quantiles, windows)
+    median_ic = np.median(matrix, axis=0)          # per-config median across folds
+    best_j = int(np.argmax(median_ic))
+    best_ic = float(median_ic[best_j])
     if best_ic <= 0:
         logger.warning(
             "sweep_params: all (quantile, window) combinations produced IC <= 0 "
-            "— keeping defaults (%.2f, %d)", _FALLBACK_QUANTILE, _FALLBACK_WINDOW
-        )
+            "— keeping defaults (%.2f, %d)", _FALLBACK_QUANTILE, _FALLBACK_WINDOW)
         return _FALLBACK_QUANTILE, _FALLBACK_WINDOW
 
-    logger.info("sweep_params: best q=%.2f w=%d median_IC=%.4f", best_pair[0], best_pair[1], best_ic)
-    return best_pair
+    best_q, best_w = configs[best_j]
+    logger.info("sweep_params: best q=%.2f w=%d median_IC=%.4f", best_q, best_w, best_ic)
+    return best_q, best_w
 
 
 def main() -> None:

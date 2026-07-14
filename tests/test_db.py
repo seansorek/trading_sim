@@ -120,6 +120,40 @@ def test_get_active_model_returns_none_when_missing(tmp_path):
     assert db.get_active_model("nonexistent_model") is None
 
 
+def _register_in_subprocess(db_path: str) -> int:
+    from daily_features import FEATURE_COLS
+    return DB(db_path).register_model(
+        model_key="daily_logistic",
+        artifact_path="models/daily_logistic.pkl",
+        feature_contract=FEATURE_COLS,
+        trained_on=["AAPL", "SPY"],
+        train_start="2023-01-01",
+        train_end="2024-01-01",
+        train_samples=500,
+        test_samples=100,
+        train_accuracy=0.55,
+        test_accuracy=0.41,
+        test_f1=0.38,
+        label_map={0: "SELL", 1: "HOLD", 2: "BUY"},
+    )
+
+
+def test_register_model_is_race_free_across_processes(tmp_path):
+    """Regression test for #47: separate DB instances in separate processes
+    (as ProcessPoolExecutor workers use) must not both compute the same
+    next_version and collide on the UNIQUE(model_key, version) constraint."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    db_path = str(tmp_path / "test.db")
+    DB(db_path)  # ensure schema exists before workers connect concurrently
+
+    n_workers = 8
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        versions = list(pool.map(_register_in_subprocess, [db_path] * n_workers))
+
+    assert sorted(versions) == list(range(1, n_workers + 1))
+
+
 def test_feature_contract_roundtrips_as_list(tmp_path):
     db = DB(str(tmp_path / "test.db"))
     _register(db)

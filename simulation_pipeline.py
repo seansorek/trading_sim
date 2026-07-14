@@ -350,7 +350,8 @@ class Backtester:
         if not trades_df.empty and "ts" in trades_df.columns:
             trades_df = trades_df.set_index("ts").sort_index()
 
-        metrics = compute_metrics(equity_series, trades_df)
+        # Benchmark = buy-and-hold the traded symbol itself over the same dates.
+        metrics = compute_metrics(equity_series, trades_df, benchmark_close=df["close"])
 
         # Persist artifacts (skip when caller passes an empty dict to suppress writes)
         if artifact_paths:
@@ -404,7 +405,8 @@ class Backtester:
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, Any]:
+def compute_metrics(equity: pd.Series, trades: pd.DataFrame,
+                    benchmark_close: Optional[pd.Series] = None) -> Dict[str, Any]:
     daily_equity = equity.resample("1D").last().dropna()
     daily_ret = daily_equity.pct_change().dropna()
 
@@ -473,7 +475,7 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, Any]:
     start_eq = float(equity.iloc[0]) if len(equity) > 0 else 1.0
     end_eq = float(equity.iloc[-1]) if len(equity) > 0 else start_eq
 
-    return {
+    result = {
         "final_equity": end_eq,
         "total_return_pct": float((end_eq / start_eq - 1) * 100),
         "daily_sharpe": sharpe(daily_ret),
@@ -485,6 +487,22 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame) -> Dict[str, Any]:
         if gross_loss > 0
         else None,
     }
+
+    if benchmark_close is not None and len(benchmark_close) > 1:
+        bench = benchmark_close.reindex(equity.index).dropna()
+        if len(bench) > 1:
+            bench_daily = bench.resample("1D").last().dropna()
+            if len(bench_daily) > 1:
+                bench_total = float((bench_daily.iloc[-1] / bench_daily.iloc[0] - 1) * 100)
+                bench_ret = bench_daily.pct_change().dropna()
+                excess = (daily_ret.reindex(bench_ret.index).fillna(0.0) - bench_ret).dropna()
+                ir = (float(np.sqrt(252) * excess.mean() / excess.std())
+                      if excess.std() and excess.std() != 0 else 0.0)
+                result["benchmark_return_pct"] = bench_total
+                result["alpha_pct"] = result["total_return_pct"] - bench_total
+                result["information_ratio"] = ir
+
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ Key design contract:
 - Fails loudly on model load errors instead of silently returning HOLD.
 """
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -29,9 +30,11 @@ from data_loader import check_cache_coverage, check_cache_freshness, load_yfinan
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
+from hybrid_model import TransformerCfg, TransformerEncoder
 from ml_strategies import compute_predictor_signal
 from signal_monitor import score_realized_ic, check_signal_drift
 from predictors.base import _scale
+from train_models import _preprocess
 
 # Maximum number of business days the cached data's latest bar can lag behind
 # the requested end date before we consider the cache stale and re-fetch.
@@ -115,6 +118,12 @@ CLASSIFIER_CFG_ATTR = {
     "daily_logistic": "logistic",
     "daily_xgboost": "xgboost",
 }
+
+# daily_hybrid has no strategies.* entry in config/default.yaml (it's a
+# separate artifact format loaded outside the model_keys/MODEL_KINDS loop,
+# same as daily_dqn) — fall back to train_hybrid.py's own --confidence
+# default when the pickle predates the confidence_threshold field.
+_HYBRID_DEFAULT_CONFIDENCE_THRESHOLD = 0.4
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +244,136 @@ def _predict_regressor_signal(
     return {"signal": signal_name, "confidence": confidence}
 
 
+def _load_hybrid_pkl(path: str) -> dict:
+    """Load and validate the daily_hybrid XGBoost-transformer bundle.
+
+    Unlike the plain sklearn pickles handled by _load_pkl, this bundle
+    stores the transformer as a raw state_dict + config (not a pickled
+    nn.Module) so it survives across torch/hybrid_model.py versions. This
+    reconstructs the TransformerEncoder here, once, at load time, so
+    predict_symbol just runs it — it doesn't rebuild the network on every
+    call. Raises RuntimeError on any failure, matching _load_pkl's contract.
+
+    Verifies SHA-256 integrity against a sibling `.sha256` file before
+    unpickling, same contract as predictors.base._load_validated_pickle
+    (issue #72) — every other model pickle goes through that check.
+    """
+    if not os.path.exists(path):
+        raise RuntimeError(
+            f"[daily_hybrid] Model file not found: {path}. Run train_hybrid.py first."
+        )
+
+    hash_path = path + ".sha256"
+    if os.path.exists(hash_path):
+        with open(hash_path, encoding="ascii") as fh:
+            expected_hash = fh.read().strip()
+        with open(path, "rb") as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        if actual_hash != expected_hash:
+            raise RuntimeError(
+                f"[daily_hybrid] Integrity check failed for {path}: SHA-256 mismatch. Retrain."
+            )
+    else:
+        logger.warning(
+            "[daily_hybrid] No hash file for %s — skipping integrity check. Retrain to enable it.",
+            path,
+        )
+
+    try:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+    except Exception as exc:
+        raise RuntimeError(f"[daily_hybrid] Cannot unpickle {path}: {exc}") from exc
+
+    required_keys = (
+        "model", "scaler", "transformer_state", "transformer_cfg",
+        "lookback", "feature_contract", "blend_alpha",
+    )
+    for key in required_keys:
+        if key not in data:
+            raise RuntimeError(
+                f"[daily_hybrid] Pickle {path} is missing key '{key}'. Retrain."
+            )
+    if data["feature_contract"] != FEATURE_COLS:
+        raise RuntimeError(
+            f"[daily_hybrid] Feature contract mismatch — expected {len(FEATURE_COLS)} "
+            f"features, got {len(data['feature_contract'])}. Retrain."
+        )
+
+    try:
+        tcfg = TransformerCfg(**data["transformer_cfg"])
+        transformer = TransformerEncoder(n_features=len(data["feature_contract"]), cfg=tcfg)
+        transformer.load_state_dict(data["transformer_state"])
+        transformer.eval()
+    except Exception as exc:
+        raise RuntimeError(
+            f"[daily_hybrid] Failed to reconstruct transformer from {path}: {exc}"
+        ) from exc
+
+    data["transformer"] = transformer
+    return data
+
+
+def _predict_hybrid_signal(data: dict, X_all: np.ndarray, default_threshold: float) -> dict:
+    """
+    Predict today's signal for the XGBoost-transformer hybrid model
+    (daily_hybrid), mirroring train_hybrid.py's inference path exactly:
+
+      1. Preprocess + scale the full feature history the same way
+         prepare_data does (train_models._preprocess clip, then the
+         fitted StandardScaler).
+      2. Take the trailing `lookback` rows as the transformer's input
+         window — the live equivalent of build_sequences' single most
+         recent sequence — and the last row as the "last-bar" features
+         XGBoost also sees.
+      3. Run the transformer to get its softmax class probabilities
+         (P_tx), then concatenate [last-bar features, P_tx] (plus the
+         embedding too, if the bundle was trained with use_embeddings)
+         as XGBoost's input to get P_xgb.
+      4. Blend: argmax(alpha * P_xgb + (1 - alpha) * P_tx), using the
+         bundle's saved blend_alpha.
+
+    XGBoost's predict_proba columns are realigned via model.classes_
+    (not assumed to be [0,1,2] in order) before blending, for the same
+    reason _predict_classifier_signal does — see issue #42.
+    """
+    lookback = int(data["lookback"])
+    if len(X_all) < lookback:
+        raise RuntimeError(
+            f"Insufficient history for daily_hybrid: need {lookback} bars, got {len(X_all)}"
+        )
+
+    X_clean = _preprocess(X_all.copy())
+    X_scaled = data["scaler"].transform(X_clean)
+
+    seq = X_scaled[-lookback:].astype(np.float32)[np.newaxis, :, :]  # (1, lookback, n_feat)
+    last_bar = X_scaled[-1:].astype(np.float32)  # (1, n_feat)
+
+    with torch.no_grad():
+        logits, embed = data["transformer"](torch.from_numpy(seq))
+        tx_probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]  # (3,)
+
+    if data.get("use_embeddings", False):
+        xgb_input = np.hstack([last_bar, tx_probs[np.newaxis, :], embed.cpu().numpy()])
+    else:
+        xgb_input = np.hstack([last_bar, tx_probs[np.newaxis, :]])
+
+    xgb_probs_raw = data["model"].predict_proba(xgb_input)[0]
+    xgb_classes = np.asarray(data["model"].classes_).astype(int)
+    xgb_probs = np.zeros(len(_SIGNAL_NAMES), dtype=np.float64)
+    xgb_probs[xgb_classes] = xgb_probs_raw
+
+    alpha = float(data.get("blend_alpha", 0.5))
+    blended = alpha * xgb_probs + (1.0 - alpha) * tx_probs
+    pred_idx = int(np.argmax(blended))
+    confidence = float(blended[pred_idx])
+    threshold = data.get("confidence_threshold", default_threshold)
+    signal = _SIGNAL_NAMES[pred_idx]
+    if signal != "HOLD" and confidence < threshold:
+        signal = "HOLD"
+    return {"signal": signal, "confidence": confidence}
+
+
 def load_models(
     db: Optional[DB] = None, model_keys: Optional[list[str]] = None
 ) -> dict[str, Any]:
@@ -281,6 +420,20 @@ def load_models(
             logger.info("Loaded daily_dqn from models/dqn_agent.pt")
         except Exception as exc:
             logger.warning("DQN load failed: %s", exc)
+
+    # Hybrid XGBoost-transformer model (separate artifact format: a raw
+    # torch state_dict/cfg alongside the xgb model, not a plain sklearn
+    # pickle — so it's loaded here rather than via the generic model_keys
+    # loop above, same as daily_dqn). Attempted unconditionally whenever
+    # the pickle is present, supplementing (not replacing) the existing
+    # config-driven models — see issue #64.
+    if os.path.exists("models/daily_hybrid.pkl"):
+        try:
+            models["daily_hybrid"] = _load_hybrid_pkl("models/daily_hybrid.pkl")
+            models["daily_hybrid"]["_artifact_path"] = "models/daily_hybrid.pkl"
+            logger.info("Loaded daily_hybrid from models/daily_hybrid.pkl")
+        except RuntimeError as exc:
+            logger.warning("%s", exc)
 
     return models
 
@@ -373,8 +526,8 @@ def predict_symbol(
     prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
 
     for model_key, data in models.items():
-        if model_key == "daily_dqn":
-            continue  # handled separately below — different artifact format
+        if model_key in ("daily_dqn", "daily_hybrid"):
+            continue  # handled separately below — different artifact/predict format
         try:
             kind = MODEL_KINDS.get(model_key)
             if kind == "classifier":
@@ -451,6 +604,23 @@ def predict_symbol(
         except Exception as exc:
             result["predictions"]["daily_dqn"] = {"error": str(exc)}
 
+    # --- DailyHybrid (XGBoost-transformer blend) ---
+    if "daily_hybrid" in models:
+        try:
+            data = models["daily_hybrid"]
+            threshold = data.get("confidence_threshold", _HYBRID_DEFAULT_CONFIDENCE_THRESHOLD)
+            pred = _predict_hybrid_signal(data, X_all, threshold)
+            result["predictions"]["daily_hybrid"] = pred
+            if db is not None:
+                meta = db.get_active_model("daily_hybrid")
+                version = meta["version"] if meta else 0
+                db.upsert_prediction(
+                    symbol, "daily_hybrid", version, prediction_date,
+                    pred["signal"], pred["confidence"], result["price"],
+                )
+        except Exception as exc:
+            result["predictions"]["daily_hybrid"] = {"error": str(exc)}
+
     return result
 
 
@@ -525,6 +695,7 @@ def send_discord(
         "daily_xgboost": "Daily XGBoost",
         "daily_predictor": "Daily Predictor",
         "daily_dqn": "Daily DQN",
+        "daily_hybrid": "Daily Hybrid",
     }
 
     # Organize by strategy → signal

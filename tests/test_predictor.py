@@ -347,3 +347,19 @@ def test_prepare_data_uses_vol_adj_target(monkeypatch):
     assert not np.allclose(data["y_train"], raw_train, atol=1e-9), (
         "y_train equals raw fwd_ret_1d — vol-adjustment was not applied"
     )
+
+
+def test_predictor_strategy_applies_one_bar_execution_lag():
+    """Backtest signal must be lagged one bar vs the raw decision, matching
+    PredictorStrategy (predictor_strategy.py:45). Guards the close[t]->close[t]
+    look-ahead fix. Live path (_predict_regressor_signal) is intentionally NOT
+    shifted and is not exercised here."""
+    df = _make_price_df(n=200)
+    cfg = StrategyConfig(name="daily_predictor", holding_period=0)
+    strat = DailyPredictorStrategy(cfg, use_pretrained=False, threshold_window=20)
+
+    # First non-HOLD signal index must be strictly greater than it would be
+    # without the shift: the shift guarantees element 0 is always HOLD (0).
+    sig = strat.signal(None, df)
+    assert sig.iloc[0] == 0, "shift(1) must force the first bar to HOLD"
+    assert len(sig) == len(make_daily_features(df))

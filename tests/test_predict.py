@@ -1072,6 +1072,288 @@ class TestPredictSymbolPredictor:
 
 
 # ---------------------------------------------------------------------------
+# daily_hybrid (issue #64) — XGBoost-transformer blend
+# ---------------------------------------------------------------------------
+
+import torch as _torch
+
+from hybrid_model import TransformerCfg, TransformerEncoder
+from predict_next_day_lite import _load_hybrid_pkl, _predict_hybrid_signal
+
+
+def _make_hybrid_artifact(lookback: int = 10, blend_alpha: float = 0.4,
+                           use_embeddings: bool = False,
+                           feature_contract=None) -> dict:
+    """Build a real (tiny) TransformerEncoder + picklable XGBoost stub so
+    _load_hybrid_pkl's reconstruction path can be exercised end-to-end,
+    following train_hybrid.py's artifact schema exactly."""
+    if feature_contract is None:
+        feature_contract = FEATURE_COLS
+    tcfg = TransformerCfg(
+        lookback=lookback, d_model=8, nhead=2, num_layers=1,
+        dim_feedforward=16, dropout=0.0, embed_dim=4, num_classes=3,
+    )
+    model = TransformerEncoder(n_features=len(feature_contract), cfg=tcfg)
+    return {
+        "model": _PicklableStub(),
+        "scaler": _PicklableStub(),
+        "transformer_state": model.state_dict(),
+        "transformer_cfg": tcfg.__dict__,
+        "lookback": lookback,
+        "feature_contract": list(feature_contract),
+        "blend_alpha": blend_alpha,
+        "use_embeddings": use_embeddings,
+        "confidence_threshold": 0.4,
+    }
+
+
+class TestLoadHybridPkl:
+    def test_valid_artifact_loads_and_reconstructs_transformer(self):
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+
+        loaded = _load_hybrid_pkl(path)
+
+        assert "transformer" in loaded
+        assert isinstance(loaded["transformer"], TransformerEncoder)
+        assert loaded["lookback"] == 10
+        assert loaded["blend_alpha"] == 0.4
+
+    def test_missing_file_raises(self):
+        with pytest.raises(RuntimeError, match="not found"):
+            _load_hybrid_pkl("/nonexistent/daily_hybrid.pkl")
+
+    def test_missing_required_key_raises(self):
+        artifact = _make_hybrid_artifact()
+        del artifact["blend_alpha"]
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with pytest.raises(RuntimeError, match="missing key 'blend_alpha'"):
+            _load_hybrid_pkl(path)
+
+    def test_wrong_feature_contract_raises(self):
+        artifact = _make_hybrid_artifact(feature_contract=["wrong_a", "wrong_b"])
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with pytest.raises(RuntimeError, match="Feature contract mismatch"):
+            _load_hybrid_pkl(path)
+
+    def test_correct_hash_loads_successfully(self):
+        import hashlib
+
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        with open(path + ".sha256", "w", encoding="ascii") as f:
+            f.write(digest)
+
+        loaded = _load_hybrid_pkl(path)
+        assert "transformer" in loaded
+
+    def test_hash_mismatch_raises(self):
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+        with open(path + ".sha256", "w", encoding="ascii") as f:
+            f.write("0" * 64)
+
+        with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+            _load_hybrid_pkl(path)
+
+    def test_missing_hash_file_logs_warning_and_still_loads(self, caplog):
+        artifact = _make_hybrid_artifact()
+        with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+            pickle.dump(artifact, f)
+            path = f.name
+
+        with caplog.at_level(logging.WARNING):
+            loaded = _load_hybrid_pkl(path)
+
+        assert "transformer" in loaded
+        assert any("skipping integrity check" in rec.message for rec in caplog.records)
+
+
+class TestLoadModelsHybrid:
+    def test_loads_daily_hybrid_when_pickle_present(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        artifact = _make_hybrid_artifact()
+        with open(tmp_path / "models" / "daily_hybrid.pkl", "wb") as f:
+            pickle.dump(artifact, f)
+
+        loaded = load_models(db=None, model_keys=[])
+
+        assert "daily_hybrid" in loaded
+        assert "transformer" in loaded["daily_hybrid"]
+        assert loaded["daily_hybrid"]["_artifact_path"].endswith("daily_hybrid.pkl")
+
+    def test_missing_pickle_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+
+        loaded = load_models(db=None, model_keys=[])
+
+        assert loaded == {}
+
+    def test_corrupt_pickle_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "models").mkdir()
+        with open(tmp_path / "models" / "daily_hybrid.pkl", "wb") as f:
+            f.write(b"not a pickle")
+
+        loaded = load_models(db=None, model_keys=[])
+
+        assert "daily_hybrid" not in loaded
+
+
+class TestPredictSymbolHybrid:
+    """predict_symbol's daily_hybrid branch: build the lookback window the
+    same way build_sequences does, run the (mocked) transformer + XGBoost,
+    and blend argmax(alpha * P_xgb + (1 - alpha) * P_tx)."""
+
+    def _build_hybrid_models(self, logits, xgb_proba, classes=(0, 1, 2),
+                              blend_alpha=0.5, lookback=10,
+                              use_embeddings=False, confidence_threshold=0.1) -> dict:
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+
+        transformer = MagicMock()
+        logits_t = _torch.tensor([logits], dtype=_torch.float32)
+        embed_t = _torch.zeros((1, 4), dtype=_torch.float32)
+        transformer.return_value = (logits_t, embed_t)
+
+        xgb_model = MagicMock()
+        xgb_model.predict_proba.return_value = np.array([xgb_proba])
+        xgb_model.classes_ = np.array(classes)
+
+        return {
+            "daily_hybrid": {
+                "model": xgb_model,
+                "scaler": scaler,
+                "transformer": transformer,
+                "lookback": lookback,
+                "feature_contract": list(FEATURE_COLS),
+                "blend_alpha": blend_alpha,
+                "use_embeddings": use_embeddings,
+                "confidence_threshold": confidence_threshold,
+            }
+        }
+
+    def test_blends_xgb_and_transformer_probs(self):
+        logits = [0.0, 1.0, 2.0]  # softmax favors BUY (idx 2)
+        tx_probs = _torch.softmax(_torch.tensor(logits), dim=-1).numpy()
+        xgb_proba = [0.7, 0.2, 0.1]  # favors SELL (idx 0)
+        models = self._build_hybrid_models(
+            logits, xgb_proba, blend_alpha=0.5, confidence_threshold=0.1
+        )
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result
+        p = result["predictions"]["daily_hybrid"]
+        blended = 0.5 * np.array(xgb_proba) + 0.5 * tx_probs
+        expected_idx = int(np.argmax(blended))
+        expected_signal = ["SELL", "HOLD", "BUY"][expected_idx]
+        assert p["signal"] == expected_signal
+        assert abs(p["confidence"] - blended[expected_idx]) < 1e-6
+
+    def test_low_confidence_collapses_to_hold(self):
+        # Both models weakly favor BUY but blended confidence stays under
+        # the configured threshold, so the result should collapse to HOLD.
+        logits = [0.33, 0.34, 0.35]
+        xgb_proba = [0.30, 0.32, 0.38]
+        models = self._build_hybrid_models(
+            logits, xgb_proba, blend_alpha=0.5, confidence_threshold=0.9
+        )
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_hybrid"]
+        assert p["signal"] == "HOLD"
+
+    def test_xgb_classes_out_of_order_realigned(self):
+        """If model.classes_ isn't [0,1,2] in order, predict_proba's columns
+        must be realigned before blending — same contract as issue #42 for
+        the plain classifiers (_predict_classifier_signal)."""
+        logits = [-5.0, -5.0, -5.0]  # ~uniform transformer probs
+        # classes_ = [2, 0, 1] means predict_proba columns are ordered
+        # BUY, SELL, HOLD instead of SELL, HOLD, BUY
+        xgb_proba = [0.9, 0.05, 0.05]  # column 0 -> class 2 (BUY)
+        models = self._build_hybrid_models(
+            logits, xgb_proba, classes=(2, 0, 1), blend_alpha=1.0,
+            confidence_threshold=0.1,
+        )
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        p = result["predictions"]["daily_hybrid"]
+        # blend_alpha=1.0 -> pure XGBoost; realigned probs put 0.9 mass on
+        # class 2 (BUY), so the signal must be BUY, not SELL.
+        assert p["signal"] == "BUY"
+
+    def test_insufficient_lookback_history_reports_error_not_crash(self):
+        """Fewer bars than the model's lookback window must surface as a
+        per-model error (matching the other models' try/except contract),
+        not crash predict_symbol or the other models' predictions."""
+        models = self._build_hybrid_models(
+            [0.1, 0.2, 0.7], [0.1, 0.2, 0.7], lookback=1000,
+        )
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert "error" not in result  # the symbol overall still succeeds
+        assert "error" in result["predictions"]["daily_hybrid"]
+
+    def test_runs_alongside_other_models_without_interference(self):
+        """daily_hybrid must produce an independent prediction entry
+        alongside a classifier in the same models dict (mirrors
+        TestPredictSymbolPredictor.test_runs_alongside_classifier_...)."""
+        scaler = MagicMock()
+        scaler.transform.side_effect = lambda x: x
+        clf = MagicMock()
+        clf.predict_proba.return_value = np.array([[0.1, 0.2, 0.7]])
+        clf.classes_ = np.array([0, 1, 2])
+
+        models = {
+            "daily_logistic": {
+                "model": clf, "scaler": scaler,
+                "feature_contract": list(FEATURE_COLS), "confidence_threshold": 0.55,
+            },
+            **self._build_hybrid_models(
+                [0.1, 0.2, 5.0], [0.1, 0.2, 0.7], blend_alpha=0.5, confidence_threshold=0.1
+            ),
+        }
+        feats_df = _make_features_df(100)
+
+        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+            result = predict_symbol("AAPL", models)
+
+        assert result["predictions"]["daily_logistic"]["signal"] == "BUY"
+        assert result["predictions"]["daily_hybrid"]["signal"] == "BUY"
+
+
+# ---------------------------------------------------------------------------
 # JSON structured logging (Task 1)
 # ---------------------------------------------------------------------------
 
