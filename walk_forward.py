@@ -50,7 +50,6 @@ def run_walk_forward_on_df(
     df: pd.DataFrame,
     spy_df: Optional[pd.DataFrame],
     config: WalkForwardConfig,
-    vix_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Run walk-forward validation on a single symbol's price DataFrame.
@@ -61,7 +60,7 @@ def run_walk_forward_on_df(
     Raises ValueError if there are fewer bars than one complete fold
     (train_bars + FWD_RET_HORIZON_DAYS + test_bars).
     """
-    feats = make_daily_features(df, spy_df=spy_df, vix_df=vix_df).dropna(subset=["fwd_ret_1d"])
+    feats = make_daily_features(df, spy_df=spy_df).dropna(subset=["fwd_ret_1d"])
     n = len(feats)
     min_bars = config.train_bars + FWD_RET_HORIZON_DAYS + config.test_bars
     if n < min_bars:
@@ -135,7 +134,6 @@ def build_fold_data(symbols, days, db, config=None):
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     spy_df = _load_symbol("SPY", start, end, db)
-    vix_df = _load_symbol("^VIX", start, end, db)
 
     fold_data = []
     for symbol in symbols:
@@ -144,7 +142,7 @@ def build_fold_data(symbols, days, db, config=None):
             continue
         try:
             spy_arg = spy_df if symbol != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg, vix_df=vix_df).dropna(subset=["fwd_ret_1d"])
+            feats = make_daily_features(df, spy_df=spy_arg).dropna(subset=["fwd_ret_1d"])
         except Exception as exc:
             logger.warning("build_fold_data: feature error for %s: %s", symbol, exc)
             continue
@@ -264,7 +262,6 @@ def main() -> None:
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
     spy_df = _load_symbol("SPY", start, end, db)
-    vix_df = _load_symbol("^VIX", start, end, db)
 
     for symbol in symbols:
         df = _load_symbol(symbol, start, end, db)
@@ -273,7 +270,7 @@ def main() -> None:
             continue
         spy_arg = spy_df if symbol != "SPY" else None
         try:
-            result = run_walk_forward_on_df(df, spy_arg, config, vix_df=vix_df)
+            result = run_walk_forward_on_df(df, spy_arg, config)
         except ValueError as exc:
             logger.error("%s: %s", symbol, exc)
             continue

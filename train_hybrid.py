@@ -144,10 +144,6 @@ def prepare_data(
     if spy_df is None:
         logger.warning("SPY missing — ret_*_vs_spy features will be 0")
 
-    vix_df = _load_symbol("^VIX", start, end, db)
-    if vix_df is None:
-        logger.warning("^VIX missing — vix_z/vix_chg_5d features will be 0")
-
     # First pass: collect per-symbol raw features + labels, do per-symbol temporal split
     train_blocks: list[tuple[np.ndarray, np.ndarray]] = []
     val_blocks: list[tuple[np.ndarray, np.ndarray]] = []
@@ -160,7 +156,7 @@ def prepare_data(
             continue
         try:
             spy_arg = spy_df if sym != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg, vix_df=vix_df)
+            feats = make_daily_features(df, spy_df=spy_arg)
         except Exception as exc:
             logger.warning("  %s: feature failure: %s", sym, exc)
             continue

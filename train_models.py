@@ -173,11 +173,6 @@ def _prepare_data(
     if spy_df is None:
         logger.warning("Could not load SPY data — ret_*_vs_spy features will be 0")
 
-    # Load VIX once for implied-vol regime features; warn but continue if unavailable
-    vix_df = _load_symbol("^VIX", start, end, db)
-    if vix_df is None:
-        logger.warning("Could not load ^VIX data — vix_z/vix_chg_5d features will be 0")
-
     for symbol in symbols:
         df = _load_symbol(symbol, start, end, db)
         if df is None:
@@ -185,7 +180,7 @@ def _prepare_data(
 
         try:
             spy_arg = spy_df if symbol != "SPY" else None
-            feats = make_daily_features(df, spy_df=spy_arg, vix_df=vix_df)
+            feats = make_daily_features(df, spy_df=spy_arg)
         except Exception as exc:
             logger.warning("  %s: feature computation failed: %s", symbol, exc)
             continue

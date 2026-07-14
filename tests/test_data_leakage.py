@@ -162,17 +162,3 @@ def test_amihud_is_causal():
     trunc = make_daily_features(df.iloc[:300])["amihud_illiq"]
     common = full.index.intersection(trunc.index)[-1]
     assert np.isclose(full.loc[common], trunc.loc[common], equal_nan=True)
-
-
-def test_vix_features_are_causal():
-    import numpy as np
-    import pandas as pd
-    from daily_features import make_daily_features
-    from tests.test_feature_correlation_guard import _synthetic_ohlcv
-
-    df = _synthetic_ohlcv(n=500, seed=11)
-    vix = _synthetic_ohlcv(n=500, seed=12).rename(columns=str)  # any close series
-    full = make_daily_features(df, vix_df=vix)[["vix_z", "vix_chg_5d"]]
-    trunc = make_daily_features(df.iloc[:300], vix_df=vix.iloc[:300])[["vix_z", "vix_chg_5d"]]
-    common = full.index.intersection(trunc.index)[-1]
-    assert np.allclose(full.loc[common].values, trunc.loc[common].values, equal_nan=True)

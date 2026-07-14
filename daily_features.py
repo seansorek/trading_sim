@@ -52,8 +52,6 @@ FEATURE_COLS: list[str] = [
     "obv_normalized",
     "ret_1d_vs_spy",     # symbol ret_1d minus SPY ret_1d (market-relative alpha, 1d)
     "ret_5d_vs_spy",     # symbol ret_5d minus SPY ret_5d (market-relative alpha, 5d)
-    "vix_z",             # z-scored VIX level (implied-vol regime)
-    "vix_chg_5d",        # z-scored 5-day VIX percentage change
 ]
 
 
@@ -86,7 +84,6 @@ _ZSCORE_FEATURES: list[str] = [
     "macd", "macd_signal", "ma_spread_10_20", "ma_spread_20_50",
     "price_vs_sma20", "price_vs_sma50", "roc_12", "gap", "hl_ratio",
     "vol_regime", "rel_volume", "amihud_illiq", "ret_1d_vs_spy", "ret_5d_vs_spy",
-    "vix_z", "vix_chg_5d",
 ]
 
 
@@ -126,7 +123,6 @@ def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
 def make_daily_features(
     df: pd.DataFrame,
     spy_df: pd.DataFrame | None = None,
-    vix_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build features from daily OHLCV data.
@@ -134,10 +130,6 @@ def make_daily_features(
     spy_df: optional SPY DataFrame used to compute market-relative features
     (ret_1d_vs_spy, ret_5d_vs_spy).  Pass None for backtesting fallback — those
     features will be 0.0 so the column contract is always satisfied.
-
-    vix_df: optional VIX DataFrame used to compute implied-vol regime features
-    (vix_z, vix_chg_5d).  Pass None for fallback — both features will be 0.0
-    so the column contract is always satisfied.
 
     Returns a DataFrame with all columns in FEATURE_COLS plus auxiliary
     columns 'close' and 'fwd_ret_1d' (not part of the model input).
@@ -159,23 +151,6 @@ def make_daily_features(
     else:
         feats["ret_1d_vs_spy"] = 0.0
         feats["ret_5d_vs_spy"] = 0.0
-
-    if vix_df is not None:
-        # Normalize both indices to date-level (strip time-of-day) before reindexing.
-        # yfinance can return VIX with a different intraday timestamp than DB-cached
-        # symbols (e.g., 05:00 UTC vs 04:00 UTC), which would produce all-NaN on
-        # a direct reindex.  Normalizing to midnight UTC then restoring df.index
-        # is the same contract as spy_df once both are in the DB cache.
-        vix_raw = vix_df["close"].copy()
-        vix_raw.index = vix_raw.index.normalize()
-        target_norm = df.index.normalize()
-        vix_aligned = vix_raw.reindex(target_norm).ffill()
-        vix_aligned.index = df.index  # restore original index for downstream alignment
-        feats["vix_z"] = vix_aligned
-        feats["vix_chg_5d"] = vix_aligned.pct_change(5)
-    else:
-        feats["vix_z"] = 0.0
-        feats["vix_chg_5d"] = 0.0
 
     sma_10 = df["close"].rolling(10).mean()
     sma_20 = df["close"].rolling(20).mean()
