@@ -13,6 +13,8 @@
 - **DSR (Deflated Sharpe Ratio)**: Median of 0.800 across 5-symbol subset (AAPL, MSFT, SPY, QQQ, NVDA) suggests modest statistical significance after multiple testing adjustment
 - **Baseline model**: Daily logistic regression / XGBoost / predictor with 25 engineered features
 
+| daily_v6 (features only) | 0.0380 | 0.206 | 0.848 | 29-feature v6 (dropped williams_r/macd_hist/vol_z_20; added ret_21d, adx_14, vol_regime, rel_volume, hl_ratio, turnover_z, gap; rolling z-score on 18 unbounded features). signal_quantile=0.75, threshold_window=40. Per-symbol IC: AAPL=0.0304, MSFT=0.0217, GOOGL=0.1026, AMZN=-0.0113, NVDA=-0.0103, META=0.0456, TSLA=0.0805, SPY=0.0840, QQQ=0.0266, IWM=0.0901. Gate: KEPT (IC 0.0380 > 0.0266 AND PBO 0.206 ≤ 0.564). |
+
 ## Next Steps
 
 Rows below will track improvements from orthogonal feature engineering, preprocessing, and model refinement:
