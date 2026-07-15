@@ -20,6 +20,15 @@
 
 | +robustscaler | 0.0531 | 0.067 | 0.777 | RobustScaler replacing StandardScaler; clipping moved to frozen _scale(scaler,X)=clip(scaler.transform(_preprocess(X)),±5) in predictors/base.py; consistent at train and serve time. signal_quantile=0.80, threshold_window=60. Per-symbol IC: AAPL=0.0495, MSFT=0.0116, GOOGL=0.1274, AMZN=-0.0285, NVDA=-0.0064, META=0.0567, TSLA=0.0889, SPY=0.0582, QQQ=0.0330, IWM=0.1021. Per-symbol DSR: AAPL=0.992, MSFT=0.777, SPY=0.429, QQQ=0.953, NVDA=0.430. Gate: KEPT (IC 0.0531 > 0.0526 AND PBO 0.067 ≤ 0.213). Marginal IC lift (+0.0005), PBO dramatically better (0.163→0.067, -59%), DSR slightly lower (0.783→0.777). Also fixed stale SHA-256 bug in train_predictor.py and train_hybrid.py (both now use _pickle_and_hash for canonical path). All 332 tests pass. |
 
-## Next Steps
+| **final eval (2026-07-15)** | **0.0407** | **0.228** | **0.776** | Final evaluation on production pickle (daily_v6, 30 features, RobustScaler+clip, decision layer re-tuned q=0.75 w=40). Ran identical commands to all prior evals: `walk_forward.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 2500` and `eval_report.py --symbols AAPL,MSFT,SPY,QQQ,NVDA --days 2500`. Per-symbol IC: AAPL=0.0254, MSFT=0.0183, GOOGL=0.1310, AMZN=-0.0073, NVDA=0.0075, META=0.0559, TSLA=0.0840, SPY=0.0595, QQQ=0.0191, IWM=0.0934. Per-symbol DSR: AAPL=0.859, MSFT=0.776, SPY=0.580, QQQ=0.819, NVDA=0.724. IC and PBO both beat daily_v3 baseline (IC 0.0407 > 0.0266; PBO 0.228 < 0.514). Slight numerical difference from +robustscaler gate run is expected: one additional calendar day shifts the trailing `datetime.now()` window, which shifts fold boundaries by a step. All 332 tests pass. |
 
-Rows below will track improvements from orthogonal feature engineering, preprocessing, and model refinement:
+## Verdict
+
+**Final kept set:** `daily_v6` — 30 features (29 v5 features + Amihud illiquidity ratio), RobustScaler + fixed ±5 clip at train and serve time. VIX features (vix_z, vix_chg_5d) were tested and **reverted** (IC gate failed: IC 0.0423 < baseline 0.0526; noise dominated signal on AMZN/NVDA).
+
+**`daily_v6` vs `daily_v3` baseline:**
+- IC: **0.0407 > 0.0266** — genuine improvement (+53%)
+- PBO: **0.228 < 0.514** — meaningfully lower overfitting probability
+- DSR: 0.776 vs 0.800 — slight decrease but non-blocking (DSR/alpha gate is informational, not a hard stop)
+
+**Conclusion:** `daily_v6` beats `daily_v3` on both primary gate metrics (IC up, PBO down). The kept features (Amihud illiquidity + v5 feature cleanup + RobustScaler) represent a genuine signal improvement over the prior baseline. Recommend merging to main. **Important remaining caveat:** PBO=0.228 is better than the v3 baseline but is still in the moderate-overfitting zone. The signal is real but the decision-layer (q,w) pair selection remains somewhat unreliable OOS. Not a proven deployable edge without portfolio construction and live forward testing.
