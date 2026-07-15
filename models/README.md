@@ -2,6 +2,8 @@
 
 This directory contains pre-trained models committed to the repo so GitHub Actions can load them without retraining on every run.
 
+**Storage strategy:** artifacts stay in git directly (no LFS, no release assets). At ~2.8MB total (largest file `daily_hybrid.pkl` ~1.2MB) the repo-size cost of retrain-and-commit cycles is negligible; LFS would add a quota/billing dependency and an extra checkout step to every workflow for no real benefit at this scale. Revisit if the models directory grows into the tens of MB.
+
 ## Model Cards
 
 One entry per model that is trained or deployed in this project. "Live" means the model
