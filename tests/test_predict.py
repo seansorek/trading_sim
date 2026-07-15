@@ -136,7 +136,7 @@ class TestPredictSymbol:
         models = self._build_models([0.1, 0.2, 0.7])  # BUY at 70%
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -151,7 +151,7 @@ class TestPredictSymbol:
         models = self._build_models([0.25, 0.30, 0.45])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -161,7 +161,7 @@ class TestPredictSymbol:
     def test_data_fetch_failure_returns_error(self):
         models = self._build_models([0.1, 0.2, 0.7])
 
-        with patch("predict_next_day_lite.load_yfinance", side_effect=RuntimeError("timeout")):
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", side_effect=RuntimeError("timeout")):
             result = predict_symbol("AAPL", models)
 
         assert "error" in result
@@ -171,7 +171,7 @@ class TestPredictSymbol:
         models = self._build_models([0.1, 0.2, 0.7])
         tiny_df = _make_ohlcv(10)  # only 10 bars, < 50 minimum
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=tiny_df):
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=tiny_df):
             result = predict_symbol("AAPL", models)
 
         assert "error" in result
@@ -186,7 +186,7 @@ class TestPredictSymbol:
             captured["start"] = start
             return _make_ohlcv(100)
 
-        with patch("predict_next_day_lite.load_yfinance", side_effect=fake_load), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", side_effect=fake_load), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             predict_symbol("AAPL", models, history_days=500)
 
@@ -226,7 +226,7 @@ class TestLoadBarsCached:
         """With db=None, behavior is unchanged: always fetch directly."""
         from predict_next_day_lite import _load_bars_cached
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)) as mock_fetch:
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)) as mock_fetch:
             result = _load_bars_cached("AAPL", "2023-01-01", "2023-06-01", db=None)
 
         mock_fetch.assert_called_once()
@@ -246,7 +246,7 @@ class TestLoadBarsCached:
         end_date = (latest_bar + pd.tseries.offsets.BDay(1)).strftime("%Y-%m-%d")
         start_date = data.index.min().strftime("%Y-%m-%d")
 
-        with patch("predict_next_day_lite.load_yfinance") as mock_fetch:
+        with patch("predict_next_day_lite.fetch_bars_with_fallback") as mock_fetch:
             result = _load_bars_cached("AAPL", start_date, end_date, db=db)
 
         mock_fetch.assert_not_called()
@@ -269,7 +269,7 @@ class TestLoadBarsCached:
         start_date = old_data.index.min().strftime("%Y-%m-%d")
 
         fresh_data = _make_ohlcv(130)
-        with patch("predict_next_day_lite.load_yfinance", return_value=fresh_data) as mock_fetch:
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=fresh_data) as mock_fetch:
             result = _load_bars_cached("AAPL", start_date, end_date, db=db)
 
         mock_fetch.assert_called_once()
@@ -298,7 +298,7 @@ class TestLoadBarsCached:
         much_earlier_start = (short_data.index.min() - pd.tseries.offsets.BDay(500)).strftime("%Y-%m-%d")
 
         long_data = _make_ohlcv(600)
-        with patch("predict_next_day_lite.load_yfinance", return_value=long_data) as mock_fetch:
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=long_data) as mock_fetch:
             result = _load_bars_cached("AAPL", much_earlier_start, end_date, db=db)
 
         mock_fetch.assert_called_once()
@@ -330,7 +330,7 @@ class TestLoadBarsCached:
 
         # history_days must be short enough that the requested start falls
         # within the cached window's coverage tolerance.
-        with patch("predict_next_day_lite.load_yfinance") as mock_fetch, \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback") as mock_fetch, \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol(
                 "AAPL", models, db=db, history_days=200,
@@ -357,7 +357,7 @@ class TestLoadBarsCached:
         }
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)) as mock_fetch, \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)) as mock_fetch, \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models, db=db)
 
@@ -670,7 +670,7 @@ class TestPredictSymbolDQN:
         models = self._make_dqn_models([1.0, 1.3, 0.9])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -683,7 +683,7 @@ class TestPredictSymbolDQN:
         models = self._make_dqn_models([0.5, 10.0, 0.2])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -696,7 +696,7 @@ class TestPredictSymbolDQN:
         models = self._make_dqn_models([0.5, 0.2, 10.0])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -710,7 +710,7 @@ class TestPredictSymbolDQN:
         models = self._make_dqn_models([0.5, 10.0, 0.2])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -727,7 +727,7 @@ class TestPredictSymbolDQN:
         models = self._make_dqn_models([1.0, 1.3, 0.9])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -767,7 +767,7 @@ class TestPredictProbaClassMapping:
         models = self._build_models_with_classes([0.3, 0.7], [0, 2])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -782,7 +782,7 @@ class TestPredictProbaClassMapping:
         models = self._build_models_with_classes([0.8, 0.2], [1, 2])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -796,7 +796,7 @@ class TestPredictProbaClassMapping:
         models = self._build_models_with_classes([0.1, 0.2, 0.7], [0, 1, 2])
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -982,7 +982,7 @@ class TestPredictSymbolPredictor:
         models = self._build_predictor_models(pred_ret)
         feats_df = _make_features_df(n)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(n)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -996,7 +996,7 @@ class TestPredictSymbolPredictor:
         models = self._build_predictor_models(pred_ret)
         feats_df = _make_features_df(n)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(n)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1024,7 +1024,7 @@ class TestPredictSymbolPredictor:
         }
         feats_df = _make_features_df(n)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(n)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(n)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1046,7 +1046,7 @@ class TestPredictSymbolPredictor:
         }
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1239,7 +1239,7 @@ class TestPredictSymbolHybrid:
         )
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1261,7 +1261,7 @@ class TestPredictSymbolHybrid:
         )
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1282,7 +1282,7 @@ class TestPredictSymbolHybrid:
         )
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1300,7 +1300,7 @@ class TestPredictSymbolHybrid:
         )
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
@@ -1328,7 +1328,7 @@ class TestPredictSymbolHybrid:
         }
         feats_df = _make_features_df(100)
 
-        with patch("predict_next_day_lite.load_yfinance", return_value=_make_ohlcv(100)), \
+        with patch("predict_next_day_lite.fetch_bars_with_fallback", return_value=_make_ohlcv(100)), \
              patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
             result = predict_symbol("AAPL", models)
 
