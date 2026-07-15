@@ -25,8 +25,8 @@ from sklearn.preprocessing import RobustScaler
 
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from ml_strategies import compute_predictor_signal
-from predictors.base import CLIP
-from train_models import _preprocess, _load_symbol
+from predictors.base import CLIP, _preprocess
+from train_models import _load_symbol
 
 logger = logging.getLogger(__name__)
 

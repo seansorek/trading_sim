@@ -49,8 +49,8 @@ except ImportError:
 
 from daily_features import FEATURE_COLS, FEATURE_SET_NAME, FWD_RET_HORIZON_DAYS, make_daily_features
 from db import DB
-from predictors.base import CLIP
-from train_models import _load_symbol, _pickle_and_hash, _preprocess
+from predictors.base import CLIP, _preprocess
+from train_models import _load_symbol, _pickle_and_hash
 from walk_forward import sweep_params, WalkForwardConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")

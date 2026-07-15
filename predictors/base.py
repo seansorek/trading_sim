@@ -38,7 +38,8 @@ def _load_validated_pickle(
 ) -> dict:
     """Load a model pickle, verify SHA-256 integrity, and check required keys.
 
-    Raises RuntimeError on any failure — never silently continues.
+    Warns and returns the stale model when feature_set_name mismatches (soft validation);
+    raises RuntimeError only if the feature contract array itself mismatches a same-version model.
     """
     if required_keys is None:
         required_keys = {"model", "scaler", "feature_contract"}

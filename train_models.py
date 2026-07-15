@@ -53,7 +53,7 @@ from daily_features import (
     make_daily_features,
 )
 from db import DB
-from predictors.base import CLIP
+from predictors.base import CLIP, _preprocess
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -84,13 +84,6 @@ def _pickle_and_hash(artifact: dict, path: str) -> None:
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
-
-def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0. Returns a copy. (Clipping now lives in _scale.)"""
-    X = np.where(np.isinf(X), np.nan, X)
-    X = np.nan_to_num(X, nan=0.0)
-    return X
-
 
 def _load_symbol(
     symbol: str, start: str, end: str, db: DB
@@ -188,9 +181,9 @@ def _prepare_data(
 
         X_sym = feats[FEATURE_COLS].values.astype(np.float32)
 
-        # Volatility-adjusted thresholds: vol_mult*sigma bands scaled for 3-day horizon
-        vol = feats["vol_20d"].values
-        pos_thr = vol * np.sqrt(3) * vol_mult
+        # Volatility-adjusted thresholds: use raw 20-day return vol (not z-scored vol_20d)
+        raw_vol = df["close"].pct_change().rolling(20).std().reindex(feats.index).values
+        pos_thr = raw_vol * np.sqrt(3) * vol_mult
         y_sym = discretize_labels(feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr)
 
         split = int(len(X_sym) * 0.8)
