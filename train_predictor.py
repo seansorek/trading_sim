@@ -49,6 +49,7 @@ except ImportError:
 
 from daily_features import FEATURE_COLS, FEATURE_SET_NAME, FWD_RET_HORIZON_DAYS, make_daily_features
 from db import DB
+from predictors.base import CLIP
 from train_models import _load_symbol, _pickle_and_hash, _preprocess
 from walk_forward import sweep_params, WalkForwardConfig
 
@@ -148,8 +149,8 @@ def _forecast_metrics(pred: np.ndarray, actual: np.ndarray) -> dict:
 
 def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
     scaler = RobustScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
     model = Ridge(alpha=alpha)
     model.fit(X_tr, y_train)
     train_metrics = _forecast_metrics(model.predict(X_tr), y_train)

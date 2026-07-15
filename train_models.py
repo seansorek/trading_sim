@@ -53,6 +53,7 @@ from daily_features import (
     make_daily_features,
 )
 from db import DB
+from predictors.base import CLIP
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -305,8 +306,8 @@ def train_logistic(
     opt_cfg=None,
 ) -> tuple[LogisticRegression, RobustScaler, float, float, float]:
     scaler = RobustScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
 
     if optimize and HAS_SKOPT and opt_cfg is not None:
         logger.info("Running Bayesian hyperparameter search for Logistic Regression...")
@@ -380,8 +381,8 @@ def train_xgboost(
         raise ImportError("xgboost not installed. pip install xgboost")
 
     scaler = RobustScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
 
     if optimize and not HAS_SKOPT:
         logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")
