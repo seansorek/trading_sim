@@ -117,7 +117,7 @@ Test coverage:
 - `test_backtester.py` — position sizing, commission, equity curve
 - `test_data_loader.py` — yfinance fetching, data standardization
 - `test_db.py` — SQLite schema, inserts, queries
-- `test_feature_contract.py` — FEATURE_COLS consistency between training and prediction
+- `test_feature_contract.py` — FEATURE_COLS (30 features, `daily_v6`) consistency between training and prediction
 - `test_predict.py` — model loading validation, signal generation, Discord formatting
 - `test_data_leakage.py` — purged/embargo-gap regression tests for the train/test split
 - `test_predictor.py` — regression prediction model + `DailyPredictorStrategy` decision layer
@@ -131,7 +131,7 @@ Test coverage:
 |---|---|
 | `config/default.yaml` | Single source of truth for all parameters |
 | `config.py` | Dataclass definitions; `get_config()` returns a cached `AppConfig` |
-| `daily_features.py` | Computes the 25-feature vector; `FEATURE_COLS` is the canonical feature contract |
+| `daily_features.py` | Computes the 30-feature vector (`daily_v6`); `FEATURE_COLS` is the canonical feature contract |
 | `train_models.py` | **Entry point:** train and save Logistic + XGBoost models |
 | `train_predictor.py` | **Entry point:** train the Ridge return-prediction model (experimental prediction/strategy split) |
 | `train_dqn.py` | **Entry point:** train the DQN agent |

@@ -91,7 +91,7 @@ class TestPredictorStrategy:
 
     def test_signal_applies_one_bar_execution_lag(self):
         """Signal at bar i should appear at bar i+1 in the output."""
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)  # bumped from 100 — daily_v6 z-score needs ~110 warmup rows
         n = len(df)
         # Decision emits BUY (1) at bar index 5 (relative to daily_feats), HOLD elsewhere
         raw = np.zeros(n, dtype=int)
@@ -144,7 +144,7 @@ class TestPredictorStrategy:
         np.testing.assert_array_equal(proba_arg, captured_proba["value"])
 
     def test_holding_period_is_enforced(self):
-        df = _make_ohlcv(100)
+        df = _make_ohlcv(200)  # bumped from 100 — daily_v6 z-score needs ~110 warmup rows
         n = len(df)
         # BUY signals at bars 0, 1, 2 — with holding_period=5, only first should fire
         raw = np.array([1, 1, 1] + [0] * (n - 3), dtype=int)

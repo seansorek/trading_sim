@@ -39,7 +39,7 @@ import numpy as np
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 try:
     import xgboost as xgb
@@ -49,7 +49,8 @@ except ImportError:
 
 from daily_features import FEATURE_COLS, FEATURE_SET_NAME, FWD_RET_HORIZON_DAYS, make_daily_features
 from db import DB
-from train_models import _load_symbol, _preprocess
+from predictors.base import CLIP, _preprocess
+from train_models import _load_symbol, _pickle_and_hash
 from walk_forward import sweep_params, WalkForwardConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -147,9 +148,9 @@ def _forecast_metrics(pred: np.ndarray, actual: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 
 def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    scaler = RobustScaler()
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
     model = Ridge(alpha=alpha)
     model.fit(X_tr, y_train)
     train_metrics = _forecast_metrics(model.predict(X_tr), y_train)
@@ -160,7 +161,7 @@ def train_ridge(X_train, X_test, y_train, y_test, alpha: float):
 def train_xgb_regressor(X_train, X_test, y_train, y_test):
     if not HAS_XGBOOST:
         raise ImportError("xgboost not installed.")
-    scaler = StandardScaler()  # kept for artifact-shape consistency; XGBoost is scale-invariant
+    scaler = RobustScaler()  # kept for artifact-shape consistency; XGBoost is scale-invariant
     scaler.fit(X_train)
     model = xgb.XGBRegressor(
         n_estimators=300, max_depth=3, learning_rate=0.03,
@@ -233,9 +234,10 @@ def _save_and_register(
     with open(artifact_path, "wb") as f:
         pickle.dump(artifact, f)
 
+    # Write canonical path with SHA-256 integrity file so _load_validated_pickle
+    # can verify it on next load (matches train_models._pickle_and_hash contract).
     canonical = f"models/{MODEL_KEY}.pkl"
-    with open(canonical, "wb") as f:
-        pickle.dump(artifact, f)
+    _pickle_and_hash(artifact, canonical)
 
     db.update_artifact_path(MODEL_KEY, version, artifact_path)
     db.deactivate_old_models(MODEL_KEY, version)

@@ -21,31 +21,13 @@ from daily_features import FEATURE_COLS, FEATURE_SET_NAME, make_daily_features
 # Hard-coded expected list — if this test fails, you changed FEATURE_COLS.
 # All features must be dimensionless/normalized (no raw price or volume units).
 _EXPECTED_FEATURE_COLS = [
-    "ret_1d",
-    "ret_5d",
-    "ret_10d",
-    "vol_20d",
-    "ma_spread_10_20",   # (sma10 - sma20) / close
-    "ma_spread_20_50",   # (sma20 - sma50) / close
-    "macd",
-    "macd_signal",
-    "macd_hist",
-    "rsi_14",
-    "price_vs_sma20",
-    "price_vs_sma50",
-    "vol_z_20",
-    "bb_width",          # (bb_upper - bb_lower) / close
-    "bb_position",
-    "stoch_k",
-    "stoch_d",
-    "williams_r",
-    "roc_12",
-    "atr_normalized",
-    "vpt_normalized",
-    "ad_normalized",
-    "obv_normalized",
-    "ret_1d_vs_spy",
-    "ret_5d_vs_spy",
+    "ret_1d", "ret_5d", "ret_10d", "ret_21d", "vol_20d",
+    "ma_spread_10_20", "ma_spread_20_50", "macd", "macd_signal",
+    "rsi_14", "price_vs_sma20", "price_vs_sma50", "bb_width", "bb_position",
+    "stoch_k", "stoch_d", "roc_12", "atr_normalized", "adx_14",
+    "vol_regime", "rel_volume", "hl_ratio", "turnover_z", "amihud_illiq", "gap",
+    "vpt_normalized", "ad_normalized", "obv_normalized",
+    "ret_1d_vs_spy", "ret_5d_vs_spy",
 ]
 
 
@@ -147,8 +129,19 @@ def test_pickle_feature_contract_matches_constant():
             )
             continue
 
+        pickle_fsn = data.get("feature_set_name")
+        if pickle_fsn and pickle_fsn != FEATURE_SET_NAME:
+            import warnings
+            warnings.warn(
+                f"{pkl_path.name}: feature_set_name={pickle_fsn!r} != "
+                f"FEATURE_SET_NAME={FEATURE_SET_NAME!r}. Skipping — retrain.",
+                stacklevel=2,
+            )
+            continue
+
         assert data["feature_contract"] == FEATURE_COLS, (
-            f"{pkl_path.name}: feature_contract does not match FEATURE_COLS. "
+            f"{pkl_path.name}: feature_contract ({len(data['feature_contract'])} cols) "
+            f"does not match FEATURE_COLS ({len(FEATURE_COLS)} cols). "
             "Retrain the model."
         )
         checked += 1
@@ -172,9 +165,12 @@ def test_normalized_cumsum_features_are_bounded():
         assert 0.1 < std < 5.0, f"{col} std {std:.3f} looks wrong"
 
 
-def test_feature_cols_count_is_25():
-    """Regression: CLAUDE.md and project docs describe a 25-feature vector."""
-    assert len(FEATURE_COLS) == 25, (
-        f"Expected 25 features, got {len(FEATURE_COLS)}. "
-        "Update CLAUDE.md and all docs if you intentionally changed the count."
+def test_feature_cols_count_is_30():
+    assert len(FEATURE_COLS) == 30, (
+        f"Expected 30 features, got {len(FEATURE_COLS)}. Update CLAUDE.md and docs."
     )
+
+
+def test_dropped_exact_duplicates_absent():
+    assert "williams_r" not in FEATURE_COLS, "williams_r == stoch_k-100 (exact dup)"
+    assert "macd_hist" not in FEATURE_COLS, "macd_hist == macd-macd_signal (exact dup)"

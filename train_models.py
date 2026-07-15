@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 try:
     import xgboost as xgb
@@ -53,6 +53,7 @@ from daily_features import (
     make_daily_features,
 )
 from db import DB
+from predictors.base import CLIP, _preprocess
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -83,19 +84,6 @@ def _pickle_and_hash(artifact: dict, path: str) -> None:
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
-
-def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0; clip to ±5 std per column."""
-    X = np.where(np.isinf(X), np.nan, X)
-    X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
-    return X
-
 
 def _load_symbol(
     symbol: str, start: str, end: str, db: DB
@@ -193,9 +181,9 @@ def _prepare_data(
 
         X_sym = feats[FEATURE_COLS].values.astype(np.float32)
 
-        # Volatility-adjusted thresholds: vol_mult*sigma bands scaled for 3-day horizon
-        vol = feats["vol_20d"].values
-        pos_thr = vol * np.sqrt(3) * vol_mult
+        # Volatility-adjusted thresholds: use raw 20-day return vol (not z-scored vol_20d)
+        raw_vol = df["close"].pct_change().rolling(20).std().reindex(feats.index).values
+        pos_thr = raw_vol * np.sqrt(3) * vol_mult
         y_sym = discretize_labels(feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr)
 
         split = int(len(X_sym) * 0.8)
@@ -235,7 +223,7 @@ def _make_artifact_path(model_key: str, version: int) -> str:
 def _save_and_register(
     model_key: str,
     model_obj,
-    scaler: StandardScaler,
+    scaler: RobustScaler,
     train_accuracy: float,
     test_accuracy: float,
     test_f1: float,
@@ -309,10 +297,10 @@ def train_logistic(
     cfg: dict,
     optimize: bool = False,
     opt_cfg=None,
-) -> tuple[LogisticRegression, StandardScaler, float, float, float]:
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+) -> tuple[LogisticRegression, RobustScaler, float, float, float]:
+    scaler = RobustScaler()
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
 
     if optimize and HAS_SKOPT and opt_cfg is not None:
         logger.info("Running Bayesian hyperparameter search for Logistic Regression...")
@@ -325,7 +313,6 @@ def train_logistic(
         base = LogisticRegression(
             solver="saga",
             class_weight="balanced",
-            multi_class="multinomial",
             max_iter=2000,
             random_state=42,
         )
@@ -344,7 +331,6 @@ def train_logistic(
             **best_params,
             solver="saga",
             class_weight="balanced",
-            multi_class="multinomial",
             max_iter=2000,
             random_state=42,
         )
@@ -361,7 +347,6 @@ def train_logistic(
             solver="lbfgs",
             class_weight=cfg.get("class_weight"),
             random_state=42,
-            multi_class="multinomial",
         )
         model.fit(X_tr, y_train)
 
@@ -388,9 +373,9 @@ def train_xgboost(
     if not HAS_XGBOOST:
         raise ImportError("xgboost not installed. pip install xgboost")
 
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(X_train)
-    X_te = scaler.transform(X_test)
+    scaler = RobustScaler()
+    X_tr = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
+    X_te = np.clip(scaler.transform(X_test),  -CLIP, CLIP)
 
     if optimize and not HAS_SKOPT:
         logger.warning("scikit-optimize not installed — falling back to config hyperparams (pip install scikit-optimize)")

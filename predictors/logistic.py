@@ -5,14 +5,14 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from predictors.base import BasePredictor, _load_validated_pickle, _preprocess
+from predictors.base import BasePredictor, _load_validated_pickle, _scale
 
 
 class LogisticPredictor(BasePredictor):
     """Logistic regression predictor for next-day return class.
 
     Loads from a pickle produced by train_models.py.
-    Handles its own StandardScaler and _preprocess pass.
+    Handles its own scaling via the shared _scale helper (frozen RobustScaler + fixed clip).
     """
 
     def __init__(self, model, scaler, confidence_threshold: float = 0.55):
@@ -21,9 +21,7 @@ class LogisticPredictor(BasePredictor):
         self.confidence_threshold = float(confidence_threshold)
 
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        X_clean = _preprocess(X.copy().astype(np.float32))
-        X_scaled = self.scaler.transform(X_clean)
-        proba = self.model.predict_proba(X_scaled)
+        proba = self.model.predict_proba(_scale(self.scaler, X.astype(np.float32)))
         pred_idx = np.argmax(proba, axis=1)
         # Map through model.classes_ to handle missing classes correctly
         scores = (self.model.classes_[pred_idx] - 1).astype(float)  # {0,1,2} → {-1,0,1}

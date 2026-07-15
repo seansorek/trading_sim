@@ -21,11 +21,12 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from ml_strategies import compute_predictor_signal
-from train_models import _preprocess, _load_symbol
+from predictors.base import CLIP, _preprocess
+from train_models import _load_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +91,9 @@ def run_walk_forward_on_df(
         X_te = X_all[test_start_idx:test_end_idx]
         y_te = y_all[test_start_idx:test_end_idx]
 
-        scaler = StandardScaler()
-        X_tr_s = scaler.fit_transform(X_tr)
-        X_te_s = scaler.transform(X_te)
+        scaler = RobustScaler()
+        X_tr_s = np.clip(scaler.fit_transform(X_tr), -CLIP, CLIP)
+        X_te_s = np.clip(scaler.transform(X_te), -CLIP, CLIP)
 
         model = Ridge(alpha=config.ridge_alpha)
         model.fit(X_tr_s, y_tr)
@@ -160,9 +161,9 @@ def build_fold_data(symbols, days, db, config=None):
             if test_end_idx > n:
                 break
             X_window = X_all[train_start_idx:test_end_idx]
-            scaler = StandardScaler()
+            scaler = RobustScaler()
             scaler.fit(X_all[train_start_idx:train_end_idx])
-            X_window_s = scaler.transform(X_window)
+            X_window_s = np.clip(scaler.transform(X_window), -CLIP, CLIP)
             model = Ridge(alpha=config.ridge_alpha)
             model.fit(X_window_s[:config.train_bars], y_all[train_start_idx:train_end_idx])
             pred_window = model.predict(X_window_s)

@@ -33,7 +33,7 @@ from dqn_signal import gate_dqn_signal
 from hybrid_model import TransformerCfg, TransformerEncoder
 from ml_strategies import compute_predictor_signal
 from signal_monitor import score_realized_ic, check_signal_drift
-from train_models import _preprocess
+from predictors.base import _scale
 
 # Maximum number of business days the cached data's latest bar can lag behind
 # the requested end date before we consider the cache stale and re-fetch.
@@ -161,8 +161,7 @@ def _predict_classifier_signal(data: dict, X_latest: np.ndarray, default_thresho
     trained model object differs — so this one function serves both,
     instead of two copy-pasted blocks.
     """
-    X_scaled = data["scaler"].transform(X_latest)
-    prob = data["model"].predict_proba(X_scaled)[0]
+    prob = data["model"].predict_proba(_scale(data["scaler"], X_latest))[0]
     pred_idx = int(np.argmax(prob))
     confidence = float(prob[pred_idx])
     threshold = data.get("confidence_threshold", default_threshold)
@@ -208,14 +207,12 @@ def _predict_regressor_signal(
     decision logic used in backtesting (ml_strategies.DailyPredictorStrategy),
     so live and backtest predictions can't silently diverge.
 
-    Applies the same ±5-std-clip preprocessing (train_models._preprocess)
+    Applies the same preprocessing + fixed-clip scaling (predictors.base._scale)
     daily_predictor was trained on (see train_predictor.prepare_data) —
     skipping this would feed the model out-of-distribution inputs it never
     saw in training.
     """
-    X_clean = _preprocess(X_all.copy())
-    X_scaled = data["scaler"].transform(X_clean)
-    pred_ret = data["model"].predict(X_scaled)
+    pred_ret = data["model"].predict(_scale(data["scaler"], X_all))
 
     sq_env = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
     if sq_env is not None:
@@ -321,8 +318,7 @@ def _predict_hybrid_signal(data: dict, X_all: np.ndarray, default_threshold: flo
     (daily_hybrid), mirroring train_hybrid.py's inference path exactly:
 
       1. Preprocess + scale the full feature history the same way
-         prepare_data does (train_models._preprocess clip, then the
-         fitted StandardScaler).
+         prepare_data does (predictors.base._scale: slim preprocess + RobustScaler + clip).
       2. Take the trailing `lookback` rows as the transformer's input
          window — the live equivalent of build_sequences' single most
          recent sequence — and the last row as the "last-bar" features
@@ -344,8 +340,7 @@ def _predict_hybrid_signal(data: dict, X_all: np.ndarray, default_threshold: flo
             f"Insufficient history for daily_hybrid: need {lookback} bars, got {len(X_all)}"
         )
 
-    X_clean = _preprocess(X_all.copy())
-    X_scaled = data["scaler"].transform(X_clean)
+    X_scaled = _scale(data["scaler"], X_all)
 
     seq = X_scaled[-lookback:].astype(np.float32)[np.newaxis, :, :]  # (1, lookback, n_feat)
     last_bar = X_scaled[-1:].astype(np.float32)  # (1, n_feat)

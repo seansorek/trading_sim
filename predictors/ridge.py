@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from predictors.base import BasePredictor, _load_validated_pickle, _preprocess
+from predictors.base import BasePredictor, _load_validated_pickle, _scale
 
 
 class RidgePredictor(BasePredictor):
@@ -25,9 +25,7 @@ class RidgePredictor(BasePredictor):
         self.train_r2 = float(train_r2)
 
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        X_clean = _preprocess(X.copy().astype(np.float32))
-        X_scaled = self.scaler.transform(X_clean)
-        scores = self.model.predict(X_scaled).astype(float)
+        scores = self.model.predict(_scale(self.scaler, X.astype(np.float32))).astype(float)
         return scores, None
 
     @classmethod

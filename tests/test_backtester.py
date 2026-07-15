@@ -705,7 +705,7 @@ def test_daily_logistic_signal_is_shifted_by_one_bar():
     from base_strategy import StrategyConfig
     from ml_strategies import DailyLogisticStrategy
 
-    n = 60
+    n = 200  # bumped from 60 — daily_v6 z-score (min_periods=60) needs ~110 warmup rows
     rng = np.random.default_rng(42)
     close = 100 * np.cumprod(1 + rng.normal(0.0003, 0.012, n))
     idx = pd.date_range("2023-01-02", periods=n, freq="B")

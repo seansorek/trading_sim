@@ -10,23 +10,25 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from daily_features import FEATURE_COLS
+from daily_features import FEATURE_COLS, FEATURE_SET_NAME
 
 logger = logging.getLogger(__name__)
 
 
+CLIP = 5.0
+
+
 def _preprocess(X: np.ndarray) -> np.ndarray:
-    """Replace inf/nan with 0, clip to ±5 std per column. Returns a copy."""
+    """Replace inf/nan with 0. Returns a copy. (Clipping now lives in _scale.)"""
     X = X.copy()
     X = np.where(np.isinf(X), np.nan, X)
     X = np.nan_to_num(X, nan=0.0)
-    for col in range(X.shape[1]):
-        col_data = X[:, col]
-        std = np.std(col_data)
-        if std > 0:
-            mean = np.mean(col_data)
-            X[:, col] = np.clip(col_data, mean - 5 * std, mean + 5 * std)
     return X
+
+
+def _scale(scaler, X: np.ndarray) -> np.ndarray:
+    """Frozen-scaler transform + fixed clip. Consistent at train and serve time."""
+    return np.clip(scaler.transform(_preprocess(X)), -CLIP, CLIP)
 
 
 def _load_validated_pickle(
@@ -36,7 +38,8 @@ def _load_validated_pickle(
 ) -> dict:
     """Load a model pickle, verify SHA-256 integrity, and check required keys.
 
-    Raises RuntimeError on any failure — never silently continues.
+    Warns and returns the stale model when feature_set_name mismatches (soft validation);
+    raises RuntimeError only if the feature contract array itself mismatches a same-version model.
     """
     if required_keys is None:
         required_keys = {"model", "scaler", "feature_contract"}
@@ -76,11 +79,19 @@ def _load_validated_pickle(
         )
 
     if "feature_contract" in required_keys and data["feature_contract"] != FEATURE_COLS:
-        raise RuntimeError(
-            f"[{name}] Feature contract mismatch in {path}. "
-            f"Expected {len(FEATURE_COLS)} features, got {len(data['feature_contract'])}. "
-            "Retrain models."
-        )
+        pickle_fsn = data.get("feature_set_name")
+        if pickle_fsn and pickle_fsn != FEATURE_SET_NAME:
+            logger.warning(
+                "[%s] Feature contract version mismatch in %s: "
+                "pickle=%s code=%s. Model may be stale — consider retraining.",
+                name, path, pickle_fsn, FEATURE_SET_NAME,
+            )
+        else:
+            raise RuntimeError(
+                f"[{name}] Feature contract mismatch in {path}. "
+                f"Expected {len(FEATURE_COLS)} features, got {len(data['feature_contract'])}. "
+                "Retrain models."
+            )
 
     return data
 

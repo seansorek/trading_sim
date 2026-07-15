@@ -33,12 +33,14 @@ class TestBasePredictor:
         out = _preprocess(X)
         assert not np.isnan(out).any()
 
-    def test_preprocess_clips_outliers_per_column(self):
+    def test_preprocess_preserves_finite_outliers(self):
+        # _preprocess no longer clips — clipping moved to _scale (after the scaler transform).
+        # A finite extreme value should pass through unchanged.
         rng = np.random.default_rng(0)
         X = rng.standard_normal((100, 3))
-        X[0, 0] = 1_000.0  # extreme outlier in col 0
+        X[0, 0] = 1_000.0  # extreme but finite value
         out = _preprocess(X.copy())
-        assert out[0, 0] < 1_000.0
+        assert out[0, 0] == pytest.approx(1_000.0)
 
     def test_preprocess_preserves_shape(self):
         X = np.ones((50, 10))

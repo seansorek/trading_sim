@@ -17,11 +17,11 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Status** | Live — in `prediction.models` |
 | **Algorithm** | `sklearn.linear_model.LogisticRegression` (multinomial, 3-class) |
 | **Task** | Classify next-day direction: `SELL=0 / HOLD=1 / BUY=2` |
-| **Feature set** | `daily_v3` — 25 normalized daily technical features (see `daily_features.FEATURE_COLS`) |
+| **Feature set** | `daily_v6` — 30 normalized daily technical features (see `daily_features.FEATURE_COLS`; adds Amihud illiquidity and 6 v5 features over the prior daily_v3 set) |
 | **Label construction** | 3-day cumulative forward return (`FWD_RET_HORIZON_DAYS=3`) thresholded by volatility-scaled bands (`--vol-mult`) |
 | **Training window** | ~1 000 calendar days (≈ 670 trading bars) per symbol, 10 symbols pooled |
 | **Train/test split** | Purged + embargoed: 3-bar gap at split boundary to prevent label leakage |
-| **Normalization** | `StandardScaler` fit on training data, stored in pickle alongside the model |
+| **Normalization** | `RobustScaler` fit on training data, stored in pickle alongside the model |
 | **Confidence threshold** | 0.55 (softmax probability of the predicted class); non-HOLD signals below this threshold are converted to HOLD |
 | **OOS test accuracy** | At or within ~2 pp of the majority-class (HOLD) baseline — no consistent genuine lift (see "Accuracy" section below for full investigation) |
 | **OOS directional accuracy** | Not meaningfully above 50% |
@@ -39,11 +39,11 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Status** | Live — in `prediction.models` |
 | **Algorithm** | `xgboost.XGBClassifier` (`multi:softprob`, 3-class) |
 | **Task** | Same 3-class direction classification as `daily_logistic` |
-| **Feature set** | `daily_v3` — same 25 features |
+| **Feature set** | `daily_v6` — same 30 features as `daily_logistic` |
 | **Label construction** | Same as `daily_logistic` |
 | **Training window** | Same as `daily_logistic` |
 | **Train/test split** | Same purged + embargoed split |
-| **Normalization** | `StandardScaler` (same pattern) |
+| **Normalization** | `RobustScaler` (same pattern) |
 | **Confidence threshold** | 0.55 (softmax probability) |
 | **OOS test accuracy** | At majority-class baseline (~61%); no consistent lift over `daily_logistic` |
 | **Backtest Sharpe** | Negative across tested windows |
@@ -59,24 +59,23 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Status** | Live — in `prediction.models`. Most promising signal of the three live models. |
 | **Algorithm** | `sklearn.linear_model.Ridge` (regression) |
 | **Task** | Forecast continuous 3-day forward return (`fwd_ret_1d` in code — the label horizon is `FWD_RET_HORIZON_DAYS=3` trading bars) |
-| **Feature set** | `daily_v3` — same 25 features |
+| **Feature set** | `daily_v6` — 30 normalized daily features: the 29 v5 features (dropped williams_r/macd_hist/vol_z_20; added ret_21d, adx_14, vol_regime, rel_volume, hl_ratio, turnover_z, gap; rolling z-score on 18 unbounded features) plus Amihud illiquidity ratio (`|ret_1d| / dollar_volume`, z-scored). VIX features (vix_z, vix_chg_5d) were tested and reverted — they degraded IC on AMZN/NVDA and failed the gate. |
 | **Label construction** | Continuous cumulative forward return (not discretized) |
 | **Training window** | ~2 500 calendar days (~1 718 trading bars) per symbol, 10 symbols pooled (use `--days 2500` for retraining) |
 | **Train/test split** | Same purged + embargoed split (3-bar gap) |
-| **Normalization** | `StandardScaler` + `±5-std clip` preprocessing (`train_models._preprocess`) |
-| **OOS Spearman IC** | +0.06 (positive, statistically meaningful given n; classifiers show IC ≈ 0) |
-| **OOS R²** | +0.012 (small but real; confirms the regression picks up a signal the classifiers discarded) |
-| **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `|predicted return|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Default: `signal_quantile=0.7`, `threshold_window=60` |
-| **Backtest Sharpe** | +0.16 avg (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.27 on 700-day window) — the only positive Sharpe among the three live models; see PBO/DSR below |
+| **Normalization** | `RobustScaler` + `±5 clip` (via `predictors.base._scale`); consistent between training and live inference. Replaced `StandardScaler` in Task 4 — RobustScaler is more robust to the fat-tailed return distribution. |
+| **OOS Spearman IC (final, 2026-07-15)** | Median **+0.0407** across 10 symbols (AAPL=0.0254, MSFT=0.0183, GOOGL=0.1310, AMZN=-0.0073, NVDA=0.0075, META=0.0559, TSLA=0.0840, SPY=0.0595, QQQ=0.0191, IWM=0.0934). Beats `daily_v3` baseline of 0.0266. |
+| **Decision layer** | `DailyPredictorStrategy` (`ml_strategies.py`) — causal rolling-quantile threshold on `|predicted return|`: trade only when today's forecast magnitude exceeds the top `1 - signal_quantile` fraction of the trailing `threshold_window` bars' predictions. Tuned to `signal_quantile=0.75`, `threshold_window=40` (sweep run at train time, stored in pickle). |
+| **Backtest Sharpe** | +0.16 avg (10-symbol, 365-day window, post look-ahead fix 2026-07-13; pre-fix was +0.27 on 700-day window) — the only positive Sharpe among the three live models; see PBO/DSR below |
 | **Average return** | +0.07% avg per round-trip (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.18%) |
 | **Alpha vs. benchmark** | -8.94% avg; avg information ratio -0.62 (strategy underperforms buy-and-hold on most symbols over the 365-day post-fix window) |
-| **PBO** | 0.513 (CPCV, 16 folds, 20 configs) — high-overfitting zone: IS-selected params expected to underperform OOS in >50% of paths |
-| **Median DSR** | 0.800 across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval, corrected 2026-07-14) — per-symbol DSR range 0.290–0.943; prior 0.000 was a unit-mismatch bug (annualized variance used in per-period deflation) |
-| **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle |
+| **PBO (final, 2026-07-15)** | **0.228** (CPCV, 245 folds, 20 configs, 12870 combinations) — moderate-overfitting zone; better than `daily_v3` baseline of 0.514. IS-selected params expected to underperform OOS in ~23% of paths. |
+| **Median DSR (final, 2026-07-15)** | **0.776** across AAPL, MSFT, SPY, QQQ, NVDA — per-symbol DSR: AAPL=0.859, MSFT=0.776, SPY=0.580, QQQ=0.819, NVDA=0.724. Selected (q,w) per symbol: AAPL=(0.75,40), MSFT=(0.80,60), SPY=(0.80,100), QQQ=(0.75,60), NVDA=(0.75,40). |
+| **Walk-forward** | Param sweep run at training time via `walk_forward.sweep_params`; best `(signal_quantile, threshold_window)` pair stored in pickle as `best_signal_quantile=0.75`, `best_threshold_window=40`. |
 | **Live confidence** | Percentile rank of today's `|predicted return|` within the trailing `threshold_window` — NOT a calibrated probability |
-| **Known limitations** | Sharpe 0.16 (post-fix) is weak in absolute terms. PBO=0.513 (high-overfitting zone) remains a concern. Corrected DSR median=0.800 suggests genuine per-symbol signal after unit-mismatch fix, but PBO indicates the selected (q,w) pair is still unreliable OOS. Not a proven deployable edge. |
+| **Known limitations** | Backtest Sharpe +0.16 is weak in absolute terms. PBO=0.228 is improved vs. the prior baseline (0.514) but still indicates moderate parameter-selection risk. DSR median=0.776 confirms genuine per-symbol signal, but not all symbols are positive (AMZN, NVDA show negative IC). Not a proven deployable edge without portfolio construction and live forward testing. |
 
-**Honest caveat (updated 2026-07-14 post DSR unit-mismatch fix):** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. The prediction/strategy split surfaces real signal the classification framing was discarding (IC=+0.06). PBO=0.513 confirms the selected (q,w) pair is unreliable OOS. Corrected median DSR=0.800 (range 0.290–0.943 across 5 symbols) is more encouraging than the prior erroneous DSR=0.000, which resulted from a unit-mismatch bug where annualized Sharpe variance was passed to the per-period deflation formula — fixed 2026-07-14. A 1-bar execution look-ahead was fixed in the backtest pipeline on 2026-07-13. A single untuned backtest is not sufficient validation for capital deployment.
+**Honest caveat (updated 2026-07-15 — daily_v6 final eval):** Treat `daily_predictor` as a *promising lead under active validation*, not a finished edge. `daily_v6` (30 features, RobustScaler) beats the `daily_v3` baseline on both primary metrics: IC 0.0407 > 0.0266 and PBO 0.228 < 0.514. The Amihud illiquidity feature and the v5 feature cleanup both contributed real signal lift. However, PBO=0.228 still indicates moderate overfitting risk in (q,w) parameter selection, and several individual symbols (AMZN, NVDA, MSFT, QQQ) show near-zero or negative IC folds in recent periods. DSR median=0.776 confirms statistical significance above the multiple-testing-adjusted threshold across the 5-symbol eval set. A 1-bar execution look-ahead was fixed 2026-07-13; the corrected Sharpe (+0.16) is lower than the pre-fix figure (+0.27). A prior DSR=0.000 artifact was a unit-mismatch bug (annualized Sharpe variance passed to per-period deflation) fixed 2026-07-14. A single untuned backtest is not sufficient validation for capital deployment.
 
 ---
 
@@ -87,7 +86,7 @@ key appears in `prediction.models` in `config/default.yaml` and is loaded by
 | **Status** | Pickle exists (`models/daily_hybrid.pkl`), **not** in `prediction.models` — not loaded by live pipeline |
 | **Algorithm** | XGBoost + transformer hybrid (see `hybrid_model.py`, trained via `train_hybrid.py`) |
 | **Task** | Same 3-class direction classification |
-| **Feature set** | `daily_v3` — same 25 features |
+| **Feature set** | `daily_v6` — same 30 features as `daily_logistic`/`daily_xgboost` |
 | **OOS accuracy** | At majority-class baseline — transformer component does not improve over `daily_xgboost` alone on this feature set |
 | **Known limitations** | An earlier claim of ~58% accuracy was a data-leakage artifact (pre-leakage-fix). After correcting the train/test split, results converge to the classifier baseline. The transformer adds complexity without signal benefit on single-bar daily features. |
 
@@ -102,7 +101,7 @@ To deploy: add `daily_hybrid` to `prediction.models` in `config/default.yaml` an
 | **Status** | `models/dqn_agent.pt` loaded opportunistically at runtime (if file exists), **not** in `prediction.models` config list |
 | **Algorithm** | PyTorch DQN with target network and experience replay |
 | **Actions** | `HOLD=0, LONG=1, SHORT=2` mapped to `HOLD/BUY/SELL` |
-| **State** | Rolling 20-day window × 25 features (flattened to 500-dim vector) |
+| **State** | State-dim = bars × feature count at train time — must retrain if FEATURE_COLS changes (stale; not in prediction.models) |
 | **Trained via** | `train_dqn.py --symbol SPY --days 500 --episodes 30` |
 | **Known limitations** | RL on noisy daily financial data is extremely sample-inefficient. Not validated OOS; included for research purposes only. |
 
@@ -123,9 +122,9 @@ See `docs/runbook.md` for the exact retraining commands.
 
 ## Files
 
-- `daily_logistic.pkl` — Trained LogisticRegression model + StandardScaler + feature contract
+- `daily_logistic.pkl` — Trained LogisticRegression model + RobustScaler + feature contract
 - `daily_logistic_v<N>.pkl` — Versioned snapshots (canonical path is always `daily_logistic.pkl`)
-- `daily_xgboost.pkl` — Trained XGBoost classifier + StandardScaler + feature contract
+- `daily_xgboost.pkl` — Trained XGBoost classifier + RobustScaler + feature contract
 - `daily_xgboost_v<N>.pkl` — Versioned snapshots
 - `daily_hybrid.pkl` / `daily_hybrid_v<N>.pkl` — XGBoost-transformer hybrid, trained via `train_hybrid.py` (see [hybrid_model.py](../hybrid_model.py))
 - `daily_predictor.pkl` / `daily_predictor_v<N>.pkl` — Regression forecaster, trained via `train_predictor.py`. Pairs with `ml_strategies.DailyPredictorStrategy` as the decision layer — see "Prediction vs. strategy" below.
@@ -137,15 +136,15 @@ Each classifier pickle contains: `model`, `scaler`, `feature_contract`, `confide
 
 ### Daily Logistic (`daily_logistic.pkl`)
 - **Algorithm**: `sklearn.linear_model.LogisticRegression` (multinomial)
-- **Features**: 25 daily features defined in `daily_features.FEATURE_COLS`
+- **Features**: 30 daily features defined in `daily_features.FEATURE_COLS` (`daily_v6`)
 - **Labels**: `SELL=0, HOLD=1, BUY=2` — 3-day forward return, thresholded by volatility-scaled bands (`--vol-mult`)
-- **Normalization**: `StandardScaler` (fit on training data, stored in pickle)
+- **Normalization**: `RobustScaler` (fit on training data, stored in pickle)
 - **Confidence threshold**: Default 0.55; stored in pickle, read by `predict_next_day_lite.py`
 - **Class weighting**: `--logistic-class-weight none` (default) or `balanced`. Default `class_weight="balanced"` tanks test accuracy to ~35% by fighting the natural HOLD-majority prior — see "Accuracy" below.
 
 ### Daily XGBoost (`daily_xgboost.pkl`)
 - **Algorithm**: `xgboost.XGBClassifier` (`multi:softprob`, 3-class)
-- **Features**: Same 25 features as logistic
+- **Features**: Same 30 features as logistic (`daily_v6`)
 - **Labels**: Same as logistic — `SELL=0, HOLD=1, BUY=2`
 - **Hyperparameters**: Set in `config/default.yaml → strategies.xgboost`, overridable via CLI flags
 - **Class weighting**: `--xgb-class-weight none` (default), `sqrt`, or `inverse`. `none` performs best for the same reason as logistic.
@@ -160,7 +159,7 @@ within ~2 percentage points across every vol_mult / class-weight / lookback-wind
 training-history-length configuration tested (current canonical models are trained on ~6.8
 years / 1718 bars per symbol — see "Prediction vs. strategy" below for why more data didn't
 change this). There is no consistent, genuine lift over that baseline with the current
-25-feature single-bar technical-indicator set — `daily_hybrid`'s transformer component shows
+30-feature single-bar technical-indicator set (`daily_v6`) — `daily_hybrid`'s transformer component shows
 the same pattern. Raising `--vol-mult` pushes the nominal accuracy number up, but only by
 shrinking the SELL/BUY classes until the model approaches a constant HOLD predictor; that's not
 a meaningful accuracy claim. `tests/test_model_accuracy.py` and
@@ -184,12 +183,12 @@ policy/risk decision). Two things were tested to explain the lack of signal abov
 
 2. **Bad architecture (action-classification vs. prediction+strategy split)?** Tested via
    `train_predictor.py`: a Ridge regression trained on the *continuous* `fwd_ret_1d` target
-   (same purged split, same 25 features) recovers a small but real out-of-sample signal —
-   **Spearman IC = +0.06, R² = +0.012** — that none of the 3-class classifiers could detect at
-   all. An XGBoost regressor on the same target collapses to a near-constant predictor (IC ≈ 0),
-   consistent with the classifiers' XGBoost variant also underperforming Logistic throughout this
-   investigation — tree ensembles appear to over-regularize away this weak a signal on this
-   feature set; the simpler linear model picks it up.
+   (same purged split, upgraded to 30 `daily_v6` features) recovers a real out-of-sample signal —
+   **median Spearman IC = +0.0407 across 10 symbols (final eval 2026-07-15)** — that none of the
+   3-class classifiers could detect at all. An XGBoost regressor on the same target collapses to
+   a near-constant predictor (IC ≈ 0), consistent with the classifiers' XGBoost variant also
+   underperforming Logistic throughout this investigation — tree ensembles appear to over-regularize
+   away this weak a signal on this feature set; the simpler linear model picks it up.
 
 `daily_predictor.pkl` is that Ridge model. `ml_strategies.DailyPredictorStrategy` is the
 decoupled decision layer: it converts the continuous forecast into SELL/HOLD/BUY via a *causal
@@ -212,21 +211,23 @@ Backtested over a 10-symbol, 365-day window (`simulate_multi.py --strategies dai
 buy-and-hold benchmark: **-8.94%** (average information ratio: **-0.62**), confirming the
 strategy underperforms passive ownership on most symbols over this window.
 
-**Honest eval results (2026-07-13):**
-- **PBO = 0.513** (CPCV, 16 folds, 20 `(signal_quantile, threshold_window)` configs, 12 870
-  IS/OOS combinations) — the IS-selected parameter pair is expected to underperform in >50% of
-  out-of-sample paths. This is firmly in the high-overfitting zone.
-- **Median DSR = 0.800** across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval window, 5 symbols,
-  corrected 2026-07-14 after unit-mismatch fix) — per-symbol: AAPL 0.943, MSFT 0.290, SPY
-  0.539, QQQ 0.800, NVDA 0.859. Prior value of 0.000 was an artifact of passing annualized
-  Sharpe variance (scale ~252×) into the per-period deflation formula, driving sr0 ~15.9× too
-  large and stat deeply negative.
+**Honest eval results (final, 2026-07-15 — `daily_v6`):**
+- **Median walk-forward IC = 0.0407** across 10 symbols (AAPL=0.0254, MSFT=0.0183,
+  GOOGL=0.1310, AMZN=-0.0073, NVDA=0.0075, META=0.0559, TSLA=0.0840, SPY=0.0595,
+  QQQ=0.0191, IWM=0.0934). Beats `daily_v3` baseline of 0.0266 (+53%).
+- **PBO = 0.228** (CPCV, 245 folds, 20 `(signal_quantile, threshold_window)` configs, 12 870
+  IS/OOS combinations) — moderate-overfitting zone; substantially better than `daily_v3`
+  baseline of 0.514. IS-selected params expected to underperform OOS in ~23% of paths.
+- **Median DSR = 0.776** across AAPL, MSFT, SPY, QQQ, NVDA (2500-day eval window, 5 symbols)
+  — per-symbol: AAPL 0.859, MSFT 0.776, SPY 0.580, QQQ 0.819, NVDA 0.724.
+  Prior DSR=0.000 was a unit-mismatch bug (annualized Sharpe variance passed to per-period
+  deflation); fixed 2026-07-14.
 
-These results confirm that while the prediction/strategy split surfaces a real IC signal
-(+0.06, R² = +0.012) that the classification framing discards, the decision-layer parameter
-selection is unreliable at current data volumes. The positive Sharpe (+0.16) is encouraging as
-a direction but is not a proven edge. Treat this as a promising lead under active validation,
-not a finished, deployable strategy.
+These results confirm that `daily_v6` surfaces a real IC signal that beats the `daily_v3`
+baseline on both IC and PBO. The decision-layer parameter selection is in the moderate-overfitting
+zone (PBO=0.228) but no longer in the high-overfitting zone (PBO=0.514) of the original
+classifier baseline. The positive Sharpe (+0.16) is encouraging as a direction but is not a
+proven edge without portfolio construction and live forward testing.
 
 **Deployment status:** `daily_predictor` is wired into `predict_next_day_lite.py` and the live
 Discord pipeline (`prediction.models` in `config/default.yaml`), alongside `daily_logistic` and
@@ -241,7 +242,7 @@ proven edge.
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay
 - **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)
-- **State**: Rolling window of last 20 days × 25 features (flattened to 500-dim vector)
+- **State**: Rolling window of last 20 days × features (flattened vector; state-dim depends on feature count at train time — must retrain if `FEATURE_COLS` changes)
 - **Trained via**: `train_dqn.py`
 
 ## Updating models
