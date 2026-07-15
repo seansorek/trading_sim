@@ -22,7 +22,7 @@ from base_strategy import BaseStrategy, StrategyConfig
 from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, make_daily_features
 from decision_layers.threshold import ThresholdDecision
 from predictor_strategy import PredictorStrategy
-from predictors.base import _preprocess, _load_validated_pickle
+from predictors.base import _preprocess, _scale, _load_validated_pickle
 from predictors.logistic import LogisticPredictor
 from predictors.xgboost_pred import XGBPredictor
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _load_pickle = _load_validated_pickle
 
 try:
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import RobustScaler
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -158,7 +158,7 @@ class DailyPredictorStrategy(BaseStrategy):
     whatever scale a given prediction model produces.
 
     Loads from a pickle with structure:
-      {'model': Ridge, 'scaler': StandardScaler, 'feature_contract': FEATURE_COLS, ...}
+      {'model': Ridge, 'scaler': RobustScaler, 'feature_contract': FEATURE_COLS, ...}
 
     Raises RuntimeError on load failure — never silently returns all-HOLD.
     """
@@ -173,7 +173,7 @@ class DailyPredictorStrategy(BaseStrategy):
     ):
         super().__init__(cfg)
         self.model = None
-        self.scaler: Optional[StandardScaler] = None
+        self.scaler = None
         # Params set here before pickle load; updated below if pickle has tuned values.
         self.signal_quantile = signal_quantile
         self.threshold_window = threshold_window
@@ -228,11 +228,10 @@ class DailyPredictorStrategy(BaseStrategy):
 
     def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
         daily_feats = make_daily_features(df)
-        X = _preprocess(daily_feats[FEATURE_COLS].values.astype(np.float32))
+        X = daily_feats[FEATURE_COLS].values.astype(np.float32)
 
         if self.model is not None and self.scaler is not None:
-            X_scaled = self.scaler.transform(X)
-            pred_ret = self.model.predict(X_scaled)
+            pred_ret = self.model.predict(_scale(self.scaler, X))
         else:
             # In-session training fallback (no pre-trained model).
             #
@@ -258,6 +257,7 @@ class DailyPredictorStrategy(BaseStrategy):
                 "and should not be used to judge live strategy performance."
             )
             from sklearn.linear_model import Ridge
+            from predictors.base import CLIP
 
             y_raw = daily_feats["fwd_ret_1d"].values
             n = len(daily_feats)
@@ -267,15 +267,15 @@ class DailyPredictorStrategy(BaseStrategy):
             pred_ret = np.zeros(n, dtype=np.float64)
             if test_start < n:
                 train_mask = ~np.isnan(y_raw[:split])
-                X_train = X[:split][train_mask]
+                X_train = _preprocess(X[:split][train_mask])
                 y_train = y_raw[:split][train_mask]
 
-                scaler = StandardScaler()
-                X_train_scaled = scaler.fit_transform(X_train)
+                scaler = RobustScaler()
+                X_train_scaled = np.clip(scaler.fit_transform(X_train), -CLIP, CLIP)
                 model = Ridge(alpha=10.0)
                 model.fit(X_train_scaled, y_train)
 
-                X_test_scaled = scaler.transform(X[test_start:])
+                X_test_scaled = np.clip(scaler.transform(_preprocess(X[test_start:])), -CLIP, CLIP)
                 pred_ret[test_start:] = model.predict(X_test_scaled)
             else:
                 logger.warning(
