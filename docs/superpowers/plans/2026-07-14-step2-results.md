@@ -18,6 +18,8 @@
 
 | +vix (REVERTED) | 0.0423 | 0.037 | 0.627 | 32-feature: added vix_z (rolling z-score of VIX level) and vix_chg_5d (rolling z-score of 5-day VIX pct change). Threaded through train_models, train_predictor, train_hybrid, walk_forward, predict_next_day_lite. Index normalization required (VIX from yfinance has 05:00 UTC vs DB-cached symbols at 04:00 UTC). Per-symbol IC: AAPL=0.0098, MSFT=0.0290, GOOGL=0.0879, AMZN=-0.0227, NVDA=-0.0277, META=0.0396, TSLA=0.0959, SPY=0.0896, QQQ=0.0449, IWM=0.0854. Per-symbol DSR: AAPL=0.965, MSFT=0.503, SPY=0.627, QQQ=0.967, NVDA=0.337. Gate: REVERTED (IC 0.0423 < baseline 0.0526; VIX noise dominated signal on AMZN/NVDA; PBO improved to 0.037 but IC gate failed). |
 
+| +robustscaler | 0.0531 | 0.067 | 0.777 | RobustScaler replacing StandardScaler; clipping moved to frozen _scale(scaler,X)=clip(scaler.transform(_preprocess(X)),±5) in predictors/base.py; consistent at train and serve time. signal_quantile=0.80, threshold_window=60. Per-symbol IC: AAPL=0.0495, MSFT=0.0116, GOOGL=0.1274, AMZN=-0.0285, NVDA=-0.0064, META=0.0567, TSLA=0.0889, SPY=0.0582, QQQ=0.0330, IWM=0.1021. Per-symbol DSR: AAPL=0.992, MSFT=0.777, SPY=0.429, QQQ=0.953, NVDA=0.430. Gate: KEPT (IC 0.0531 > 0.0526 AND PBO 0.067 ≤ 0.213). Marginal IC lift (+0.0005), PBO dramatically better (0.163→0.067, -59%), DSR slightly lower (0.783→0.777). Also fixed stale SHA-256 bug in train_predictor.py and train_hybrid.py (both now use _pickle_and_hash for canonical path). All 332 tests pass. |
+
 ## Next Steps
 
 Rows below will track improvements from orthogonal feature engineering, preprocessing, and model refinement:
