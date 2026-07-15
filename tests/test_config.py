@@ -221,3 +221,27 @@ def test_get_config_caches_first_path_ignores_later_path_argument():
     second = get_config("does/not/exist.yaml")
     assert second is first
     assert second.execution.start_cash == 999.0
+
+
+def test_panel_config_loads_from_yaml():
+    cfg = load_config("config/default.yaml")
+    assert cfg.panel.decile == 0.1
+    assert cfg.panel.rebalance_days == 1
+    assert cfg.panel.gross_exposure == 1.0
+    assert cfg.panel.cost_bps == 5.0
+    assert cfg.panel.borrow_bps_annual == 50.0
+    assert cfg.panel.min_names == 20
+
+
+def test_panel_universe_is_stocks_only():
+    cfg = load_config("config/default.yaml")
+    banned = {"SPY", "QQQ", "IWM", "DIA", "GLD", "USO",
+              "XLF", "XLV", "XLE", "XLY", "XLI", "XLK", "XLP", "XLU", "XLB", "XLRE"}
+    overlap = banned & set(cfg.panel.universe)
+    assert not overlap, f"index/sector ETFs must not be in the panel cross-section: {overlap}"
+
+
+def test_panel_universe_is_wide_and_unique():
+    cfg = load_config("config/default.yaml")
+    assert len(cfg.panel.universe) >= 100, "panel needs breadth to be worth running"
+    assert len(cfg.panel.universe) == len(set(cfg.panel.universe)), "duplicate symbols"

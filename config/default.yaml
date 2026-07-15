@@ -140,3 +140,185 @@ paths:
 discord:
   enabled: true
   username: "Trading Sim"
+
+# Cross-sectional panel backtester (research-only — not part of the live
+# prediction path). See docs/superpowers/specs/2026-07-15-step3-panel-portfolio-design.md
+#
+# universe is STOCKS ONLY. Index/sector ETFs (SPY, QQQ, XL*) are baskets of
+# these same names — ranking a stock against a fund that holds it is not a
+# cross-sectional bet. SPY still loads for ret_*_vs_spy features and the
+# gate's beta regression, but is never ranked or held.
+panel:
+  decile: 0.1               # top/bottom fraction of the cross-section
+  rebalance_days: 1         # daily
+  gross_exposure: 1.0       # 0.5 long + 0.5 short; net exposure 0
+  cost_bps: 5.0             # one-way cost on turnover notional (ASSUMPTION, not a tunable)
+  borrow_bps_annual: 50.0   # flat GC-style rate on short notional
+  min_names: 20             # below this, hold no position that day
+  universe:
+    # Technology (30)
+    - AAPL
+    - MSFT
+    - GOOGL
+    - AMZN
+    - NVDA
+    - META
+    - TSLA
+    - AVGO
+    - ORCL
+    - CRM
+    - ADBE
+    - AMD
+    - INTC
+    - CSCO
+    - QCOM
+    - TXN
+    - INTU
+    - IBM
+    - NOW
+    - AMAT
+    - MU
+    - LRCX
+    - ADI
+    - KLAC
+    - SNPS
+    - CDNS
+    - PANW
+    - ANET
+    - MRVL
+    - ACN
+    # Financials (20)
+    - BRK-B
+    - JPM
+    - V
+    - MA
+    - BAC
+    - WFC
+    - GS
+    - MS
+    - SCHW
+    - BLK
+    - AXP
+    - C
+    - SPGI
+    - CB
+    - PGR
+    - USB
+    - PNC
+    - TFC
+    - COF
+    - MET
+    # Healthcare (20)
+    - UNH
+    - JNJ
+    - LLY
+    - ABBV
+    - MRK
+    - PFE
+    - TMO
+    - ABT
+    - DHR
+    - BMY
+    - AMGN
+    - CVS
+    - MDT
+    - GILD
+    - ISRG
+    - VRTX
+    - REGN
+    - ZTS
+    - BSX
+    - HCA
+    # Consumer (20)
+    - WMT
+    - PG
+    - KO
+    - PEP
+    - COST
+    - MCD
+    - NKE
+    - SBUX
+    - TGT
+    - LOW
+    - HD
+    - TJX
+    - CL
+    - MDLZ
+    - MO
+    - PM
+    - KMB
+    - GIS
+    - EL
+    - YUM
+    # Industrials (20)
+    - CAT
+    - BA
+    - HON
+    - UNP
+    - GE
+    - LMT
+    - RTX
+    - DE
+    - UPS
+    - MMM
+    - ADP
+    - NOC
+    - GD
+    - CSX
+    - NSC
+    - EMR
+    - ETN
+    - ITW
+    - PH
+    - FDX
+    # Energy (14)
+    - XOM
+    - CVX
+    - COP
+    - SLB
+    - EOG
+    - MPC
+    - PSX
+    - VLO
+    - OXY
+    - WMB
+    - KMI
+    - HAL
+    - DVN
+    - HES
+    # Communications (10)
+    - DIS
+    - NFLX
+    - CMCSA
+    - T
+    - VZ
+    - TMUS
+    - CHTR
+    - EA
+    - WBD
+    - OMC
+    # Utilities & Real Estate (14)
+    - NEE
+    - DUK
+    - SO
+    - D
+    - AEP
+    - EXC
+    - SRE
+    - XEL
+    - AMT
+    - PLD
+    - CCI
+    - EQIX
+    - SPG
+    - PSA
+    # Materials (9)
+    - LIN
+    - APD
+    - SHW
+    - ECL
+    - NEM
+    - FCX
+    - DOW
+    - DD
+    - PPG

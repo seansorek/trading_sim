@@ -133,9 +133,26 @@ class PredictionCfg:
 
 
 @dataclass
+class PanelCfg:
+    """Cross-sectional panel backtester (research-only; see docs/superpowers/specs/2026-07-15-step3-panel-portfolio-design.md).
+
+    universe is stocks only — index/sector ETFs are baskets of the same names
+    and must not be ranked against their own constituents.
+    """
+    universe: list[str] = field(default_factory=lambda: ["AAPL", "MSFT", "GOOGL"])
+    decile: float = 0.1
+    rebalance_days: int = 1
+    gross_exposure: float = 1.0
+    cost_bps: float = 5.0
+    borrow_bps_annual: float = 50.0
+    min_names: int = 20
+
+
+@dataclass
 class AppConfig:
     symbols: list[str] = field(default_factory=lambda: ["AAPL", "MSFT", "GOOGL", "SPY", "QQQ"])
     prediction: PredictionCfg = field(default_factory=PredictionCfg)
+    panel: PanelCfg = field(default_factory=PanelCfg)
     data: DataCfg = field(default_factory=DataCfg)
     execution: ExecutionCfg = field(default_factory=ExecutionCfg)
     strategies: StrategiesCfg = field(default_factory=StrategiesCfg)
@@ -169,6 +186,7 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
     paths_raw = raw.get("paths", {})
     discord_raw = raw.get("discord", {})
     prediction_raw = raw.get("prediction", {})
+    panel_raw = raw.get("panel", {})
 
     return AppConfig(
         symbols=raw.get("symbols", AppConfig.__dataclass_fields__["symbols"].default_factory()),
@@ -182,6 +200,15 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
                 PredictionCfg.__dataclass_fields__["models"].default_factory(),
             ),
             max_model_age_days=prediction_raw.get("max_model_age_days", 30),
+        ),
+        panel=PanelCfg(
+            universe=panel_raw.get(
+                "universe", PanelCfg.__dataclass_fields__["universe"].default_factory()
+            ),
+            **{
+                k: v for k, v in panel_raw.items()
+                if k in PanelCfg.__dataclass_fields__ and k != "universe"
+            },
         ),
         data=DataCfg(**{k: v for k, v in data_raw.items() if k in DataCfg.__dataclass_fields__}),
         execution=ExecutionCfg(**{k: v for k, v in exec_raw.items() if k in ExecutionCfg.__dataclass_fields__}),
