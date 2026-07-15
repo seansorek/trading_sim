@@ -61,12 +61,24 @@ class DailyLogisticStrategy(BaseStrategy):
         cfg: StrategyConfig,
         model_path: str = "models/daily_logistic.pkl",
         spy_df: Optional[pd.DataFrame] = None,
+        use_pretrained: bool = True,
+        confidence_threshold: float = 0.55,
         **_kwargs,
     ):
         super().__init__(cfg)
         if not HAS_SKLEARN:
             raise ImportError("scikit-learn is not installed.")
-        predictor = LogisticPredictor.load(model_path)
+        if use_pretrained:
+            predictor = LogisticPredictor.load(model_path)
+        else:
+            from sklearn.linear_model import LogisticRegression
+            rng = np.random.default_rng(0)
+            X = rng.normal(size=(30, len(FEATURE_COLS))).astype(np.float32)
+            y = np.tile([0, 1, 2], 10)
+            scaler = RobustScaler()
+            model = LogisticRegression(max_iter=100)
+            model.fit(scaler.fit_transform(X), y)
+            predictor = LogisticPredictor(model=model, scaler=scaler, confidence_threshold=confidence_threshold)
         decision = ThresholdDecision(predictor.confidence_threshold)
         self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
 
@@ -82,12 +94,24 @@ class DailyXGBoostStrategy(BaseStrategy):
         cfg: StrategyConfig,
         model_path: str = "models/daily_xgboost.pkl",
         spy_df: Optional[pd.DataFrame] = None,
+        use_pretrained: bool = True,
+        confidence_threshold: float = 0.55,
         **_kwargs,
     ):
         super().__init__(cfg)
         if not HAS_XGBOOST:
             raise ImportError("xgboost is not installed.")
-        predictor = XGBPredictor.load(model_path)
+        if use_pretrained:
+            predictor = XGBPredictor.load(model_path)
+        else:
+            import xgboost as xgb
+            rng = np.random.default_rng(0)
+            X = rng.normal(size=(30, len(FEATURE_COLS))).astype(np.float32)
+            y = np.tile([0, 1, 2], 10)
+            scaler = RobustScaler()
+            model = xgb.XGBClassifier(n_estimators=5, max_depth=2, eval_metric="mlogloss", verbosity=0)
+            model.fit(scaler.fit_transform(X), y)
+            predictor = XGBPredictor(model=model, scaler=scaler, confidence_threshold=confidence_threshold)
         decision = ThresholdDecision(predictor.confidence_threshold)
         self._inner = PredictorStrategy(cfg, predictor, decision, spy_df=spy_df)
 
