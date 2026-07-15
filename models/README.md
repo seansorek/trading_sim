@@ -101,7 +101,7 @@ To deploy: add `daily_hybrid` to `prediction.models` in `config/default.yaml` an
 | **Status** | `models/dqn_agent.pt` loaded opportunistically at runtime (if file exists), **not** in `prediction.models` config list |
 | **Algorithm** | PyTorch DQN with target network and experience replay |
 | **Actions** | `HOLD=0, LONG=1, SHORT=2` mapped to `HOLD/BUY/SELL` |
-| **State** | Rolling 20-day window × 25 features (flattened to 500-dim vector) |
+| **State** | State-dim = bars × feature count at train time — must retrain if FEATURE_COLS changes (stale; not in prediction.models) |
 | **Trained via** | `train_dqn.py --symbol SPY --days 500 --episodes 30` |
 | **Known limitations** | RL on noisy daily financial data is extremely sample-inefficient. Not validated OOS; included for research purposes only. |
 
