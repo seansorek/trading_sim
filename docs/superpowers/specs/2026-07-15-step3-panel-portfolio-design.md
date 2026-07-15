@@ -126,9 +126,23 @@ code, and `config/default.yaml` is already the single source of truth
 **No sector map.** Sector-neutrality is increment #3, so building the map now
 is speculative work.
 
-**Selection criteria:** large-cap US equities and liquid sector ETFs, chosen
-for dollar-volume and history depth (≥ 2500 calendar days). The list extends
-the existing `prediction.symbols` set rather than replacing it.
+**Selection criteria:** large-cap US **stocks only**, chosen for dollar-volume
+and history depth (≥ 2500 calendar days), spread across sectors so no single
+sector dominates a decile.
+
+**Index and sector ETFs stay out of the tradeable cross-section.** SPY, QQQ,
+IWM, and the XL* sector funds are baskets of the same names the panel ranks.
+Ranking AAPL against XLK means potentially shorting a fund that holds the long
+— the two are not independent bets, and the "cross-section" stops being one.
+ETFs would also rank persistently mid-pack, since a diversified basket's
+idiosyncratic forecast is structurally damped relative to a single name.
+
+SPY still loads, for two jobs it keeps: the `ret_1d_vs_spy` / `ret_5d_vs_spy`
+features in `make_daily_features`, and the beta regression in the gate. It is
+never ranked and never held.
+
+This narrows the existing `prediction.symbols` set (which contains SPY, QQQ,
+IWM, GLD, USO, and six XL* funds) rather than extending it.
 
 ### Data loading → reuse
 
