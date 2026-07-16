@@ -1,0 +1,68 @@
+{
+  "best_config": [
+    0.2,
+    3
+  ],
+  "dsr": 0.47211515960342554,
+  "sr": 0.030476428228163988,
+  "sr0": 0.0322193008549034,
+  "beta": 0.18579289313909567,
+  "pbo": 0.0,
+  "passed": false,
+  "verdict": "beta +0.186 outside +/-0.1 \u2014 neutralization failed. Diagnose the book before reading its performance.",
+  "per_config": {
+    "(0.1, 1)": {
+      "pp_sharpe": -0.02660411971270584,
+      "ann_sharpe": -0.4223273076576648,
+      "n_dates": 1597,
+      "n_flat_days": 0,
+      "mean_turnover": 1.0584011688582762,
+      "mean_cost": 0.0005292005844291381,
+      "mean_borrow_cost": 9.92063492063492e-06,
+      "total_cost_drag": 0.8609765873015874,
+      "mean_gross_exposure": 0.9999999999999999,
+      "mean_net_exposure": 4.78814094057969e-18
+    },
+    "(0.1, 3)": {
+      "pp_sharpe": 0.021682260755316353,
+      "ann_sharpe": 0.34419521892133537,
+      "n_dates": 1597,
+      "n_flat_days": 0,
+      "mean_turnover": 0.42663327071592566,
+      "mean_cost": 0.00021331663535796284,
+      "mean_borrow_cost": 9.92063492063492e-06,
+      "total_cost_drag": 0.35650992063492065,
+      "mean_gross_exposure": 0.9999999999999999,
+      "mean_net_exposure": 5.144427290060212e-18
+    },
+    "(0.2, 1)": {
+      "pp_sharpe": -0.026587286395697976,
+      "ann_sharpe": -0.42206008703440606,
+      "n_dates": 1597,
+      "n_flat_days": 0,
+      "mean_turnover": 0.8831680368432746,
+      "mean_cost": 0.00044158401842163734,
+      "mean_borrow_cost": 9.920634920634912e-06,
+      "total_cost_drag": 0.7210529313876087,
+      "mean_gross_exposure": 0.9999999999999994,
+      "mean_net_exposure": 0.0
+    },
+    "(0.2, 3)": {
+      "pp_sharpe": 0.030476428228163988,
+      "ann_sharpe": 0.48379829964738463,
+      "n_dates": 1597,
+      "n_flat_days": 0,
+      "mean_turnover": 0.35887854242834344,
+      "mean_cost": 0.00017943927121417171,
+      "mean_borrow_cost": 9.920634920634912e-06,
+      "total_cost_drag": 0.3024077700972862,
+      "mean_gross_exposure": 0.9999999999999994,
+      "mean_net_exposure": 0.0
+    }
+  },
+  "universe_size": 156,
+  "dropped": {
+    "HES": "insufficient bars (0 < 250)"
+  },
+  "cost_bps": 5.0
+}
