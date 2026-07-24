@@ -168,8 +168,9 @@ def prepare_data(
             continue
 
         X_sym = feats[FEATURE_COLS].values.astype(np.float32)
-        vol = feats["vol_20d"].values
-        pos_thr = vol * np.sqrt(3) * vol_mult
+        # Volatility-adjusted thresholds: use raw 20-day return vol (not z-scored vol_20d)
+        raw_vol = df["close"].pct_change().rolling(20).std().reindex(feats.index).values
+        pos_thr = raw_vol * np.sqrt(3) * vol_mult
         y_sym = discretize_labels(
             feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr
         )
