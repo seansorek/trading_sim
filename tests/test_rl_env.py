@@ -197,3 +197,17 @@ class TestTradingEnvRewardTransitions:
         assert r2 == pytest.approx(raw_reward(-1, closes[env.window + 1]) - 0.02, abs=1e-9)
         # Unchanged action (short -> short): no penalty.
         assert r3 == pytest.approx(raw_reward(-1, closes[env.window + 2]), abs=1e-9)
+
+    def test_exit_to_flat_not_penalized(self):
+        env, closes = self._build_env(daily_ret=0.0)  # flat prices -> pnl-neutral rewards
+        env.reset()
+
+        def raw_reward(target_pos, price_prev):
+            ret = 0.0  # flat prices
+            pnl = target_pos * ret * price_prev
+            return pnl / (closes[0] * 0.005)
+
+        # long -> flat (ordinary exit, not a direction reversal): no penalty.
+        env.step(1)
+        _, r1, _, _ = env.step(0)
+        assert r1 == pytest.approx(raw_reward(0, closes[env.window]), abs=1e-9)

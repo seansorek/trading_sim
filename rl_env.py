@@ -123,8 +123,10 @@ class TradingEnv:
         reward = pnl / (self.prices[0] * 0.005)  # Normalize by 0.5% of initial price
 
         # Penalty for reversals (changing direction), based on the position
-        # immediately before this action (not a one-step-stale value).
-        if target_pos != self.position and self.position != 0:
+        # immediately before this action (not a one-step-stale value). Only
+        # a flip to the opposite nonzero side counts as a reversal; closing
+        # to flat (target_pos == 0) is an ordinary exit, not penalized here.
+        if target_pos != self.position and self.position != 0 and target_pos != 0:
             reward -= 0.02
 
         self.equity += pnl
