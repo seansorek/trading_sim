@@ -1,8 +1,11 @@
 
 # data_loader.py
 import logging
+import os
+import time
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -272,6 +275,92 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
     # For daily/weekly/monthly intervals, do not filter intraday hours
     is_intraday = interval.endswith('m') or interval.endswith('h')
     return _standardize(df, intraday=is_intraday)
+
+def load_alpha_vantage(symbol: str, start: str, end: str, api_key: str = None) -> pd.DataFrame:
+    """
+    Fetch daily bars from Alpha Vantage's TIME_SERIES_DAILY endpoint.
+
+    Used as a fallback when yfinance is unavailable. Requires an API key,
+    either passed explicitly or via the ALPHA_VANTAGE_API_KEY env var.
+    Only daily bars are supported (Alpha Vantage's free tier intraday
+    endpoints are too rate-limited to serve as a reliable fallback).
+    """
+    api_key = api_key or os.environ.get("ALPHA_VANTAGE_API_KEY")
+    if not api_key:
+        raise ValueError("load_alpha_vantage: no API key (pass api_key or set ALPHA_VANTAGE_API_KEY)")
+
+    resp = requests.get(
+        "https://www.alphavantage.co/query",
+        params={
+            "function": "TIME_SERIES_DAILY",
+            "symbol": symbol,
+            "outputsize": "full",
+            "apikey": api_key,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    series = payload.get("Time Series (Daily)")
+    if not series:
+        raise ValueError(f"load_alpha_vantage: no data for {symbol}: {payload}")
+
+    df = pd.DataFrame.from_dict(series, orient="index")
+    df = df.rename(columns={
+        "1. open": "open", "2. high": "high", "3. low": "low",
+        "4. close": "close", "5. volume": "volume",
+    })
+    df.index = pd.to_datetime(df.index).tz_localize("UTC")
+    df = df.astype(float)
+    df.index.name = "timestamp"
+
+    start_dt = pd.to_datetime(start).tz_localize("UTC") if pd.to_datetime(start).tzinfo is None else pd.to_datetime(start)
+    end_dt = pd.to_datetime(end).tz_localize("UTC") if pd.to_datetime(end).tzinfo is None else pd.to_datetime(end)
+    df = df.loc[(df.index >= start_dt) & (df.index <= end_dt)]
+
+    if df.empty:
+        raise ValueError(f"load_alpha_vantage: no data for {symbol} in {start}-{end}")
+
+    return _standardize(df, intraday=False)
+
+
+def fetch_bars_with_fallback(
+    symbol: str,
+    start: str,
+    end: str,
+    interval: str = "1d",
+    max_retries: int = 3,
+    backoff_base: float = 2.0,
+) -> pd.DataFrame:
+    """
+    Fetch bars via load_yfinance, retrying transient failures with
+    exponential backoff, then falling back to Alpha Vantage (if
+    ALPHA_VANTAGE_API_KEY is set) before giving up.
+    """
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return load_yfinance(symbol, start=start, end=end, interval=interval)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                sleep_s = backoff_base ** attempt
+                logger.warning(
+                    "%s: yfinance fetch failed (attempt %d/%d): %s -- retrying in %.1fs",
+                    symbol, attempt + 1, max_retries, exc, sleep_s,
+                )
+                time.sleep(sleep_s)
+
+    if os.environ.get("ALPHA_VANTAGE_API_KEY") and interval == "1d":
+        logger.warning("%s: yfinance exhausted retries, falling back to Alpha Vantage", symbol)
+        try:
+            return load_alpha_vantage(symbol, start, end)
+        except Exception as fallback_exc:
+            logger.error("%s: Alpha Vantage fallback also failed: %s", symbol, fallback_exc)
+
+    raise last_exc
+
 
 def load_csv(path: str, interval: str = "1d") -> pd.DataFrame:
     """

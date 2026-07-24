@@ -26,7 +26,7 @@ import pandas as pd
 import torch
 
 from config import get_config
-from data_loader import check_cache_coverage, check_cache_freshness, load_yfinance
+from data_loader import check_cache_coverage, check_cache_freshness, fetch_bars_with_fallback
 from daily_features import FEATURE_COLS, make_daily_features
 from db import DB
 from dqn_signal import gate_dqn_signal
@@ -450,7 +450,7 @@ def _load_bars_cached(
     full window directly from yfinance (unchanged legacy behavior).
     """
     if db is None:
-        return load_yfinance(symbol, start=start, end=end, interval="1d")
+        return fetch_bars_with_fallback(symbol, start=start, end=end, interval="1d")
 
     cached = db.load_bars(symbol, "1d", start, end)
     if cached is not None and len(cached) >= 50:
@@ -467,7 +467,7 @@ def _load_bars_cached(
         else:
             logger.info("%s: cache stale, re-fetching", symbol)
 
-    df = load_yfinance(symbol, start=start, end=end, interval="1d")
+    df = fetch_bars_with_fallback(symbol, start=start, end=end, interval="1d")
     if df is not None and len(df) >= 50:
         db.upsert_bars(symbol, "1d", df)
     return df
@@ -883,7 +883,7 @@ def main() -> None:
     if args.history:
         try:
             def _fetch_prices(symbol: str, start: str, end: str):
-                return load_yfinance(symbol, start=start, end=end, interval="1d")
+                return fetch_bars_with_fallback(symbol, start=start, end=end, interval="1d")
 
             ic_results = score_realized_ic(
                 args.history, prediction_date, fetch_prices_fn=_fetch_prices

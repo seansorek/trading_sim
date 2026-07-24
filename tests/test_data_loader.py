@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from data_loader import (
     load_yfinance,
     load_csv,
+    load_alpha_vantage,
+    fetch_bars_with_fallback,
     _standardize,
     _ensure_cols,
     _filter_us_hours,
@@ -286,3 +288,95 @@ def test_load_csv_intraday_still_filters(tmpdir):
     assert len(df) == 0, (
         f"Expected 0 bars after US-hours filter for 03:00 UTC data, got {len(df)}"
     )
+
+
+# --- fetch_bars_with_fallback / load_alpha_vantage ---
+
+def _sample_ohlcv_df():
+    dates = pd.date_range("2024-01-02", periods=60, freq="D", tz="UTC")
+    return pd.DataFrame({
+        "open": np.full(60, 100.0),
+        "high": np.full(60, 101.0),
+        "low": np.full(60, 99.0),
+        "close": np.full(60, 100.5),
+        "volume": np.full(60, 1_000_000),
+    }, index=dates)
+
+
+def test_fetch_bars_with_fallback_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky_load_yfinance(symbol, start, end, interval="1d"):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("transient network error")
+        return _sample_ohlcv_df()
+
+    monkeypatch.setattr("data_loader.load_yfinance", flaky_load_yfinance)
+    monkeypatch.setattr("data_loader.time.sleep", lambda s: None)
+
+    df = fetch_bars_with_fallback("AAPL", start="2024-01-01", end="2024-03-01", max_retries=3)
+
+    assert calls["n"] == 3
+    assert len(df) == 60
+
+
+def test_fetch_bars_with_fallback_raises_after_exhausting_retries_no_fallback(monkeypatch):
+    def always_fails(symbol, start, end, interval="1d"):
+        raise ConnectionError("permanent network error")
+
+    monkeypatch.setattr("data_loader.load_yfinance", always_fails)
+    monkeypatch.setattr("data_loader.time.sleep", lambda s: None)
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+
+    with pytest.raises(ConnectionError, match="permanent network error"):
+        fetch_bars_with_fallback("AAPL", start="2024-01-01", end="2024-03-01", max_retries=2)
+
+
+def test_fetch_bars_with_fallback_uses_alpha_vantage_when_yfinance_exhausted(monkeypatch):
+    def always_fails(symbol, start, end, interval="1d"):
+        raise ConnectionError("yfinance down")
+
+    fallback_df = _sample_ohlcv_df()
+    fallback_calls = {"n": 0}
+
+    def fake_alpha_vantage(symbol, start, end):
+        fallback_calls["n"] += 1
+        return fallback_df
+
+    monkeypatch.setattr("data_loader.load_yfinance", always_fails)
+    monkeypatch.setattr("data_loader.load_alpha_vantage", fake_alpha_vantage)
+    monkeypatch.setattr("data_loader.time.sleep", lambda s: None)
+    monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "test-key")
+
+    df = fetch_bars_with_fallback("AAPL", start="2024-01-01", end="2024-03-01", max_retries=2)
+
+    assert fallback_calls["n"] == 1
+    assert len(df) == 60
+
+
+def test_load_alpha_vantage_no_api_key_raises(monkeypatch):
+    monkeypatch.delenv("ALPHA_VANTAGE_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="no API key"):
+        load_alpha_vantage("AAPL", start="2024-01-01", end="2024-03-01")
+
+
+def test_load_alpha_vantage_parses_response(monkeypatch):
+    fake_payload = {
+        "Time Series (Daily)": {
+            "2024-01-03": {"1. open": "101.0", "2. high": "102.0", "3. low": "100.0", "4. close": "101.5", "5. volume": "1000000"},
+            "2024-01-02": {"1. open": "100.0", "2. high": "101.0", "3. low": "99.0", "4. close": "100.5", "5. volume": "900000"},
+        }
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = fake_payload
+    mock_resp.raise_for_status.return_value = None
+
+    with patch("data_loader.requests.get", return_value=mock_resp) as mock_get:
+        df = load_alpha_vantage("AAPL", start="2024-01-01", end="2024-01-05", api_key="test-key")
+
+    assert mock_get.called
+    assert len(df) == 2
+    assert "close" in df.columns
+    assert df["close"].iloc[0] == 100.5
