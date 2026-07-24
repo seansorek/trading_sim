@@ -3,6 +3,8 @@ Regression test for issue #111: train_hybrid.py must derive BUY/SELL
 thresholds from raw 20-day return volatility, not the z-scored vol_20d
 feature (which can be negative and would make pos_thr/neg_thr overlap).
 """
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 
@@ -53,3 +55,26 @@ def test_raw_volatility_thresholds_are_nonnegative_and_labels_ordered():
 
     assert np.all(returns[y == 2] > pos_thr[y == 2])
     assert np.all(returns[y == 0] < neg_thr[y == 0])
+
+
+def test_prepare_data_labels_are_not_zscore_derived():
+    """Exercise train_hybrid.prepare_data (the real production path) so a
+    regression that reintroduces feats["vol_20d"] as the threshold source
+    is caught here, not just in the standalone raw_vol calculation above.
+    """
+    import train_hybrid
+
+    df = _synthetic_ohlcv(n=400)
+
+    with patch.object(train_hybrid, "_load_symbol", return_value=df):
+        data = train_hybrid.prepare_data(
+            symbols=["AAPL"], days=1000, db=None, lookback=10, vol_mult=1.0,
+        )
+
+    assert data["used_symbols"] == ["AAPL"]
+    # discretize_labels(neg_thr=pos_thr's negation) can only overlap into a
+    # malformed (empty-middle-class) distribution if pos_thr went negative,
+    # which only happens when the z-scored vol_20d feature leaks in. All
+    # three classes should be represented across train+val+test.
+    all_labels = np.concatenate([data["y_train"], data["y_val"], data["y_test"]])
+    assert set(np.unique(all_labels)) == {0, 1, 2}
