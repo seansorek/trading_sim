@@ -95,6 +95,54 @@ def test_entry_price_resets_on_reversal():
 
 
 # ---------------------------------------------------------------------------
+# Position reduction should not disturb avg_entry_price (issue #112)
+# ---------------------------------------------------------------------------
+
+def test_position_reduction_preserves_avg_entry_price():
+    """
+    A same-direction position that shrinks purely because sizing recomputed
+    a smaller share count (price moved a lot between bars) must keep the
+    original avg_entry_price. Treating the reduction as if it were an
+    addition inflates avg_entry_price far past the current price and can
+    trigger a false stop-loss.
+    """
+    idx = pd.date_range("2024-01-02", periods=5, freq="B", tz="UTC")
+    prices = [100.0, 300.0, 295.0, 298.0, 297.0]
+    df = pd.DataFrame(
+        {
+            "open": prices,
+            "high": [p + 0.5 for p in prices],
+            "low": [p - 0.5 for p in prices],
+            "close": prices,
+            "volume": np.full(5, 1_000_000.0),
+        },
+        index=idx,
+    )
+    signal = pd.Series(1, index=df.index)  # stay long throughout
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.10,
+        take_profit_pct=0.90,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    result = _run(signal, df, cfg)
+
+    stop_loss_exits = (
+        result.trades[result.trades["exit_reason"] == "stop_loss"]
+        if "exit_reason" in result.trades.columns
+        else result.trades.iloc[0:0]
+    )
+    assert stop_loss_exits.empty, (
+        "position size shrinking on a same-direction trade must not blow up "
+        f"avg_entry_price into a false stop-loss: {stop_loss_exits}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stop-loss
 # ---------------------------------------------------------------------------
 
