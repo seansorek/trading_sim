@@ -405,10 +405,18 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame,
         mu, sd = r.mean(), r.std()
         return float(np.sqrt(252) * mu / sd) if sd and sd != 0 else 0.0
 
-    def sortino(r: pd.Series) -> float:
-        downside = r[r < 0]
-        dd = downside.std()
-        mu = r.mean()
+    def sortino(r: pd.Series, target: float = 0.0) -> float:
+        """Standard downside deviation: root-mean-square of shortfalls below
+        `target`, taken over ALL observations (not just the losing ones).
+        Using every observation in the denominator — rather than the sample
+        std of only the negative subset — keeps this finite even with a
+        single loss (a 1-sample std has an undefined ddof=1 denominator and
+        returns NaN); it also matches the standard Sortino-ratio definition."""
+        if len(r) == 0:
+            return 0.0
+        shortfall = np.minimum(r.values - target, 0.0)
+        dd = float(np.sqrt(np.mean(shortfall ** 2)))
+        mu = float(r.mean())
         return float(np.sqrt(252) * mu / dd) if dd and dd != 0 else 0.0
 
     cum = daily_equity.values
@@ -425,37 +433,64 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame,
         pnl_list: list[float] = []
         pos = 0
         entry_price: Optional[float] = None
+        # Weighted-average commission+spread_cost per share for the currently
+        # open leg, tracked the same way entry_price is — so realized PnL can
+        # be netted of the entry-side cost as well as the exit-side cost
+        # (issue #114: hit_rate/profit_factor must be net of both fields the
+        # execution model already logs per trade, not just the raw fill-price
+        # delta).
+        entry_cost_per_share: float = 0.0
         for ts, t in trades.iterrows():
             side = 1 if t["side"] == "BUY" else -1
+            t_shares = t["shares"]
+            # .get(...) rather than [...]: tolerate older/synthetic trade
+            # frames that predate these columns, treating missing cost data
+            # as zero rather than raising.
+            t_cost_per_share = (
+                (float(t.get("commission", 0.0) or 0.0)
+                 + float(t.get("spread_cost", 0.0) or 0.0)) / t_shares
+                if t_shares else 0.0
+            )
             if pos == 0:
-                pos = side * t["shares"]
+                pos = side * t_shares
                 entry_price = t["fill_price"]
+                entry_cost_per_share = t_cost_per_share
             elif np.sign(side) == np.sign(pos):
                 # Same-direction add (scale-in): update entry to weighted avg, no PnL
                 old_shares = abs(pos)
-                new_shares = t["shares"]
+                new_shares = t_shares
                 total_shares = old_shares + new_shares
                 entry_price = (
                     (entry_price * old_shares + t["fill_price"] * new_shares)
                     / total_shares
                 )
-                pos += side * t["shares"]
+                entry_cost_per_share = (
+                    (entry_cost_per_share * old_shares + t_cost_per_share * new_shares)
+                    / total_shares
+                )
+                pos += side * t_shares
             else:
-                # Opposite-direction: realize PnL on the portion reduced/closed
-                closed_shares = min(abs(pos), t["shares"])
-                pnl = (
+                # Opposite-direction: realize PnL on the portion reduced/closed,
+                # net of both legs' commission + spread_cost attributable to
+                # the closed shares.
+                closed_shares = min(abs(pos), t_shares)
+                gross_pnl = (
                     (t["fill_price"] - entry_price)
                     * np.sign(pos)
                     * closed_shares
                 )
-                pnl_list.append(float(pnl))
+                net_cost = (entry_cost_per_share + t_cost_per_share) * closed_shares
+                pnl_list.append(float(gross_pnl - net_cost))
                 prev_pos = pos
-                pos += side * t["shares"]
+                pos += side * t_shares
                 if pos == 0:
                     entry_price = None
+                    entry_cost_per_share = 0.0
                 elif np.sign(pos) != np.sign(prev_pos):
-                    # Position crossed zero — start tracking the new leg
+                    # Position crossed zero — start tracking the new leg,
+                    # whose cost basis is this same trade's exit-side cost.
                     entry_price = t["fill_price"]
+                    entry_cost_per_share = t_cost_per_share
         if pnl_list:
             pnl_arr = np.array(pnl_list)
             gross_profit = float(pnl_arr[pnl_arr > 0].sum())
