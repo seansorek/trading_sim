@@ -22,6 +22,7 @@ from base_strategy import StrategyConfig
 from cpcv import cscv_pbo
 from deflated_sharpe import deflated_sharpe
 from ml_strategies import DailyPredictorStrategy
+from oos_guard import enforce_oos_start, get_artifact_train_end
 from simulation_pipeline import Backtester, ExecutionConfig
 from walk_forward import (
     WalkForwardConfig, build_fold_data, fold_config_ic_matrix,
@@ -85,14 +86,39 @@ def _backtest_sharpe(df, q, w):
                 os.environ[key] = prev
 
 
-def compute_dsr_for_symbol(symbol, df, quantiles=None, windows=None):
+def compute_dsr_for_symbol(symbol, df, quantiles=None, windows=None,
+                            model_path="models/daily_predictor.pkl"):
     """Run a backtest per (q, w) config on one symbol's price frame.
+
+    `df` is trimmed to rows after the daily_predictor model's train_end
+    cutoff (+ embargo) before any backtest runs, so DSR is never computed
+    over in-sample rows the model was fit on (issue #115). Pass
+    model_path=None to skip this check (e.g. when df is already known to be
+    out-of-sample, as in unit tests with a from-scratch fit).
 
     Returns a dict with keys:
       dsr, sr, sr0, p_value  — from deflated_sharpe on the best config's daily returns
       selected               — (q, w) tuple of the best config (highest Sharpe)
       n_trials               — total number of (q, w) combinations evaluated
     """
+    if model_path and os.path.exists(model_path):
+        try:
+            import pickle
+            with open(model_path, "rb") as f:
+                artifact = pickle.load(f)
+            train_end = get_artifact_train_end(artifact)
+            df = enforce_oos_start(df, train_end, label=f"{symbol}/daily_predictor")
+        except Exception as exc:
+            if isinstance(exc, ValueError) and "in-sample" in str(exc):
+                raise
+            logger.warning("oos_guard: could not read daily_predictor artifact %s: %s",
+                            model_path, exc)
+        if len(df) < 300:
+            raise ValueError(
+                f"{symbol}: fewer than 300 out-of-sample rows remain after trimming to the "
+                "daily_predictor model's train cutoff + embargo."
+            )
+
     quantiles = quantiles or _DEFAULT_QUANTILES
     windows = windows or _DEFAULT_WINDOWS
     configs = [(q, w) for q in quantiles for w in windows]
@@ -150,7 +176,11 @@ def main():
         if df is None or len(df) < 300:
             print(f"  {sym}: insufficient data")
             continue
-        out = compute_dsr_for_symbol(sym, df)
+        try:
+            out = compute_dsr_for_symbol(sym, df)
+        except ValueError as exc:
+            print(f"  {sym}: {exc}")
+            continue
         dsrs.append(out["dsr"])
         print(f"  {sym}: DSR={out['dsr']:.3f} SR={out['sr']:+.4f} SR0={out['sr0']:+.4f} "
               f"selected(q,w)={out['selected']}")

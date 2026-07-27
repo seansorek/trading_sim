@@ -429,6 +429,8 @@ def train_hybrid(args) -> dict:
         "label_map": LABEL_MAP,
         "confidence_threshold": args.confidence,
         "trained_at": datetime.now().isoformat(),
+        "train_start": start,
+        "train_end": end,
         "train_symbols": data["used_symbols"],
         "train_accuracy": train_acc,
         "test_accuracy": test_acc,

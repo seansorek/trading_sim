@@ -215,6 +215,8 @@ def _save_and_register(
         "feature_contract": FEATURE_COLS,
         "feature_set_name": FEATURE_SET_NAME,
         "trained_at": datetime.now().isoformat(),
+        "train_start": start,
+        "train_end": end,
         "train_symbols": train_symbols,
         "train_ic": train_metrics["ic"],
         "train_dir_acc": train_metrics["dir_acc"],
