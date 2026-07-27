@@ -554,16 +554,29 @@ def predict_symbol(
             agent = models["daily_dqn"]
             n_rows, n_cols = X_all.shape
 
-            # Z-score normalize features to match DQN training (rl_env.py).
-            # Fit scaler on a warmup window to avoid look-ahead bias.
-            fit_end = min(252, max(dqn_window + 1, n_rows // 2))
+            # Apply the EXACT scaler persisted with the agent at train time
+            # (see issue #123) — never re-derive mu/sd from whatever window
+            # happens to be in X_all today, which drifts daily and covers a
+            # different calendar period than training's warmup window.
+            scaler = getattr(agent, "scaler", None)
+            feature_contract = getattr(agent, "feature_contract", None)
+            if not scaler:
+                raise RuntimeError(
+                    "daily_dqn artifact has no persisted feature scaler "
+                    "(models/dqn_agent.pt predates issue #123's fix) — retrain "
+                    "with train_models.py so live predictions normalize on the "
+                    "same statistics training used."
+                )
+            if feature_contract is not None and list(feature_contract) != list(FEATURE_COLS):
+                raise RuntimeError(
+                    "daily_dqn feature contract mismatch between the saved "
+                    "scaler and the current FEATURE_COLS — retrain."
+                )
+
             X_normed = X_all.copy()
             for ci, col in enumerate(FEATURE_COLS):
-                mu = float(X_all[:fit_end, ci].mean())
-                sd = float(X_all[:fit_end, ci].std() or 1.0)
-                if sd == 0:
-                    sd = 1.0
-                X_normed[:, ci] = (X_all[:, ci] - mu) / sd
+                mu, sd = scaler[col]
+                X_normed[:, ci] = (X_all[:, ci] - mu) / (sd if sd else 1.0)
 
             if n_rows >= dqn_window:
                 state = X_normed[-dqn_window:].flatten()

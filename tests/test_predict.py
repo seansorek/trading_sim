@@ -662,6 +662,12 @@ class TestPredictSymbolDQN:
 
         agent = MagicMock()
         agent.q = q_network
+        # Issue #123: predict_symbol now requires a persisted scaler/feature
+        # contract on the agent (instead of re-deriving normalization stats
+        # from X_all) — an identity scaler here keeps these gating tests'
+        # Q-values unaffected by normalization.
+        agent.scaler = {c: (0.0, 1.0) for c in FEATURE_COLS}
+        agent.feature_contract = list(FEATURE_COLS)
         return {"daily_dqn": agent}
 
     def test_dqn_low_advantage_produces_hold(self):

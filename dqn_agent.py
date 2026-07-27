@@ -242,12 +242,19 @@ class DQNAgent:
         
         return float(weighted_loss.item())
 
-    def save(self, path: str):
+    def save(self, path: str, scaler: dict | None = None, feature_contract: list | None = None):
+        """Save the agent. `scaler` (feature -> (mu, sd), fit at train time)
+        and `feature_contract` (the ordered feature list the scaler/state
+        vector assume) are persisted alongside the weights so inference can
+        apply the exact normalization training used, instead of re-deriving
+        different statistics from a different window (see issue #123)."""
         torch.save({
             "model": self.q.state_dict(),
             "cfg": self.cfg.__dict__,
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
+            "scaler": scaler,
+            "feature_contract": feature_contract,
         }, path)
 
     @staticmethod
@@ -258,4 +265,9 @@ class DQNAgent:
         agent = DQNAgent(blob["state_dim"], blob["action_dim"], cfg)
         agent.q.load_state_dict(blob["model"])
         agent.target.load_state_dict(agent.q.state_dict())
+        # Absent for checkpoints saved before this field existed — callers
+        # that require exact train/serve parity must check for None and
+        # fail loudly rather than silently re-deriving a different scaler.
+        agent.scaler = blob.get("scaler")
+        agent.feature_contract = blob.get("feature_contract")
         return agent
