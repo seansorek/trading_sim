@@ -97,7 +97,6 @@ class TradingEnv:
         self.idx = self.window
         self.position = 0  # -1 short, 0 flat, +1 long
         self.equity = 0.0
-        self.prev_position = 0
         return self._get_state()
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
@@ -113,23 +112,24 @@ class TradingEnv:
         if target_pos != self.position:
             cost = (abs(target_pos - self.position)) * (self.transaction_cost_bps * 1e-4) * self.prices[self.idx - 1]
 
-        # fwd_ret_1d is actually a FWD_RET_HORIZON_DAYS-bar cumulative return;
-        # divide by horizon so per-step reward is a per-day-equivalent PnL.
-        # (Window overlap across consecutive idx steps remains but the magnitude
-        #  matches a one-bar holding period.)
-        ret = self.returns[self.idx - 1] / FWD_RET_HORIZON_DAYS
+        # Actual one-day close-to-close return for the bar this position is
+        # held over (today -> next bar), not the FWD_RET_HORIZON_DAYS-bar
+        # cumulative fwd_ret_1d, which would overlap across consecutive steps.
+        ret = self.prices[self.idx] / self.prices[self.idx - 1] - 1.0
         gross_pnl = target_pos * ret * self.prices[self.idx - 1]
         pnl = gross_pnl - cost
-        
+
         # Reward: simple scaled PnL
         reward = pnl / (self.prices[0] * 0.005)  # Normalize by 0.5% of initial price
-        
-        # Penalty for reversals (changing direction)
-        if target_pos != self.prev_position and self.prev_position != 0:
+
+        # Penalty for reversals (changing direction), based on the position
+        # immediately before this action (not a one-step-stale value). Only
+        # a flip to the opposite nonzero side counts as a reversal; closing
+        # to flat (target_pos == 0) is an ordinary exit, not penalized here.
+        if target_pos != self.position and self.position != 0 and target_pos != 0:
             reward -= 0.02
-        
+
         self.equity += pnl
-        self.prev_position = self.position
         self.position = target_pos
 
         done = False

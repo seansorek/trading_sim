@@ -136,3 +136,78 @@ class TestTradingEnvScalerNoLookahead:
                 f"Scaler std for {c} leaked future stats: "
                 f"{sd_a} vs {sd_b} when only tail rows changed"
             )
+
+
+class TestTradingEnvRewardTransitions:
+    """Issue #113: reward must use the real one-day return, and reversal
+    penalties must key off the position immediately before the action."""
+
+    def _build_env(self, n=30, window=5, transaction_cost_bps=0.0, daily_ret=0.01):
+        raw = _make_raw_ohlcv(n=n, start_price=100.0)
+        # Deterministic close path with a known, constant daily return.
+        closes = 100.0 * (1.0 + daily_ret) ** np.arange(n)
+        raw["close"] = closes
+        raw["open"] = closes
+        raw["high"] = closes * 1.001
+        raw["low"] = closes * 0.999
+
+        feats = _make_feats_df(raw)
+        feats["close"] = closes
+        # fwd_ret_1d deliberately set far from the real 1-day return, so a
+        # test that still reads it (bug) would produce a very different pnl.
+        feats["fwd_ret_1d"] = 5.0
+
+        with patch("rl_env.load_yfinance", return_value=raw), \
+             patch("rl_env.make_daily_features", return_value=feats):
+            from rl_env import TradingEnv
+            env = TradingEnv(
+                symbol="TEST", window=window, transaction_cost_bps=transaction_cost_bps
+            )
+        return env, closes
+
+    def test_reward_uses_actual_one_day_return(self):
+        env, closes = self._build_env(daily_ret=0.01)
+        env.reset()
+        i0 = env.idx  # == window
+        _, reward, _, info = env.step(1)  # go long
+
+        expected_ret = closes[i0] / closes[i0 - 1] - 1.0
+        expected_pnl = 1 * expected_ret * closes[i0 - 1]
+        assert info["pnl"] == pytest.approx(expected_pnl, rel=1e-9)
+        assert reward == pytest.approx(expected_pnl / (closes[0] * 0.005), rel=1e-9)
+
+    def test_reversal_penalty_applies_at_reversal_not_next_step(self):
+        env, closes = self._build_env(daily_ret=0.0)  # flat prices -> pnl-neutral rewards
+        env.reset()
+
+        def raw_reward(target_pos, price_prev):
+            ret = 0.0  # flat prices
+            pnl = target_pos * ret * price_prev
+            return pnl / (closes[0] * 0.005)
+
+        # hold -> long -> short (reversal here) -> short (unchanged)
+        _, r0, _, _ = env.step(0)
+        _, r1, _, _ = env.step(1)
+        _, r2, _, _ = env.step(2)
+        _, r3, _, _ = env.step(2)
+
+        assert r0 == pytest.approx(raw_reward(0, closes[env.window - 1]), abs=1e-9)
+        assert r1 == pytest.approx(raw_reward(1, closes[env.window]), abs=1e-9)
+        # Reversal happens on this step (long -> short): penalty applied here.
+        assert r2 == pytest.approx(raw_reward(-1, closes[env.window + 1]) - 0.02, abs=1e-9)
+        # Unchanged action (short -> short): no penalty.
+        assert r3 == pytest.approx(raw_reward(-1, closes[env.window + 2]), abs=1e-9)
+
+    def test_exit_to_flat_not_penalized(self):
+        env, closes = self._build_env(daily_ret=0.0)  # flat prices -> pnl-neutral rewards
+        env.reset()
+
+        def raw_reward(target_pos, price_prev):
+            ret = 0.0  # flat prices
+            pnl = target_pos * ret * price_prev
+            return pnl / (closes[0] * 0.005)
+
+        # long -> flat (ordinary exit, not a direction reversal): no penalty.
+        env.step(1)
+        _, r1, _, _ = env.step(0)
+        assert r1 == pytest.approx(raw_reward(0, closes[env.window]), abs=1e-9)
