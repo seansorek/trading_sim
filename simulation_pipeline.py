@@ -266,7 +266,7 @@ class Backtester:
                 elif old_position == 0 or np.sign(old_position) != np.sign(position):
                     # New position or full reversal: reset to current fill
                     avg_entry_price = fill_price
-                else:
+                elif abs(position) > abs(old_position):
                     # Adding to existing position: weighted average
                     old_shares = abs(old_position)
                     new_shares = abs(delta)
@@ -274,6 +274,7 @@ class Backtester:
                     avg_entry_price = (
                         (avg_entry_price * old_shares + fill_price * new_shares) / total_shares
                     )
+                # else: same-direction reduction — avg_entry_price is unchanged
 
                 trade_log.append({
                     "ts": ts,
