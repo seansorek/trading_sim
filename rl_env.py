@@ -22,6 +22,7 @@ class TradingEnv:
         window: int = 20,
         transaction_cost_bps: float = 10.0,
         feature_scaler: Optional[Dict[str, Tuple[float, float]]] = None,
+        spy_df=None,
     ):
         self.symbol = symbol
         self.start = start
@@ -32,7 +33,19 @@ class TradingEnv:
 
         # Load REAL data from yfinance
         raw = load_yfinance(symbol=symbol, start=start or "2024-01-01", end=end or "2025-12-02", interval="1d")
-        feats = make_daily_features(raw)
+        # ret_*_vs_spy features must be real (not the constant 0.0 make_daily_features
+        # falls back to when spy_df is None) so the DQN is trained on the same
+        # feature distribution predict_next_day_lite.py feeds it at inference —
+        # otherwise two of FEATURE_COLS are identically zero throughout training
+        # and arrive as live nonzero z-scores in production (see issue #123).
+        if spy_df is None and symbol != "SPY":
+            try:
+                spy_df = load_yfinance(
+                    symbol="SPY", start=start or "2024-01-01", end=end or "2025-12-02", interval="1d"
+                )
+            except Exception:
+                spy_df = None
+        feats = make_daily_features(raw, spy_df=spy_df if symbol != "SPY" else None)
         # Drop rows needing forward return to avoid peeking
         feats = feats.dropna(subset=["fwd_ret_1d"]).copy()
         self.df = feats

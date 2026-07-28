@@ -470,9 +470,53 @@ def train_dqn(symbols, start, end, cfg_dqn, out_path, use_dueling=True, use_per=
     print(f"Architecture: Dueling DQN with PER")
     print("=" * 70 + "\n")
 
-    envs = [TradingEnv(sym, start=start, end=end, window=cfg_dqn.window) for sym in symbols]
+    # Fetch SPY once and share it across every env so ret_*_vs_spy features
+    # are real during training (see issue #123) — matches the spy_df the
+    # live prediction path always passes to make_daily_features.
+    try:
+        spy_df = load_yfinance("SPY", start=start, end=end, interval="1d")
+    except Exception as exc:
+        logger.warning("Could not load SPY for DQN training features: %s", exc)
+        spy_df = None
+
+    # Build each env with an identity scaler first so self.df holds RAW
+    # (unscaled) features — we need those to fit ONE shared scaler across
+    # all training symbols (see below) instead of each env silently keeping
+    # its own per-symbol scaler that inference could never reproduce.
+    _identity_scaler = {c: (0.0, 1.0) for c in FEATURE_COLS}
+    envs = [
+        TradingEnv(
+            sym, start=start, end=end, window=cfg_dqn.window,
+            feature_scaler=_identity_scaler,
+            spy_df=spy_df if sym != "SPY" else None,
+        )
+        for sym in symbols
+    ]
     state_dim = envs[0].observation_space_shape[0]
     action_dim = envs[0].action_space_n
+
+    # Fit one shared z-score scaler across all training symbols' warmup
+    # windows, apply it to every env in place, and persist it with the
+    # agent so live prediction normalizes on the exact same statistics
+    # instead of re-deriving different ones from a daily-drifting window
+    # (see issue #123).
+    warmup_frames = []
+    for env in envs:
+        fit_end = min(252, max(env.window + 1, len(env.df) // 2))
+        warmup_frames.append(env.df[env.features].iloc[:fit_end])
+    combined = pd.concat(warmup_frames)
+    dqn_scaler: dict = {}
+    for c in FEATURE_COLS:
+        mu = float(combined[c].mean())
+        sd = float(combined[c].std())
+        if not sd or np.isnan(sd):
+            sd = 1.0
+        dqn_scaler[c] = (mu, sd)
+    for env in envs:
+        for c in env.features:
+            mu, sd = dqn_scaler[c]
+            env.df[c] = (env.df[c] - mu) / sd
+        env.scaler = dqn_scaler
 
     print(f"[info] Loaded {len(symbols)} symbols with real yfinance data")
     print("\nData Verification:")
@@ -529,7 +573,7 @@ def train_dqn(symbols, start, end, cfg_dqn, out_path, use_dueling=True, use_per=
             print(f"[ep {ep+1:3d}] Reward: {ep_reward:7.2f} | Avg(5): {avg:7.2f} | Epsilon: {epsilon:.4f} | Buffer: {len(agent.buffer)}")
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    agent.save(out_path)
+    agent.save(out_path, scaler=dqn_scaler, feature_contract=FEATURE_COLS)
     logger.info("Saved DQN agent to %s (final reward: %.2f)", out_path, episode_rewards[-1])
 
 
