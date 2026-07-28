@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, accuracy_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import RobustScaler
 
 try:
@@ -321,7 +322,7 @@ def train_logistic(
         opt = BayesSearchCV(
             base, search_space,
             n_iter=opt_cfg.n_iter,
-            cv=opt_cfg.cv,
+            cv=TimeSeriesSplit(n_splits=opt_cfg.cv, gap=getattr(opt_cfg, "cv_gap", 0)),
             scoring="f1_macro",
             n_jobs=-1,
             random_state=42,
@@ -400,8 +401,11 @@ def train_xgboost(
             random_state=42, tree_method="hist", verbosity=0,
             objective="multi:softprob", num_class=3,
         )
-        opt = BayesSearchCV(base, search_space, n_iter=opt_cfg.n_iter, cv=opt_cfg.cv,
-                            n_jobs=-1, scoring="f1_macro", random_state=42)
+        opt = BayesSearchCV(
+            base, search_space, n_iter=opt_cfg.n_iter,
+            cv=TimeSeriesSplit(n_splits=opt_cfg.cv, gap=getattr(opt_cfg, "cv_gap", 0)),
+            n_jobs=-1, scoring="f1_macro", random_state=42,
+        )
         opt.fit(X_tr, y_train)
         model = opt.best_estimator_
         logger.info("[XGBoost] Best params: %s", dict(opt.best_params_))

@@ -96,6 +96,52 @@ def test_prepare_data_no_embargo_means_no_overlap_in_dates(tmp_path):
     assert label_horizon_date < test_start_date
 
 
+def test_bayes_search_cv_uses_time_series_split_not_kfold():
+    """train_logistic/train_xgboost's --optimize path must pass a
+    TimeSeriesSplit (or equivalent time-ordered splitter) to BayesSearchCV,
+    not a bare int (which defaults to ordinary K-fold and lets later
+    observations select hyperparameters for earlier validation folds)."""
+    pytest.importorskip("skopt")
+    from sklearn.model_selection import TimeSeriesSplit
+
+    from config import OptimizeCfg
+
+    captured = {}
+
+    class _FakeBayesSearchCV:
+        def __init__(self, base, search_space, **kwargs):
+            captured["cv"] = kwargs["cv"]
+            self.best_params_ = {}
+            self.best_estimator_ = base
+
+        def fit(self, X, y):
+            return self
+
+    n_samples, n_features = 120, 5
+    rng = np.random.default_rng(0)
+    X_train = rng.normal(size=(n_samples, n_features))
+    y_train = rng.integers(0, 3, size=n_samples)
+    X_test = rng.normal(size=(20, n_features))
+    y_test = rng.integers(0, 3, size=20)
+
+    opt_cfg = OptimizeCfg()
+
+    with patch("train_models.BayesSearchCV", _FakeBayesSearchCV):
+        train_models.train_logistic(
+            X_train, X_test, y_train, y_test, cfg={}, optimize=True, opt_cfg=opt_cfg,
+        )
+
+    cv = captured["cv"]
+    assert isinstance(cv, TimeSeriesSplit), (
+        f"expected a TimeSeriesSplit, got {type(cv)} (bare int/K-fold leaks "
+        "future observations into earlier validation folds)"
+    )
+
+    # Every validation fold must occur strictly after its training fold.
+    for train_idx, test_idx in cv.split(X_train):
+        assert train_idx.max() < test_idx.min()
+
+
 def test_hybrid_prepare_data_has_embargo_gap(tmp_path):
     pytest.importorskip("torch")
     import train_hybrid
