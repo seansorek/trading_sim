@@ -3,7 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from unittest.mock import patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 # Make sure the script can find the data_loader module
@@ -144,6 +144,29 @@ def test_load_yfinance(mock_ticker, sample_dataframe):
     mock_instance.history.assert_called_with(start='2025-10-01', end='2025-10-02', interval='1d', actions=False, prepost=False)
     assert not df.isnull().values.any()
     assert 'spread' in df.columns
+
+@patch('yfinance.Ticker')
+def test_load_yfinance_single_request_uses_clamped_dates(mock_ticker, sample_dataframe):
+    """The single-request (non-chunked) path must use the clamped start/end,
+    not the caller's raw values (issue #120). A 30-day-old start with
+    interval='1m' (7-day history limit) clamps to 6 days ago, landing in the
+    single-request branch (6 <= chunk_days=6) with the un-clamped range
+    otherwise silently sent to Yahoo instead."""
+    mock_instance = MagicMock()
+    mock_instance.history.return_value = sample_dataframe
+    mock_ticker.return_value = mock_instance
+
+    now = datetime.now()
+    raw_start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    raw_end = now.strftime("%Y-%m-%d")
+    expected_start = (now - timedelta(days=6)).strftime("%Y-%m-%d")
+
+    load_yfinance('SPY', raw_start, raw_end, interval='1m')
+
+    called_kwargs = mock_instance.history.call_args.kwargs
+    assert called_kwargs['start'] == expected_start
+    assert called_kwargs['start'] != raw_start
+
 
 def test_load_csv(sample_dataframe, tmpdir):
     """Test loading data from a CSV file."""
