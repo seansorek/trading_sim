@@ -139,13 +139,22 @@ class PanelCfg:
     universe is stocks only — index/sector ETFs are baskets of the same names
     and must not be ranked against their own constituents.
     """
+
     universe: list[str] = field(default_factory=lambda: ["AAPL", "MSFT", "GOOGL"])
+    # sector name -> symbols. Flattened into `universe` at load time, so this is
+    # the single source of truth for both membership and sector identity. Empty
+    # means no sector data, and the panel falls back to un-neutralized ranking.
+    sectors: dict[str, list[str]] = field(default_factory=dict)
     decile: float = 0.1
     rebalance_days: int = 1
     gross_exposure: float = 1.0
     cost_bps: float = 5.0
     borrow_bps_annual: float = 50.0
     min_names: int = 20
+
+    def sector_of(self) -> dict[str, str]:
+        """symbol -> sector name. Empty when no sectors are configured."""
+        return {sym: name for name, syms in self.sectors.items() for sym in syms}
 
 
 @dataclass
@@ -170,6 +179,26 @@ def _merge(base: dict, override: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+def _panel_universe(panel_raw: dict) -> list[str]:
+    """Flatten panel.sectors into the traded universe.
+
+    `sectors` wins when present so membership and sector identity cannot drift;
+    an explicit `universe` list is still honoured for configs that predate
+    sectors. A symbol appearing in two sectors is a config error, not something
+    to silently de-duplicate — its sector-neutral weight would be ambiguous.
+    """
+    sectors = panel_raw.get("sectors") or {}
+    if not sectors:
+        return panel_raw.get(
+            "universe", PanelCfg.__dataclass_fields__["universe"].default_factory()
+        )
+    flat = [sym for syms in sectors.values() for sym in syms]
+    dupes = {s for s in flat if flat.count(s) > 1}
+    if dupes:
+        raise ValueError(f"panel.sectors lists these symbols more than once: {sorted(dupes)}")
+    return flat
 
 
 def load_config(path: str = "config/default.yaml") -> AppConfig:
@@ -202,9 +231,7 @@ def load_config(path: str = "config/default.yaml") -> AppConfig:
             max_model_age_days=prediction_raw.get("max_model_age_days", 30),
         ),
         panel=PanelCfg(
-            universe=panel_raw.get(
-                "universe", PanelCfg.__dataclass_fields__["universe"].default_factory()
-            ),
+            universe=_panel_universe(panel_raw),
             **{
                 k: v for k, v in panel_raw.items()
                 if k in PanelCfg.__dataclass_fields__ and k != "universe"

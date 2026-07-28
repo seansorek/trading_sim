@@ -35,8 +35,21 @@ backtesting and the live pipeline). `daily_predictor` is wired into `predict_nex
 and Discord alongside `daily_logistic`/`daily_xgboost` — see `models/README.md` → "Prediction vs.
 strategy" for the backtest comparison and honest caveats.
 ```bash
-python train_predictor.py --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,SPY,QQQ,IWM --days 2500
+python train_predictor.py --days 2500 --model enet
 ```
+
+`--symbols` defaults to a 10-name list for backwards compatibility; the deployed model is
+trained on the full 159-name `symbols` universe from `config/default.yaml`. Widening it is what
+made per-year out-of-sample IC stable (see `models/README.md` → "Universe width"), so pass the
+config universe when retraining for production:
+
+```bash
+python train_predictor.py --symbols "$(python -c 'from config import get_config; print(",".join(get_config().symbols))')" --days 2500 --model enet
+```
+
+`--train-end YYYY-MM-DD` pins the train/test split to a calendar date instead of the first 80%
+of history. Use it to hold out a fixed window — a fraction split slides whenever `--days` moves
+and therefore holds nothing out.
 
 ### 2. Backtest models
 
@@ -99,7 +112,7 @@ edit needed.
 
 | Config key | Purpose | Where used |
 |---|---|---|
-| `symbols` | Training + backtest universe (keep focused, ~10–20 liquid names) | `train_models.py`, `simulate_multi.py` |
+| `symbols` | Training + backtest universe — 159 names, mirroring `panel.sectors` plus SPY/QQQ/IWM | `train_models.py`, `train_predictor.py`, `simulate_multi.py` |
 | `prediction.symbols` | Daily prediction + Discord output (can be wider) | `predict_next_day_lite.py`, GitHub Actions |
 
 Both live in `config/default.yaml`.

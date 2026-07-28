@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from daily_features import FEATURE_COLS, FEATURE_SET_NAME
+from daily_features import FEATURE_COLS, FEATURE_SET_NAME, cs_feature_cols
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,10 @@ def _load_validated_pickle(
             f"[{name}] Pickle {path} missing keys: {missing}. Retrain."
         )
 
-    if "feature_contract" in required_keys and data["feature_contract"] != FEATURE_COLS:
+    # A cs_mode="augment" model legitimately carries 2x FEATURE_COLS. Both are
+    # derived from the same 30 base features, so neither is a stale contract.
+    valid_contracts = [FEATURE_COLS, cs_feature_cols("augment")]
+    if "feature_contract" in required_keys and data["feature_contract"] not in valid_contracts:
         pickle_fsn = data.get("feature_set_name")
         if pickle_fsn and pickle_fsn != FEATURE_SET_NAME:
             logger.warning(

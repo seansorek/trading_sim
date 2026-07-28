@@ -96,6 +96,78 @@ def _rolling_zscore(
     return (s - mean) / (std + 1e-12)
 
 
+# A date needs this many names before its cross-section is worth ranking. Below
+# it the rank is mostly an artifact of who happened to have a bar that day.
+MIN_CS_NAMES = 5
+
+# Suffix for the per-date-rank copy of a feature under CS_MODE "augment".
+CS_SUFFIX = "_cs"
+
+# How a model consumes the two normalization axes:
+#   off      — per-symbol rolling z-score only (FEATURE_COLS as computed)
+#   replace  — per-date rank only
+#   augment  — both, 2 * len(FEATURE_COLS) columns
+CS_MODES = ("off", "replace", "augment")
+
+
+def cs_feature_cols(mode: str, cols: list[str] | None = None) -> list[str]:
+    """The ordered feature contract a model trained under `mode` expects."""
+    cols = list(FEATURE_COLS if cols is None else cols)
+    if mode not in CS_MODES:
+        raise ValueError(f"cs_mode must be one of {CS_MODES}, got {mode!r}")
+    return cols + [c + CS_SUFFIX for c in cols] if mode == "augment" else cols
+
+
+def cross_sectional_normalize(
+    panel: pd.DataFrame,
+    cols: list[str] | None = None,
+    date_col: str = "_date",
+    min_names: int = MIN_CS_NAMES,
+    mode: str = "replace",
+) -> pd.DataFrame:
+    """Add or substitute each feature's per-date rank across the universe, in [-1, 1].
+
+    _rolling_zscore normalizes a feature against *its own symbol's* past 252
+    days, which answers "is AAPL's RSI high for AAPL?". A cross-sectional ranker
+    needs "is AAPL's RSI high versus every other name today?" — the two differ
+    whenever the universe moves together, which is most days. Under the
+    per-symbol axis a market-wide selloff pushes every name's ret_5d z-score to
+    -2 and the model sees a signal that the rank book, being location-invariant,
+    cannot trade.
+
+    Rank rather than a per-date z-score: it needs no outlier handling, it is
+    invariant to whatever per-symbol scaling came before, and it is the same
+    statistic the book itself uses to pick legs.
+
+    mode="replace" substitutes the rank for the original value. mode="augment"
+    keeps both, appending a `<feature>_cs` column per feature: the axes answer
+    different questions and which one carries the signal is per-feature and
+    unknown in advance, so letting the model weight them separately is strictly
+    more information than picking one. It costs twice the columns and heavily
+    correlated pairs, which is regularization's problem to handle.
+
+    Requires a long (row per date x symbol) frame with a `date_col`. Thin dates
+    are set to NaN rather than ranked; callers drop those rows.
+    """
+    if mode not in CS_MODES:
+        raise ValueError(f"mode must be one of {CS_MODES}, got {mode!r}")
+    cols = list(FEATURE_COLS if cols is None else cols)
+    out = panel.copy()
+    if mode == "off":
+        return out
+    # rank(pct=True) leaves NaN as NaN, so absent names do not occupy a rank.
+    ranks = 2.0 * out.groupby(date_col, sort=False)[cols].rank(pct=True) - 1.0
+    thin = np.asarray(out[date_col].map(out[date_col].value_counts()) < min_names)
+    ranks[thin] = np.nan
+    target = cols if mode == "replace" else [c + CS_SUFFIX for c in cols]
+    out[target] = ranks.values
+    if mode == "augment":
+        # A thin date has no usable cross-section at all; keeping its per-symbol
+        # half would let those rows survive the caller's dropna half-featured.
+        out.loc[thin, cols] = np.nan
+    return out
+
+
 def _safe_ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 

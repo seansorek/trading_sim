@@ -15,7 +15,12 @@ import pytest
 # Allow imports from parent directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_features import FEATURE_COLS, FEATURE_SET_NAME, make_daily_features
+from daily_features import (
+    FEATURE_COLS,
+    FEATURE_SET_NAME,
+    cs_feature_cols,
+    make_daily_features,
+)
 
 
 # Hard-coded expected list — if this test fails, you changed FEATURE_COLS.
@@ -139,10 +144,13 @@ def test_pickle_feature_contract_matches_constant():
             )
             continue
 
-        assert data["feature_contract"] == FEATURE_COLS, (
+        # A cs_mode="augment" model carries both normalization axes, so 2x the
+        # columns — still derived from the same 30 base features. Any other
+        # shape is a stale contract. Mirrors predictors.base._load_validated_pickle.
+        assert data["feature_contract"] in (FEATURE_COLS, cs_feature_cols("augment")), (
             f"{pkl_path.name}: feature_contract ({len(data['feature_contract'])} cols) "
-            f"does not match FEATURE_COLS ({len(FEATURE_COLS)} cols). "
-            "Retrain the model."
+            f"matches neither FEATURE_COLS ({len(FEATURE_COLS)} cols) nor its "
+            f"cs-augmented form ({2 * len(FEATURE_COLS)} cols). Retrain the model."
         )
         checked += 1
 

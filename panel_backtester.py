@@ -21,11 +21,55 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# Below this, a leg's mean beta is too close to zero to divide by — the scaling
+# needed to equalize exposures explodes. Fall back to dollar-neutral instead.
+MIN_LEG_BETA = 0.1
+
+# A sector needs this many names on a date for its mean to be worth subtracting.
+# Below it, demeaning mostly removes the names' own signal: with 2 names the
+# demeaned pair is always {+d, -d}, which is pure noise amplification.
+MIN_SECTOR_NAMES = 4
+
+
+def sector_neutralize(pred: pd.DataFrame, sector_of: dict[str, str]) -> pd.DataFrame:
+    """Subtract each (date, sector) mean from the predictions.
+
+    Ranking alone is neutral to a market-wide shift but not to a sector-wide
+    one: if the model likes Energy this week it will fill the long leg with
+    Energy and the book becomes a sector bet whose Sharpe is really one
+    sector's realized return. Demeaning within sector removes that level, so
+    names compete against their own sector rather than across sectors.
+
+    Symbols with no sector, and sectors with fewer than MIN_SECTOR_NAMES live
+    names on a date, are passed through unchanged — a noisy correction is worse
+    than none. NaNs stay NaN so panel_data's "not in the cross-section today"
+    convention survives.
+    """
+    if not sector_of:
+        return pred
+
+    groups = pd.Series(
+        [sector_of.get(c) for c in pred.columns], index=pred.columns
+    ).dropna()
+    if groups.empty:
+        return pred
+
+    out = pred.copy()
+    for sector, cols in groups.groupby(groups):
+        block = pred[list(cols.index)]
+        # Per date: subtract the mean, but only where the sector is well populated.
+        n_live = block.notna().sum(axis=1)
+        means = block.mean(axis=1).where(n_live >= MIN_SECTOR_NAMES, 0.0)
+        out[list(cols.index)] = block.sub(means, axis=0)
+    return out
+
+
 def rank_to_weights(
     pred_row: pd.Series,
     decile: float,
     gross_exposure: float,
     min_names: int,
+    beta_row: pd.Series | None = None,
 ) -> pd.Series:
     """Equal-weight long the top `decile` / short the bottom `decile` of one date.
 
@@ -33,8 +77,21 @@ def rank_to_weights(
     forecast for free: adding a constant to every prediction leaves the ranking
     unchanged. Sector neutrality is NOT provided (deferred increment).
 
-    Returns weights indexed like pred_row, 0.0 for untraded names. Dollar-neutral:
-    long notional == short notional == gross_exposure / 2.
+    Returns weights indexed like pred_row, 0.0 for untraded names.
+
+    Without `beta_row` the book is dollar-neutral: long notional == short
+    notional == gross_exposure / 2. Dollar neutrality does NOT imply market
+    neutrality — measured on the live panel the ranker puts higher-beta names in
+    the long leg, giving the equal-notional book a beta of +0.19 and failing the
+    panel_eval precondition.
+
+    With `beta_row` the two legs are instead sized so their beta exposures
+    cancel: L*bL == S*bS with L + S == gross_exposure. That trades dollar
+    neutrality (net notional is no longer 0) for beta neutrality, which is the
+    property the book actually needs — net notional was only ever a proxy for
+    it. Beta is estimated on a trailing window, so realized beta will not be
+    exactly zero; panel_eval's +/-0.1 band still does real work as a check that
+    the estimate held up out of sample.
     """
     weights = pd.Series(0.0, index=pred_row.index)
     valid = pred_row.dropna()
@@ -50,9 +107,19 @@ def rank_to_weights(
     shorts = ranked.index[:k]
     longs = ranked.index[-k:]
 
-    leg = gross_exposure / 2.0
-    weights.loc[longs] = leg / k
-    weights.loc[shorts] = -leg / k
+    long_notional = short_notional = gross_exposure / 2.0
+    if beta_row is not None:
+        b_long = beta_row.reindex(longs).mean()
+        b_short = beta_row.reindex(shorts).mean()
+        # Opposite-signed leg betas would make the equal-exposure solve produce
+        # a negative notional; that book is not constructible, so stay flat.
+        if pd.notna(b_long) and pd.notna(b_short) and b_long > MIN_LEG_BETA and b_short > MIN_LEG_BETA:
+            total_beta = b_long + b_short
+            long_notional = gross_exposure * b_short / total_beta
+            short_notional = gross_exposure * b_long / total_beta
+
+    weights.loc[longs] = long_notional / k
+    weights.loc[shorts] = -short_notional / k
     return weights
 
 
@@ -77,15 +144,25 @@ class PanelResult:
     diagnostics: dict = field(default_factory=dict)
 
 
-def run_panel(pred: pd.DataFrame, ret: pd.DataFrame, cfg: PanelConfig) -> PanelResult:
+def run_panel(
+    pred: pd.DataFrame,
+    ret: pd.DataFrame,
+    cfg: PanelConfig,
+    beta: pd.DataFrame | None = None,
+) -> PanelResult:
     """Run the cross-sectional book over the panel.
 
     LAG CONVENTION: weights on date t come from predictions computed on close[t],
     and earn ret[t], which panel_data defines as close[t] -> close[t+1]. The
     weight and the return it earns therefore share index t. Shifting either side
-    reintroduces the #106 look-ahead.
+    reintroduces the #106 look-ahead. `beta` follows the same convention: the row
+    at t is estimated on bars through t.
+
+    beta=None reproduces the original dollar-neutral book.
     """
     ret = ret.reindex(index=pred.index, columns=pred.columns)
+    if beta is not None:
+        beta = beta.reindex(index=pred.index, columns=pred.columns)
     dates = pred.index
 
     weight_rows: list[pd.Series] = []
@@ -96,15 +173,26 @@ def run_panel(pred: pd.DataFrame, ret: pd.DataFrame, cfg: PanelConfig) -> PanelR
     for i, date in enumerate(dates):
         if i % cfg.rebalance_days == 0:
             w = rank_to_weights(
-                pred.loc[date], cfg.decile, cfg.gross_exposure, cfg.min_names
+                pred.loc[date], cfg.decile, cfg.gross_exposure, cfg.min_names,
+                beta_row=None if beta is None else beta.loc[date],
             )
         else:
-            w = prev_w.copy()
+            # Hold, don't re-peg. prev_w already carries the drift from the
+            # position's own returns. Re-pegging to the original weights each
+            # day would silently require daily trading to maintain, while
+            # turnover — and therefore cost — is only charged on rebalance days.
+            # That understates cost in proportion to rebalance_days.
+            w = prev_w
         if (w == 0.0).all():
             n_flat += 1
         weight_rows.append(w)
+        # prev_w is the drifted book, so this is the trade actually required to
+        # reach the new target. Zero on hold days by construction.
         turnover_vals.append(float((w - prev_w).abs().sum()))
-        prev_w = w
+        # Carry into the next date: a position earning ret[t] is worth
+        # w * (1 + ret[t]) at t+1. Missing bars drift by 0, matching the
+        # skipna=True convention used for gross_ret below.
+        prev_w = w * (1.0 + ret.loc[date].fillna(0.0))
 
     weights = pd.DataFrame(weight_rows, index=dates)
     turnover = pd.Series(turnover_vals, index=dates)
@@ -129,6 +217,13 @@ def run_panel(pred: pd.DataFrame, ret: pd.DataFrame, cfg: PanelConfig) -> PanelR
         "mean_gross_exposure": float(weights.abs().sum(axis=1).mean()),
         "mean_net_exposure": float(weights.sum(axis=1).mean()),
     }
+    if beta is not None:
+        # Ex-ante book beta from the weights actually held. Compare against
+        # panel_eval's realized beta: a gap between them is estimation error in
+        # the trailing window, not a construction bug.
+        diagnostics["mean_ex_ante_beta"] = float(
+            (weights * beta).sum(axis=1, skipna=True).mean()
+        )
 
     return PanelResult(
         equity=equity,
