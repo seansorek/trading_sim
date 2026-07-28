@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from data_loader import load_yfinance
+from oos_guard import enforce_oos_start, get_artifact_train_end
 from simulation_pipeline import (
     Backtester,
     ExecutionConfig,
@@ -26,6 +27,40 @@ from simulation_pipeline import (
     build_strategy_signal,
     monte_carlo_stress,
 )
+
+# Default pickle path for each pretrained-model strategy, used to read the
+# artifact's train_end cutoff (see issue #115). daily_dqn is intentionally
+# excluded — its torch checkpoint doesn't carry the same metadata dict and
+# is covered separately.
+_STRATEGY_MODEL_PATHS = {
+    "daily_logistic": "models/daily_logistic.pkl",
+    "daily_xgboost": "models/daily_xgboost.pkl",
+    "daily_predictor": "models/daily_predictor.pkl",
+    "daily_hybrid": "models/daily_hybrid.pkl",
+}
+
+
+def _oos_trim_for_strategy(df, strategy_name: str, symbol: str):
+    """Trim `df` to rows after the strategy's pretrained-model train cutoff.
+
+    Returns `df` unchanged if the strategy has no known model path, the
+    model file doesn't exist, or the artifact predates the train_end field
+    (nothing to enforce in that case beyond a logged warning).
+    """
+    model_path = _STRATEGY_MODEL_PATHS.get(strategy_name)
+    if model_path is None or not os.path.exists(model_path):
+        return df
+    try:
+        import pickle
+        with open(model_path, "rb") as f:
+            artifact = pickle.load(f)
+    except Exception as exc:
+        logger.warning(
+            "oos_guard: could not read %s artifact %s: %s", strategy_name, model_path, exc
+        )
+        return df
+    train_end = get_artifact_train_end(artifact)
+    return enforce_oos_start(df, train_end, label=f"{symbol}/{strategy_name}")
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -60,6 +95,15 @@ def run_symbol_strategy(
         "trade_log_csv": f"{artifact_base}_trade_log.csv",
         "metrics_json": f"{artifact_base}_metrics.json",
     }
+
+    # Enforce out-of-sample date boundaries: never backtest a pretrained
+    # model over rows that were part of its training window (issue #115).
+    df = _oos_trim_for_strategy(df, strategy_name, symbol)
+    if df is None or len(df) < 30:
+        raise ValueError(
+            f"{symbol}/{strategy_name}: requested backtest range has no (or too few) "
+            "out-of-sample rows after the model's training cutoff + embargo."
+        )
 
     feats = df  # all registered strategies are daily_ and build features internally
 

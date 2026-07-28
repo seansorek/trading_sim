@@ -264,6 +264,8 @@ def _save_and_register(
         "label_map": LABEL_MAP,
         "confidence_threshold": confidence_threshold,
         "trained_at": datetime.now().isoformat(),
+        "train_start": start,
+        "train_end": end,
         "train_symbols": train_symbols,
         "train_accuracy": train_accuracy,
         "test_accuracy": test_accuracy,
