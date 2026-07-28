@@ -61,10 +61,34 @@ def test_prepare_data_has_embargo_gap(tmp_path):
     assert len(data["X_test"]) == expected_test_len
 
 
+def test_train_end_cuts_on_the_calendar_not_a_fraction(tmp_path):
+    """--train-end must pin the split to a date, and still purge the embargo.
+
+    The point of the flag is a holdout window that stays put when --days moves;
+    a cutoff that drifts with the history length holds nothing out."""
+    db = train_predictor.DB(str(tmp_path / "test.db"))
+    df = _make_price_df(n=500)
+    cutoff = pd.Timestamp("2023-01-03")
+
+    with patch("train_predictor._load_symbol", return_value=df):
+        data = train_predictor.prepare_data(
+            ["AAPL"], days=2000, db=db, train_end=str(cutoff.date())
+        )
+
+    train_dates = pd.DatetimeIndex(data["train_dates"])
+    test_dates = pd.DatetimeIndex(data["test_dates"])
+    assert train_dates.max() < cutoff
+    assert test_dates.min() > cutoff  # embargo: no row on the cutoff itself
+    assert len(train_dates) and len(test_dates)
+
+
 def test_forecast_metrics_constant_prediction_has_zero_ic():
-    """A model that collapses to a constant predictor (e.g. an over-regularized
-    XGBRegressor on a weak-signal target — observed empirically with this
-    feature set) must report IC=0, not NaN or a misleading spurious value."""
+    """A model that collapses to a constant predictor must report IC=0, not NaN
+    or a misleading spurious value.
+
+    Not hypothetical: train_xgb_regressor did exactly this for months with
+    gamma=1.0 against a squared-error loss on ~1e-2 returns, and this metric
+    reading 0.0 rather than NaN is what made it visible."""
     pred = np.zeros(50)
     actual = np.random.default_rng(0).normal(size=50)
     m = train_predictor._forecast_metrics(pred, actual)
@@ -294,3 +318,111 @@ def test_predictor_strategy_applies_one_bar_execution_lag():
     sig = strat.signal(None, df)
     assert sig.iloc[0] == 0, "shift(1) must force the first bar to HOLD"
     assert len(sig) == len(make_daily_features(df))
+
+
+# --- cross-sectional demeaned target ---------------------------------------
+
+def test_demean_removes_the_per_date_cross_sectional_mean(tmp_path):
+    db = train_predictor.DB(str(tmp_path / "demean.db"))
+    frames = {s: _make_price_df() for s in ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]}
+
+    def _fake_load(symbol, start, end, _db):
+        return frames.get(symbol)
+
+    with patch("train_predictor._load_symbol", side_effect=_fake_load):
+        plain = train_predictor.prepare_data(list(frames), days=900, db=db)
+        demeaned = train_predictor.prepare_data(list(frames), days=900, db=db, demean=True)
+
+    assert plain["demeaned"] is False and demeaned["demeaned"] is True
+    # Same rows, same features — only the target changes.
+    assert len(plain["y_train"]) == len(demeaned["y_train"])
+    np.testing.assert_allclose(plain["X_train"], demeaned["X_train"])
+
+    # Every date's demeaned target sums to ~0 across the cross-section.
+    by_date = pd.DataFrame(
+        {"date": demeaned["test_dates"], "y": demeaned["y_test"]}
+    ).groupby("date")["y"].mean()
+    np.testing.assert_allclose(by_date.values, 0.0, atol=1e-12)
+
+    # And the untouched version does not — otherwise the test proves nothing.
+    plain_by_date = pd.DataFrame(
+        {"date": plain["test_dates"], "y": plain["y_test"]}
+    ).groupby("date")["y"].mean()
+    assert np.abs(plain_by_date.values).max() > 1e-6
+
+
+def test_global_date_split_leaves_no_date_on_both_sides(tmp_path):
+    """The per-symbol split this replaced put one symbol's test dates inside
+    another's train window whenever their histories differed in length."""
+    db = train_predictor.DB(str(tmp_path / "split.db"))
+    long_df = _make_price_df()
+    short_df = long_df.iloc[60:].copy()   # deliberately ragged
+
+    def _fake_load(symbol, start, end, _db):
+        return long_df if symbol in ("AAA", "SPY") else short_df
+
+    with patch("train_predictor._load_symbol", side_effect=_fake_load):
+        data = train_predictor.prepare_data(["AAA", "BBB"], days=900, db=db)
+
+    assert len(data["used_symbols"]) == 2
+    assert data["test_dates"].min() > data["train_dates"].max()
+
+
+# --- cross-sectionally normalized features ----------------------------------
+
+def test_cs_normalize_replaces_features_with_per_date_ranks(tmp_path):
+    db = train_predictor.DB(str(tmp_path / "csnorm.db"))
+    # Distinct seeds: identical frames would tie on every rank and prove nothing.
+    frames = {
+        s: _make_price_df(seed=40 + i)
+        for i, s in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"])
+    }
+
+    def _fake_load(symbol, start, end, _db):
+        return frames.get(symbol)
+
+    with patch("train_predictor._load_symbol", side_effect=_fake_load):
+        plain = train_predictor.prepare_data(list(frames), days=900, db=db)
+        ranked = train_predictor.prepare_data(
+            list(frames), days=900, db=db, cs_mode="replace"
+        )
+
+    assert plain["cs_mode"] == "off" and ranked["cs_mode"] == "replace"
+    # Rolling z-scores are unbounded; ranks live in [-1, 1].
+    assert np.abs(plain["X_train"]).max() > 1.0
+    assert np.abs(ranked["X_train"]).max() <= 1.0
+    # Each date's ranks of one feature are evenly spaced across the names present.
+    df = pd.DataFrame({"date": ranked["test_dates"], "f0": ranked["X_test"][:, 0]})
+    grp = df.groupby("date")["f0"]
+    full = grp.filter(lambda g: len(g) == len(frames))
+    assert len(full) > 0
+    for _, vals in full.groupby(df.loc[full.index, "date"]):
+        np.testing.assert_allclose(
+            np.sort(vals.values), np.linspace(2.0 / len(frames) - 1.0, 1.0, len(frames)),
+            rtol=1e-5,
+        )
+
+
+def test_augment_mode_keeps_both_axes_side_by_side(tmp_path):
+    db = train_predictor.DB(str(tmp_path / "augment.db"))
+    frames = {
+        s: _make_price_df(seed=50 + i)
+        for i, s in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"])
+    }
+
+    def _fake_load(symbol, start, end, _db):
+        return frames.get(symbol)
+
+    with patch("train_predictor._load_symbol", side_effect=_fake_load):
+        plain = train_predictor.prepare_data(list(frames), days=900, db=db)
+        aug = train_predictor.prepare_data(
+            list(frames), days=900, db=db, cs_mode="augment"
+        )
+
+    n = len(train_predictor.FEATURE_COLS)
+    assert plain["X_train"].shape[1] == n
+    assert aug["X_train"].shape[1] == 2 * n
+    assert aug["feature_cols"][n:] == [c + "_cs" for c in train_predictor.FEATURE_COLS]
+    # First half is the untouched per-symbol axis, second half the per-date ranks.
+    np.testing.assert_allclose(aug["X_train"][:, :n], plain["X_train"])
+    assert np.abs(aug["X_train"][:, n:]).max() <= 1.0

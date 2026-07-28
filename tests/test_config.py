@@ -245,3 +245,25 @@ def test_panel_universe_is_wide_and_unique():
     cfg = load_config("config/default.yaml")
     assert len(cfg.panel.universe) >= 100, "panel needs breadth to be worth running"
     assert len(cfg.panel.universe) == len(set(cfg.panel.universe)), "duplicate symbols"
+
+
+def test_panel_sectors_flatten_into_the_universe():
+    from config import _panel_universe, load_config
+
+    cfg = load_config("config/default.yaml")
+    # A floor, not an exact count: names legitimately leave the universe when they
+    # delist (HES, 2026-07-28), and an exact figure turns that into a test failure
+    # while still not catching the thing worth catching — a mass deletion.
+    assert len(cfg.panel.universe) >= 150
+    assert len(cfg.panel.universe) == len(set(cfg.panel.universe))
+    # Every traded symbol has a sector — that is what makes neutralization total.
+    sector_of = cfg.panel.sector_of()
+    assert all(s in sector_of for s in cfg.panel.universe)
+
+    # A symbol in two sectors has an ambiguous neutral weight: fail loudly.
+    import pytest
+    with pytest.raises(ValueError, match="more than once"):
+        _panel_universe({"sectors": {"A": ["AAPL", "MSFT"], "B": ["AAPL"]}})
+
+    # Configs predating sectors still work.
+    assert _panel_universe({"universe": ["AAPL", "SPY"]}) == ["AAPL", "SPY"]

@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from daily_features import FEATURE_COLS
 from panel_data import build_panels, MAX_LOAD_FAILURE_FRAC
 
 
@@ -101,3 +102,91 @@ def test_raises_when_too_much_of_the_universe_fails_to_load():
             symbols, "2020-01-01", "2021-12-31", db=None,
             predictor=FakePredictor(), load_fn=_loader(bars),
         )
+
+
+class CSFakePredictor(FakePredictor):
+    """Same scorer, but flagged as trained on cross-sectionally ranked features."""
+
+    cs_mode = "replace"
+
+
+class AugFakePredictor:
+    """Scores the first per-date-rank column, i.e. the start of the second axis.
+
+    Not the last column: without spy_df the ret_*_vs_spy features are constant
+    0.0, so their ranks are all ties and would prove nothing.
+    """
+
+    cs_mode = "augment"
+
+    def predict(self, X):
+        return X[:, len(FEATURE_COLS)].astype(float), None
+
+
+def _six_symbol_bars():
+    return {f"S{i}": _make_bars(n=400, seed=20 + i) for i in range(6)}
+
+
+def test_cs_normalized_model_gets_per_date_ranks_not_raw_features():
+    bars = _six_symbol_bars()
+    out = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=CSFakePredictor(), load_fn=_loader(bars),
+    )
+    # FakePredictor scores X[:, 0], so every score IS the rank of ret_1d.
+    full = out.pred.dropna()
+    assert len(full) > 100
+    np.testing.assert_allclose(full.max(axis=1).values, 1.0)
+    # 6 names -> ranks evenly spaced from 2*(1/6)-1 to 1.0
+    expected = np.linspace(2.0 / 6 - 1.0, 1.0, 6)
+    for _, row in full.iterrows():
+        np.testing.assert_allclose(np.sort(row.values), expected)
+
+
+def test_predictor_without_the_flag_still_sees_raw_features():
+    bars = _six_symbol_bars()
+    raw = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=FakePredictor(), load_fn=_loader(bars),
+    )
+    ranked = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=CSFakePredictor(), load_fn=_loader(bars),
+    )
+    assert raw.pred.shape == ranked.pred.shape
+    assert not np.allclose(raw.pred.dropna().values, ranked.pred.dropna().values)
+    # Raw z-scores are unbounded; ranks are not.
+    assert raw.pred.abs().max().max() > 1.0
+
+
+def test_cs_mode_argument_overrides_the_models_own_setting():
+    bars = _six_symbol_bars()
+    forced = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=CSFakePredictor(), load_fn=_loader(bars), cs_mode="off",
+    )
+    assert forced.pred.abs().max().max() > 1.0
+
+
+def test_augment_mode_serves_both_axes_in_contract_order():
+    """60 columns: the 30 per-symbol z-scores, then their 30 per-date ranks."""
+    bars = _six_symbol_bars()
+    seen = {}
+
+    class Recorder(AugFakePredictor):
+        def predict(self, X):
+            seen["shape"] = X.shape
+            return super().predict(X)
+
+    out = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=Recorder(), load_fn=_loader(bars),
+    )
+    assert seen["shape"][1] == 2 * len(FEATURE_COLS)
+    # Column 30 is a rank, so scores are bounded; the raw axis is not.
+    assert out.pred.abs().max().max() == 1.0
+    raw = build_panels(
+        list(bars), "2020-01-01", "2021-12-31", db=None,
+        predictor=FakePredictor(), load_fn=_loader(bars),
+    )
+    assert raw.pred.abs().max().max() > 1.0

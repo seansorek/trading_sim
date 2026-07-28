@@ -2,16 +2,18 @@ import numpy as np
 import pandas as pd
 
 from panel_backtester import PanelConfig
+from panel_eval import CONFIG_GRID
 from run_panel import run_grid
 
 
 class _FakePanel:
-    def __init__(self, pred, ret):
+    def __init__(self, pred, ret, beta=None):
         self.pred = pred
         self.ret = ret
         self.close = pred
         self.symbols = list(pred.columns)
         self.dropped = {}
+        self.beta = beta
 
 
 def test_run_grid_runs_every_config_and_returns_a_verdict():
@@ -24,6 +26,6 @@ def test_run_grid_runs_every_config_and_returns_a_verdict():
 
     out = run_grid(_FakePanel(pred, ret), PanelConfig(min_names=5), spy_ret)
 
-    assert len(out["per_config"]) == 4
+    assert len(out["per_config"]) == len(CONFIG_GRID)
     assert "verdict" in out
     assert isinstance(out["passed"], bool)

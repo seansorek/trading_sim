@@ -7,7 +7,14 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from daily_features import FEATURE_COLS, FWD_RET_HORIZON_DAYS, discretize_labels, make_daily_features
+from daily_features import (
+    FEATURE_COLS,
+    FWD_RET_HORIZON_DAYS,
+    MIN_CS_NAMES,
+    cross_sectional_normalize,
+    discretize_labels,
+    make_daily_features,
+)
 
 
 def _synthetic_df(n: int = 150) -> pd.DataFrame:
@@ -156,3 +163,61 @@ def test_ad_normalized_bounded_std():
     vals = feats["ad_normalized"].dropna()
     std = float(vals.std())
     assert 0.1 < std < 5.0, f"ad_normalized std {std:.3f} looks wrong"
+
+
+# --- cross_sectional_normalize ---------------------------------------------
+
+def _long_panel(n_dates=3, n_syms=8, seed=3):
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2024-01-01", periods=n_dates)
+    rows = []
+    for d in dates:
+        for i in range(n_syms):
+            row = {c: float(rng.normal()) for c in FEATURE_COLS}
+            row["_date"] = d
+            row["_symbol"] = f"S{i}"
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_cross_sectional_normalize_ranks_within_date_to_pm_one():
+    out = cross_sectional_normalize(_long_panel())
+    assert out[FEATURE_COLS].min().min() > -1.0
+    assert out[FEATURE_COLS].max().max() == 1.0
+    for _, grp in out.groupby("_date"):
+        # 8 names -> pct ranks 1/8..8/8 -> -0.75..+1.0, evenly spaced
+        vals = np.sort(grp["ret_1d"].values)
+        np.testing.assert_allclose(vals, np.linspace(-0.75, 1.0, 8))
+
+
+def test_cross_sectional_normalize_is_invariant_to_a_market_wide_move():
+    """The whole point: a shift common to every name on a date changes nothing."""
+    panel = _long_panel(n_dates=2)
+    shifted = panel.copy()
+    day2 = shifted["_date"] == shifted["_date"].max()
+    shifted.loc[day2, FEATURE_COLS] += 10.0   # everyone gapped up together
+
+    base = cross_sectional_normalize(panel)
+    moved = cross_sectional_normalize(shifted)
+    pd.testing.assert_frame_equal(base[FEATURE_COLS], moved[FEATURE_COLS])
+
+
+def test_cross_sectional_normalize_compares_names_not_a_symbols_own_history():
+    """A name that is always the universe's best stays at +1 even as it decays."""
+    panel = _long_panel(n_dates=3, n_syms=6)
+    for i, (_, grp) in enumerate(panel.groupby("_date")):
+        panel.loc[grp.index, "ret_1d"] = np.arange(len(grp)) * 0.01 - i * 5.0
+    out = cross_sectional_normalize(panel)
+    best = out.loc[out.groupby("_date")["ret_1d"].idxmax()]
+    assert (best["ret_1d"] == 1.0).all()
+    assert (best["_symbol"] == "S5").all()
+
+
+def test_cross_sectional_normalize_nans_dates_with_too_few_names():
+    panel = _long_panel(n_dates=2, n_syms=MIN_CS_NAMES)
+    thin_date = panel["_date"].min()
+    panel = panel.drop(panel.index[panel["_date"] == thin_date][:1])  # one short
+
+    out = cross_sectional_normalize(panel)
+    assert out.loc[out["_date"] == thin_date, FEATURE_COLS].isna().all().all()
+    assert out.loc[out["_date"] != thin_date, FEATURE_COLS].notna().all().all()

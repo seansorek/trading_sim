@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from panel_backtester import rank_to_weights, PanelConfig, run_panel
+from panel_backtester import rank_to_weights, sector_neutralize, PanelConfig, run_panel
 
 
 def test_equal_weight_long_top_short_bottom():
@@ -126,8 +126,13 @@ def test_book_is_dollar_neutral_every_traded_day():
 
 
 def test_zero_turnover_charges_zero_cost():
-    """Constant predictions -> same weights every day -> no turnover after day 1."""
-    ret = _synthetic_panel(n_dates=100, n_symbols=20)
+    """Constant predictions AND flat returns -> nothing to trade after day 1.
+
+    Returns must be flat for this to hold: once positions drift, restoring the
+    target weights is a real trade even when the rankings never change. That
+    rebalancing turnover is asserted separately below.
+    """
+    ret = _synthetic_panel(n_dates=100, n_symbols=20) * 0.0
     const = pd.DataFrame(
         np.tile(np.arange(20, dtype=float), (100, 1)),
         index=ret.index, columns=ret.columns,
@@ -137,6 +142,22 @@ def test_zero_turnover_charges_zero_cost():
     # Day 1 establishes the book (turnover == gross); every later day is flat.
     assert res.turnover.iloc[0] == pytest.approx(1.0)
     assert res.turnover.iloc[1:].abs().max() == pytest.approx(0.0, abs=1e-12)
+    assert res.diagnostics["mean_cost"] == pytest.approx(
+        (1.0 * 5.0 / 1e4) / len(ret), rel=1e-9
+    )
+
+
+def test_drifted_positions_cost_turnover_to_restore():
+    """Same names, same ranks — but the weights moved, so the trade is real."""
+    ret = _synthetic_panel(n_dates=100, n_symbols=20)
+    const = pd.DataFrame(
+        np.tile(np.arange(20, dtype=float), (100, 1)),
+        index=ret.index, columns=ret.columns,
+    )
+    res = run_panel(pred=const, ret=ret, cfg=PanelConfig(min_names=5))
+    later = res.turnover.iloc[1:]
+    assert later.max() > 0            # drift has to be traded back
+    assert later.mean() < 0.2         # but it is far cheaper than a full re-book
 
 
 def test_borrow_accrues_on_short_notional_only():
@@ -165,3 +186,158 @@ def test_costs_reduce_returns_versus_gross():
                                                 borrow_bps_annual=50.0))
     assert charged.book_ret.mean() < free.book_ret.mean()
     pd.testing.assert_series_equal(free.gross_ret, charged.gross_ret)
+
+
+# --- beta neutralization ---------------------------------------------------
+
+def _pred_row(n=40):
+    return pd.Series(np.arange(n, dtype=float), index=[f"S{i:02d}" for i in range(n)])
+
+
+def test_beta_row_equalizes_leg_beta_exposure():
+    """The long leg holds the high-beta names; sizing must cancel the exposure."""
+    pred = _pred_row()
+    beta = pd.Series(np.linspace(0.5, 2.0, len(pred)), index=pred.index)
+    w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=beta)
+
+    assert float((w * beta).sum()) == pytest.approx(0.0, abs=1e-12)
+    assert w.abs().sum() == pytest.approx(1.0)      # gross preserved
+    assert w.sum() < 0                              # dollar neutrality traded away
+
+
+def test_without_beta_row_the_book_stays_dollar_neutral():
+    pred = _pred_row()
+    w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20)
+    assert w.sum() == pytest.approx(0.0)
+    assert w.abs().sum() == pytest.approx(1.0)
+
+
+def test_unusable_leg_beta_falls_back_to_dollar_neutral():
+    """A near-zero or negative leg beta must not blow up the notional solve."""
+    pred = _pred_row()
+    beta = pd.Series(0.0, index=pred.index)
+    w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=beta)
+    assert w.sum() == pytest.approx(0.0)
+    assert w.abs().sum() == pytest.approx(1.0)
+
+    nan_beta = pd.Series(np.nan, index=pred.index)
+    w2 = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=nan_beta)
+    assert w2.sum() == pytest.approx(0.0)
+
+
+def test_run_panel_with_beta_reports_near_zero_ex_ante_beta():
+    idx = pd.bdate_range("2021-01-01", periods=120)
+    cols = [f"S{i:02d}" for i in range(40)]
+    rng = np.random.default_rng(7)
+    pred = pd.DataFrame(rng.normal(size=(len(idx), len(cols))), index=idx, columns=cols)
+    ret = pd.DataFrame(rng.normal(0, 0.01, (len(idx), len(cols))), index=idx, columns=cols)
+    # Beta correlated with the prediction — the exact bias found on the live panel.
+    beta = 1.0 + 0.4 * pred
+
+    cfg = PanelConfig(decile=0.25, min_names=20)
+    with_beta = run_panel(pred, ret, cfg, beta=beta)
+    without = run_panel(pred, ret, cfg)
+
+    assert abs(with_beta.diagnostics["mean_ex_ante_beta"]) < 1e-9
+    assert "mean_ex_ante_beta" not in without.diagnostics
+
+
+# --- weight drift between rebalances ---------------------------------------
+
+def _flat_panel(n_dates=12, n_syms=40, ret_value=0.0):
+    idx = pd.bdate_range("2022-01-03", periods=n_dates)
+    cols = [f"S{i:02d}" for i in range(n_syms)]
+    rng = np.random.default_rng(3)
+    pred = pd.DataFrame(rng.normal(size=(n_dates, n_syms)), index=idx, columns=cols)
+    ret = pd.DataFrame(ret_value, index=idx, columns=cols)
+    return pred, ret
+
+
+def test_no_turnover_charged_on_hold_days():
+    pred, ret = _flat_panel()
+    res = run_panel(pred, ret, PanelConfig(decile=0.25, rebalance_days=5, min_names=20))
+    # Rebalance on i = 0, 5, 10; every other day is a hold.
+    held = [i for i in range(len(pred)) if i % 5 != 0]
+    assert res.turnover.iloc[held].abs().max() == pytest.approx(0.0)
+    assert res.turnover.iloc[0] > 0
+
+
+def test_weights_drift_with_returns_between_rebalances():
+    """A held long position that gains 10% is a bigger position tomorrow.
+
+    Re-pegging it to the original weight instead would require an untracked,
+    uncharged daily trade.
+    """
+    pred, ret = _flat_panel(ret_value=0.10)
+    res = run_panel(pred, ret, PanelConfig(decile=0.25, rebalance_days=5, min_names=20))
+
+    day0 = res.weights.iloc[0]
+    day1 = res.weights.iloc[1]
+    longs = day0[day0 > 0].index
+    np.testing.assert_allclose(day1[longs].values, day0[longs].values * 1.10, rtol=1e-12)
+
+
+def test_daily_rebalance_is_unaffected_by_the_drift_path():
+    """rebalance_days=1 never takes the hold branch, so prior results stand."""
+    pred, ret = _flat_panel(n_dates=40)
+    ret = ret + 0.001
+    cfg = PanelConfig(decile=0.25, rebalance_days=1, min_names=20)
+    res = run_panel(pred, ret, cfg)
+    for i in range(len(pred)):
+        target = rank_to_weights(pred.iloc[i], 0.25, cfg.gross_exposure, 20)
+        np.testing.assert_allclose(res.weights.iloc[i].values, target.values, atol=1e-12)
+
+
+# --- sector neutralization -------------------------------------------------
+
+def _sector_panel():
+    idx = pd.bdate_range("2023-01-02", periods=8)
+    cols = [f"T{i}" for i in range(5)] + [f"F{i}" for i in range(5)] + ["X0", "X1"]
+    rng = np.random.default_rng(21)
+    pred = pd.DataFrame(rng.normal(size=(len(idx), len(cols))), index=idx, columns=cols)
+    # A strong sector-level tilt: every Tech name is shifted up together.
+    pred[[c for c in cols if c.startswith("T")]] += 5.0
+    sector_of = {c: ("Tech" if c.startswith("T") else "Fin") for c in cols if not c.startswith("X")}
+    return pred, sector_of
+
+
+def test_sector_neutralize_zeroes_each_sector_mean_per_date():
+    pred, sector_of = _sector_panel()
+    out = sector_neutralize(pred, sector_of)
+    for sector in ("Tech", "Fin"):
+        cols = [c for c, s in sector_of.items() if s == sector]
+        np.testing.assert_allclose(out[cols].mean(axis=1).values, 0.0, atol=1e-12)
+
+
+def test_sector_tilt_no_longer_dominates_the_long_leg():
+    """The point of the whole exercise: a +5 tilt on Tech must stop buying Tech."""
+    pred, sector_of = _sector_panel()
+    tech = [c for c in pred.columns if c.startswith("T")]
+
+    raw_w = rank_to_weights(pred.iloc[0], decile=0.4, gross_exposure=1.0, min_names=5)
+    neu_w = rank_to_weights(
+        sector_neutralize(pred, sector_of).iloc[0], decile=0.4, gross_exposure=1.0, min_names=5
+    )
+    raw_long = raw_w[raw_w > 0]
+    neu_long = neu_w[neu_w > 0]
+    assert raw_long.index.isin(tech).all()        # every long is Tech
+    assert not neu_long.index.isin(tech).all()    # no longer
+
+
+def test_unmapped_symbols_and_thin_sectors_pass_through():
+    pred, sector_of = _sector_panel()
+    out = sector_neutralize(pred, sector_of)
+    # X0/X1 have no sector at all.
+    pd.testing.assert_frame_equal(out[["X0", "X1"]], pred[["X0", "X1"]])
+
+    # A 2-name sector is below MIN_SECTOR_NAMES and must be left alone.
+    thin = {"T0": "Tiny", "T1": "Tiny"}
+    pd.testing.assert_frame_equal(sector_neutralize(pred, thin), pred)
+
+
+def test_sector_neutralize_preserves_nan_and_is_a_noop_without_sectors():
+    pred, sector_of = _sector_panel()
+    pred.iloc[0, 0] = np.nan
+    out = sector_neutralize(pred, sector_of)
+    assert np.isnan(out.iloc[0, 0])
+    pd.testing.assert_frame_equal(sector_neutralize(pred, {}), pred)
