@@ -90,6 +90,9 @@ class OptimizeXGBoostBounds:
 class OptimizeCfg:
     n_iter: int = 25
     cv: int = 3
+    # Embargo gap (in samples) between each TimeSeriesSplit train/validation
+    # fold, to reduce leakage from rolling-window feature autocorrelation.
+    cv_gap: int = 0
     logistic: OptimizeLogisticBounds = field(default_factory=OptimizeLogisticBounds)
     xgboost: OptimizeXGBoostBounds = field(default_factory=OptimizeXGBoostBounds)
 
