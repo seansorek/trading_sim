@@ -290,7 +290,10 @@ def test_holding_period_blocks_rapid_flip():
     raw.iloc[8] = -1  # reversal at bar 8 — after holding period, should pass
 
     filtered = strat._apply_holding_period(raw)
-    assert filtered.iloc[2] == 0, "Bar 2 reversal should be suppressed within holding period"
+    assert filtered.iloc[2] == 1, (
+        "Bar 2 reversal is suppressed, so the long is carried — emitting 0 "
+        "here would execute as an exit, not as 'no trade'."
+    )
     assert filtered.iloc[8] == -1, "Bar 8 reversal should be allowed after holding period"
 
 
@@ -660,6 +663,193 @@ def test_daily_loss_limit_fires_on_daily_bars():
         "and full portfolio investment. This suggests the baseline is still "
         "resetting per calendar day."
     )
+
+
+# ---------------------------------------------------------------------------
+# Volatility-scaled stop-loss / take-profit
+# ---------------------------------------------------------------------------
+
+def _flat_then_drop_df(half_range: float, n: int = 30) -> pd.DataFrame:
+    """Price pinned at 100 through bar 24, then a 6% drop.
+
+    `half_range` sets high/low around the close and therefore ATR — the only
+    thing that differs between the two names in the test below.
+    """
+    idx = pd.date_range("2024-01-02", periods=n, freq="B", tz="UTC")
+    close = np.where(np.arange(n) < 25, 100.0, 94.0)
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close + half_range,
+            "low": close - half_range,
+            "close": close,
+            "volume": np.full(n, 1_000_000.0),
+        },
+        index=idx,
+    )
+
+
+def _stop_exits(df: pd.DataFrame, cfg: ExecutionConfig) -> int:
+    # Flat until bar 20 so ATR-14 is warm and stable before entry.
+    signal = pd.Series(0, index=df.index)
+    signal.iloc[20:] = 1
+    trades = _run(signal, df, cfg).trades
+    if trades.empty:
+        return 0
+    return int((trades["exit_reason"] == "stop_loss").sum())
+
+
+def test_stop_loss_scales_with_volatility():
+    """The same 6% drawdown stops out a quiet name and not a volatile one.
+
+    With the fixed pct alone (0.50, far too wide to fire) neither would exit,
+    so a stop_loss exit here can only come from the ATR-scaled barrier:
+    2 x ATR% is 1% for the quiet name and 16% for the volatile one.
+    """
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,        # deliberately too wide to ever fire
+        take_profit_pct=0.50,
+        stop_loss_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    quiet = _flat_then_drop_df(half_range=0.25)    # ATR% ~0.5% -> stop ~1%
+    volatile = _flat_then_drop_df(half_range=4.0)  # ATR% ~8%   -> stop ~16%
+
+    assert _stop_exits(quiet, cfg) >= 1, "quiet name should stop out on a 6% drop"
+    assert _stop_exits(volatile, cfg) == 0, "volatile name should absorb a 6% drop"
+
+
+def test_atr_mult_zero_keeps_fixed_pct_behaviour():
+    """The off path is the A/B baseline — it must stay exactly as it was."""
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,
+        take_profit_pct=0.50,
+        stop_loss_atr_mult=0.0,
+        take_profit_atr_mult=0.0,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    assert _stop_exits(_flat_then_drop_df(half_range=0.25), cfg) == 0
+    assert _stop_exits(_flat_then_drop_df(half_range=4.0), cfg) == 0
+
+
+# ---------------------------------------------------------------------------
+# Vertical barrier (max_holding_bars)
+# ---------------------------------------------------------------------------
+
+def test_vertical_barrier_forces_flat_at_horizon():
+    """A permanently-BUY signal is cut after max_holding_bars, not held forever."""
+    df = _make_df(40)
+    signal = pd.Series(1, index=df.index)
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,        # price barriers deliberately unreachable
+        take_profit_pct=0.50,
+        max_holding_bars=3,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    trades = _run(signal, df, cfg).trades
+    exits = trades[trades["exit_reason"] == "max_holding"]
+    assert len(exits) >= 1, "vertical barrier never fired on a permanent BUY"
+
+    # Entry on bar 0, exit on bar 3 — the position spans exactly the 3 bars of
+    # forward return the predictor is fit on.
+    ts = list(df.index)
+    first_entry = trades[trades["exit_reason"] == "signal"].index[0]
+    assert ts.index(exits.index[0]) - ts.index(first_entry) == 3
+
+
+def test_max_holding_bars_zero_holds_indefinitely():
+    """Off by default — the barrier must not fire when disabled."""
+    df = _make_df(40)
+    signal = pd.Series(1, index=df.index)
+    cfg = ExecutionConfig(
+        start_cash=100_000.0,
+        commission_per_share=0.0,
+        slippage_bps=0.0,
+        stop_loss_pct=0.50,
+        take_profit_pct=0.50,
+        max_holding_bars=0,
+        daily_loss_limit_pct=0.99,
+        max_position_pct=0.05,
+    )
+    trades = _run(signal, df, cfg).trades
+    assert (trades["exit_reason"] != "max_holding").all()
+
+
+# ---------------------------------------------------------------------------
+# Conviction sizing and volatility targeting
+# ---------------------------------------------------------------------------
+
+def _entry_shares(signal, df, cfg):
+    trades = _run(signal, df, cfg).trades
+    entries = trades[trades["exit_reason"] == "signal"]
+    assert not entries.empty
+    return int(entries.iloc[0]["shares"])
+
+
+def test_fractional_signal_sizes_the_position():
+    """A 0.5 target position buys half of what a 1.0 buys.
+
+    Regression test for the np.sign() in build_strategy_signal that used to
+    flatten every fractional signal to full size.
+    """
+    df = _make_df(30)
+    cfg = _default_cfg()
+    full = _entry_shares(pd.Series(1.0, index=df.index), df, cfg)
+    half = _entry_shares(pd.Series(0.5, index=df.index), df, cfg)
+    assert full > 0
+    assert half == pytest.approx(full / 2, abs=1)
+
+
+def test_vol_target_shrinks_size_on_a_volatile_name():
+    """Same signal, same price level — the noisier series gets fewer shares."""
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2024-01-02", periods=60, freq="B", tz="UTC")
+
+    def series(scale):
+        steps = rng.normal(0, scale, size=60)
+        close = 100.0 * np.exp(np.cumsum(steps) - np.cumsum(steps)[0])
+        return pd.DataFrame(
+            {"open": close, "high": close * 1.01, "low": close * 0.99,
+             "close": close, "volume": np.full(60, 1e6)}, index=idx,
+        )
+
+    cfg = ExecutionConfig(
+        start_cash=100_000.0, commission_per_share=0.0, slippage_bps=0.0,
+        stop_loss_pct=0.99, take_profit_pct=0.99, daily_loss_limit_pct=0.99,
+        max_position_pct=0.05, max_position=100_000, vol_target_annual=0.15,
+    )
+    # Enter late so the 20-bar realized-vol window is warm.
+    signal = pd.Series(0.0, index=idx)
+    signal.iloc[30:] = 1.0
+
+    quiet = _entry_shares(signal, series(0.002), cfg)
+    loud = _entry_shares(signal, series(0.02), cfg)
+    assert loud < quiet, f"volatile name should get fewer shares ({loud} vs {quiet})"
+
+
+def test_vol_target_zero_is_flat_notional():
+    """Off by default — sizing must not change when the target is 0."""
+    df = _make_df(60)
+    # Enter after the 20-bar vol window is warm; before it, both configs fall
+    # back to flat notional and the comparison would be vacuous.
+    signal = pd.Series(0.0, index=df.index)
+    signal.iloc[30:] = 1.0
+    off = ExecutionConfig(**{**_default_cfg().__dict__, "vol_target_annual": 0.0})
+    on = ExecutionConfig(**{**_default_cfg().__dict__, "vol_target_annual": 0.15})
+    assert _entry_shares(signal, df, off) != _entry_shares(signal, df, on)
 
 
 # ---------------------------------------------------------------------------

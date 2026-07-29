@@ -257,6 +257,9 @@ def main() -> None:
         slippage_bps=cfg.execution.slippage_bps,
         stop_loss_pct=cfg.execution.stop_loss_pct,
         take_profit_pct=cfg.execution.take_profit_pct,
+        stop_loss_atr_mult=cfg.execution.stop_loss_atr_mult,
+        take_profit_atr_mult=cfg.execution.take_profit_atr_mult,
+        max_holding_bars=cfg.execution.max_holding_bars,
         daily_loss_limit_pct=cfg.execution.daily_loss_limit_pct,
         max_position_pct=cfg.execution.max_position_pct,
     )

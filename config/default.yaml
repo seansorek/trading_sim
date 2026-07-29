@@ -224,8 +224,19 @@ execution:
   commission_per_share: 0.00005
   slippage_bps: 1.0
   max_position_pct: 0.05       # 5% of equity per trade.
-  stop_loss_pct: 0.05
-  take_profit_pct: 0.10
+  # Barriers scale with each name's own volatility: stop at 2x ATR-14 at entry,
+  # target at 4x (same 1:2 risk/reward as the fixed 5%/10% it replaces, but a
+  # comparable *number of typical moves* on SPY and TSLA rather than a
+  # comparable percentage). Set both to 0.0 to fall back to the fixed pcts
+  # below — that is the A/B baseline.
+  stop_loss_atr_mult: 2.0
+  take_profit_atr_mult: 4.0
+  stop_loss_pct: 0.05          # fallback: used when the *_atr_mult are 0, and
+  take_profit_pct: 0.10        # during the ATR-14 warmup window.
+  # Vertical barrier — force flat after 3 bars, matching
+  # daily_features.FWD_RET_HORIZON_DAYS, the horizon every predictor is fit on.
+  # Holding past it is a bet on nothing the model forecast. 0 disables.
+  max_holding_bars: 3
   daily_loss_limit_pct: 0.05
   holding_period_days: 5       # Minimum bars between position changes.
 

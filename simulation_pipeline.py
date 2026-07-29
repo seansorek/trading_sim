@@ -109,7 +109,12 @@ def build_strategy_signal(
     except TypeError:
         strat = strat_cls(cfg)
     sig = strat.signal(feats, df)
-    return pd.Series(np.sign(sig).astype(int), index=sig.index)
+    # Clip, don't np.sign. A strategy may return a fractional target position in
+    # [-1, 1] to express conviction; np.sign() here silently flattened every
+    # such signal to full size, so sizing was unreachable no matter what the
+    # decision layer emitted. Ternary strategies are unaffected — clipping
+    # {-1,0,1} is the identity.
+    return pd.Series(np.clip(sig.values.astype(float), -1.0, 1.0), index=sig.index)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +129,26 @@ class ExecutionConfig:
     max_position: int = 2000
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.10
+    # Volatility-scaled barriers. When > 0 these REPLACE the fixed pcts above
+    # with `mult * ATR%_at_entry`, so a 5% stop stops being a two-day move on
+    # TSLA and a quarterly event on SPY. 0.0 = off (fixed pct), which is what
+    # the dataclass defaults to so existing callers/tests are unchanged;
+    # config/default.yaml turns it on for real backtests. Keep the off path —
+    # it is the A/B baseline for judging whether the scaling helped.
+    stop_loss_atr_mult: float = 0.0
+    take_profit_atr_mult: float = 0.0
+    # Vertical barrier: force flat after this many bars in a position, 0 = off.
+    # The third leg of the triple barrier — with stop and target it bounds every
+    # trade in price and in time. Set it to the label horizon the predictor was
+    # fit on (daily_features.FWD_RET_HORIZON_DAYS); holding past that is a bet
+    # on nothing the model forecast.
+    max_holding_bars: int = 0
+    # Annualized volatility target. >0 scales each position by
+    # vol_target / realized_vol, so equal *risk* rather than equal *notional*
+    # goes into SPY and TSLA. 0.0 = off (flat max_position_pct notional).
+    # Deliberately separate from the strategy's conviction: they multiply, and
+    # keeping them independent is what lets each be measured on its own.
+    vol_target_annual: float = 0.0
     daily_loss_limit_pct: float = 0.05
     max_position_pct: float = 0.05
     holding_period_days: int = 0
@@ -136,6 +161,44 @@ class BacktestResult:
     metrics: Dict[str, Any]
 
 
+# Sanity band on the ATR% estimate before it is multiplied into a barrier.
+# A stale/degenerate bar can produce an ATR% of ~0 (stop fires on the entry
+# spread) or of 0.5 (no stop at all); neither is a volatility measurement.
+ATR_PCT_MIN = 0.005
+ATR_PCT_MAX = 0.10
+
+
+# Bounds on the vol-target multiplier. Unbounded, a quiet stretch levers the
+# book up arbitrarily on a realized-vol estimate that is about to be wrong.
+VOL_SCALE_MIN = 0.25
+VOL_SCALE_MAX = 3.0
+
+
+def _vol_scale_series(df: pd.DataFrame, target_annual: float) -> pd.Series:
+    """Causal position multiplier targeting a constant annualized volatility.
+
+    Realized vol from a 20-bar close-to-close window, shifted one bar so the
+    size traded on bar t is set by information available at t-1. NaN during
+    warmup — callers fall back to unscaled size there.
+    """
+    daily = df["close"].pct_change().rolling(20).std().shift(1)
+    annual = daily * np.sqrt(252.0)
+    return (target_annual / annual).clip(VOL_SCALE_MIN, VOL_SCALE_MAX)
+
+
+def _atr_pct_series(df: pd.DataFrame) -> pd.Series:
+    """Causal ATR-14 as a fraction of price, for volatility-scaled barriers.
+
+    Shifted one bar: the barrier active on bar t must not be sized by bar t's
+    own high/low, or a wide bar widens the stop that is supposed to catch it.
+    NaN during the warmup window — callers fall back to the fixed pct there.
+    """
+    from daily_features import _atr
+
+    prev_close = df["close"].shift(1)
+    return (_atr(df, 14).shift(1) / prev_close).clip(ATR_PCT_MIN, ATR_PCT_MAX)
+
+
 def _exit_position(
     position: int,
     avg_entry_price: float,
@@ -143,9 +206,14 @@ def _exit_position(
     spr: float,
     slippage: float,
     exec_cfg: ExecutionConfig,
+    stop_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ) -> Optional[tuple]:
     """
     Check stop-loss and take-profit exits.
+
+    `stop_pct` / `take_profit_pct` override the fixed ExecutionConfig values
+    (used to pass in volatility-scaled barriers); None means use the config.
 
     Returns (fill_price, cost_commission, cost_spread, reason) if exit triggered,
     else None.
@@ -153,11 +221,14 @@ def _exit_position(
     if position == 0 or avg_entry_price is None:
         return None
 
+    stop = exec_cfg.stop_loss_pct if stop_pct is None else stop_pct
+    target = exec_cfg.take_profit_pct if take_profit_pct is None else take_profit_pct
+
     pnl_pct = (mid - avg_entry_price) / avg_entry_price * np.sign(position)
 
-    if pnl_pct > exec_cfg.take_profit_pct:
+    if pnl_pct > target:
         reason = "take_profit"
-    elif pnl_pct < -exec_cfg.stop_loss_pct:
+    elif pnl_pct < -stop:
         reason = "stop_loss"
     else:
         return None
@@ -203,9 +274,24 @@ class Backtester:
         df = df.loc[signal.index]
         feats = feats.reindex(signal.index)
 
+        # Volatility-scaled barriers are sized once, at entry, and held for the
+        # life of the position — a stop that re-widens as vol rises is a stop
+        # that runs away from a losing trade.
+        vol_scaled = (
+            self.exec_cfg.stop_loss_atr_mult > 0
+            or self.exec_cfg.take_profit_atr_mult > 0
+        )
+        atr_pct = _atr_pct_series(df) if vol_scaled else None
+        vol_scale = (
+            _vol_scale_series(df, self.exec_cfg.vol_target_annual)
+            if self.exec_cfg.vol_target_annual > 0 else None
+        )
+
         cash = self.exec_cfg.start_cash
         position = 0
         avg_entry_price: Optional[float] = None
+        entry_atr_pct: Optional[float] = None
+        entry_bar: Optional[int] = None
         equity_curve: list[float] = []
         timestamps: list = []
         trade_log: list[dict] = []
@@ -215,7 +301,7 @@ class Backtester:
         # Cooldown: after a forced exit, suppress re-entry until signal returns to flat
         forced_exit_active = False
 
-        for ts, row in df.iterrows():
+        for bar_i, (ts, row) in enumerate(df.iterrows()):
             if ts.date() != current_day:
                 current_day = ts.date()
                 if prev_close is not None:
@@ -234,21 +320,27 @@ class Backtester:
             spr = max(float(raw_spr), 0.01)
             slippage = (self.exec_cfg.slippage_bps / 1e4) * mid
 
-            desired = int(signal.loc[ts])
+            # Fractional target position in [-1, 1] — 1.0 for ternary strategies,
+            # a conviction weight for strategies that size their signal.
+            desired = float(signal.loc[ts])
 
             # Cooldown logic: after forced exit, wait for signal to return to flat
             if forced_exit_active:
                 if desired == 0:
                     forced_exit_active = False
                 else:
-                    desired = 0  # suppress re-entry
+                    desired = 0.0  # suppress re-entry
 
             current_equity = cash + position * mid
             notional = current_equity * self.exec_cfg.max_position_pct
+            if vol_scale is not None:
+                s = vol_scale.get(ts, np.nan)
+                if not pd.isna(s):
+                    notional *= float(s)
             shares = int(notional / mid) if mid > 0 else 0
             shares = min(shares, self.exec_cfg.max_position)
 
-            target_pos = desired * shares
+            target_pos = int(desired * shares)
             delta = target_pos - position
 
             if delta != 0:
@@ -263,9 +355,20 @@ class Backtester:
                 # Weighted-average entry price — branch on trade type
                 if position == 0:
                     avg_entry_price = None
+                    entry_atr_pct = None
+                    entry_bar = None
                 elif old_position == 0 or np.sign(old_position) != np.sign(position):
                     # New position or full reversal: reset to current fill
                     avg_entry_price = fill_price
+                    entry_bar = bar_i
+                    # ponytail: barrier width is pinned at open and left alone
+                    # when adding to the position. Re-blending it the way
+                    # avg_entry_price is blended would be more consistent, but
+                    # adds are rare here (signal is ternary) — revisit with
+                    # conviction sizing, where partial adds become the norm.
+                    if atr_pct is not None:
+                        a = atr_pct.get(ts, np.nan)
+                        entry_atr_pct = None if pd.isna(a) else float(a)
                 elif abs(position) > abs(old_position):
                     # Adding to existing position: weighted average
                     old_shares = abs(old_position)
@@ -286,9 +389,19 @@ class Backtester:
                     "exit_reason": "signal",
                 })
 
-            # Stop-loss / take-profit check
+            # Stop-loss / take-profit check. entry_atr_pct is None both when
+            # vol scaling is off and during the ATR warmup — either way the
+            # fixed pct applies.
+            stop_pct = tp_pct = None
+            if entry_atr_pct is not None:
+                if self.exec_cfg.stop_loss_atr_mult > 0:
+                    stop_pct = self.exec_cfg.stop_loss_atr_mult * entry_atr_pct
+                if self.exec_cfg.take_profit_atr_mult > 0:
+                    tp_pct = self.exec_cfg.take_profit_atr_mult * entry_atr_pct
+
             exit_result = _exit_position(
-                position, avg_entry_price, mid, spr, slippage, self.exec_cfg
+                position, avg_entry_price, mid, spr, slippage, self.exec_cfg,
+                stop_pct=stop_pct, take_profit_pct=tp_pct,
             )
             if exit_result is not None:
                 fill_price, cost_commission, cost_spread, reason = exit_result
@@ -305,6 +418,39 @@ class Backtester:
                 })
                 position = 0
                 avg_entry_price = None
+                entry_atr_pct = None
+                entry_bar = None
+                forced_exit_active = True
+
+            # Vertical barrier: flat after max_holding_bars. Checked after the
+            # price barriers so a stop that lands on the final bar is still
+            # logged as a stop, and it sets the same re-entry cooldown — without
+            # that, a still-live signal would just re-enter next bar and the
+            # barrier would only churn commission.
+            if (
+                self.exec_cfg.max_holding_bars > 0
+                and position != 0
+                and entry_bar is not None
+                and bar_i - entry_bar >= self.exec_cfg.max_holding_bars
+            ):
+                side = int(-np.sign(position))
+                fill_price = mid + side * (spr / 2 + slippage)
+                cost_commission = self.exec_cfg.commission_per_share * abs(position)
+                cost_spread = (spr / 2) * abs(position)
+                cash -= fill_price * (-position) + cost_commission
+                trade_log.append({
+                    "ts": ts,
+                    "side": "SELL" if side < 0 else "BUY",
+                    "shares": abs(position),
+                    "fill_price": float(fill_price),
+                    "commission": float(cost_commission),
+                    "spread_cost": float(cost_spread),
+                    "exit_reason": "max_holding",
+                })
+                position = 0
+                avg_entry_price = None
+                entry_atr_pct = None
+                entry_bar = None
                 forced_exit_active = True
 
             # Daily loss limit (baseline = mark-to-market equity at day boundary)
@@ -327,6 +473,8 @@ class Backtester:
                     })
                     position = 0
                     avg_entry_price = None
+                    entry_atr_pct = None
+                    entry_bar = None
                     forced_exit_active = True
 
             equity = cash + position * mid

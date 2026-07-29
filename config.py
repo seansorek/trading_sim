@@ -21,6 +21,9 @@ class ExecutionCfg:
     max_position_pct: float = 0.05
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.10
+    stop_loss_atr_mult: float = 0.0    # >0 replaces the fixed pcts with mult * ATR%
+    take_profit_atr_mult: float = 0.0
+    max_holding_bars: int = 0          # >0 forces flat after N bars (vertical barrier)
     daily_loss_limit_pct: float = 0.05
     holding_period_days: int = 5
 
