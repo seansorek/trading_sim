@@ -73,6 +73,14 @@ def main() -> None:
         "--no-sector-neutral", action="store_true",
         help="Rank raw predictions instead of sector-demeaned ones (A/B comparison).",
     )
+    parser.add_argument(
+        "--conviction", action="store_true",
+        help=(
+            "Weight within each leg by distance from the cross-sectional centre "
+            "instead of equal-weighting. Leg notionals are preserved, so gross "
+            "exposure and beta neutrality are unchanged (A/B comparison)."
+        ),
+    )
     parser.add_argument("--output", default="results/panel_summary.json")
     args = parser.parse_args()
 
@@ -119,6 +127,7 @@ def main() -> None:
         cost_bps=args.cost_bps if args.cost_bps is not None else app_cfg.panel.cost_bps,
         borrow_bps_annual=app_cfg.panel.borrow_bps_annual,
         min_names=app_cfg.panel.min_names,
+        conviction=args.conviction,
     )
     out = run_grid(panel_data, base_cfg, spy_ret)
     out["ic"] = ic_report(panel_data.pred, panel_data.close, min_names=base_cfg.min_names)

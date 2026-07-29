@@ -30,6 +30,40 @@ MIN_LEG_BETA = 0.1
 # demeaned pair is always {+d, -d}, which is pure noise amplification.
 MIN_SECTOR_NAMES = 4
 
+# Conviction weights are clipped to [median/CAP, median*CAP] within a leg, so the
+# most-convicted name can hold at most CAP**2 = 4x the least-convicted one.
+# ponytail: a flat ratio cap, not a risk model. It bounds concentration without
+# needing a covariance estimate; if leg-level factor concentration turns out to
+# matter, that is the upgrade path, not a larger CAP.
+CONVICTION_CAP = 2.0
+
+
+def _leg_weights(leg_pred: pd.Series, center: float, notional: float,
+                 conviction: bool) -> pd.Series:
+    """Split `notional` across one leg's names.
+
+    Equal-weight unless `conviction`, in which case weight is proportional to
+    each name's capped distance from the date's cross-sectional center — the
+    panel analogue of the single-name decision layer sizing by how far a
+    prediction clears its own threshold.
+
+    The leg's total notional is preserved exactly either way, so conviction
+    redistributes *within* a leg and cannot disturb the beta- or
+    dollar-neutrality the two leg notionals encode, nor the gross exposure.
+    """
+    k = len(leg_pred)
+    if not conviction:
+        return pd.Series(notional / k, index=leg_pred.index)
+
+    score = (leg_pred - center).abs()
+    med = score.median()
+    if not (med > 0):
+        # Degenerate cross-section (every selected name at the center) — no
+        # conviction information to act on.
+        return pd.Series(notional / k, index=leg_pred.index)
+    score = score.clip(med / CONVICTION_CAP, med * CONVICTION_CAP)
+    return notional * score / score.sum()
+
 
 def sector_neutralize(pred: pd.DataFrame, sector_of: dict[str, str]) -> pd.DataFrame:
     """Subtract each (date, sector) mean from the predictions.
@@ -70,6 +104,7 @@ def rank_to_weights(
     gross_exposure: float,
     min_names: int,
     beta_row: pd.Series | None = None,
+    conviction: bool = False,
 ) -> pd.Series:
     """Equal-weight long the top `decile` / short the bottom `decile` of one date.
 
@@ -78,6 +113,10 @@ def rank_to_weights(
     unchanged. Sector neutrality is NOT provided (deferred increment).
 
     Returns weights indexed like pred_row, 0.0 for untraded names.
+
+    `conviction` weights within each leg by distance from the cross-sectional
+    center instead of equal-weighting; the leg notionals are unchanged, so every
+    neutrality property below still holds. See _leg_weights.
 
     Without `beta_row` the book is dollar-neutral: long notional == short
     notional == gross_exposure / 2. Dollar neutrality does NOT imply market
@@ -118,8 +157,11 @@ def rank_to_weights(
             long_notional = gross_exposure * b_short / total_beta
             short_notional = gross_exposure * b_long / total_beta
 
-    weights.loc[longs] = long_notional / k
-    weights.loc[shorts] = -short_notional / k
+    # Centre on the full cross-section, not the leg: a leg-local centre would
+    # make the boundary name's distance ~0 by construction on every date.
+    center = float(valid.median())
+    weights.loc[longs] = _leg_weights(valid.loc[longs], center, long_notional, conviction)
+    weights.loc[shorts] = -_leg_weights(valid.loc[shorts], center, short_notional, conviction)
     return weights
 
 
@@ -132,6 +174,7 @@ class PanelConfig:
     borrow_bps_annual: float = 50.0    # on short notional
     min_names: int = 20
     start_cash: float = 100_000.0
+    conviction: bool = False   # weight within each leg by conviction, not equally
 
 
 @dataclass
@@ -175,6 +218,7 @@ def run_panel(
             w = rank_to_weights(
                 pred.loc[date], cfg.decile, cfg.gross_exposure, cfg.min_names,
                 beta_row=None if beta is None else beta.loc[date],
+                conviction=cfg.conviction,
             )
         else:
             # Hold, don't re-peg. prev_w already carries the drift from the
