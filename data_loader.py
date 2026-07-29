@@ -249,7 +249,13 @@ def load_yfinance(symbol: str, start: str, end: str, interval: str = "5m") -> pd
     else:
         # Single request for small ranges
         ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start, end=end, interval=interval, actions=False, prepost=False)
+        df = ticker.history(
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+            interval=interval,
+            actions=False,
+            prepost=False,
+        )
     
     # Check if empty
     if df.empty:
