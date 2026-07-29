@@ -212,6 +212,14 @@ def prepare_data(
         "demeaned": demean,
         "cs_mode": cs_mode,
         "feature_cols": model_cols,
+        "train_start_date": str(pd.Timestamp(dates[0]).date()),
+        # The day before the first test date, not the last training date.
+        # oos_guard adds its embargo in *calendar* days while the split above
+        # purges FWD_RET_HORIZON_DAYS *trading* dates, so a weekend could let
+        # rows inside the last training label's horizon back into a backtest.
+        # Recording the conservative boundary makes that impossible; the cost
+        # is trimming at most two extra days from a holdout.
+        "train_end_date": str((pd.Timestamp(test_start_date) - pd.Timedelta(days=1)).date()),
     }
 
 
@@ -353,10 +361,20 @@ def _save_and_register(
     model_key: str = MODEL_KEY,
     feature_cols: list[str] | None = None,
     extra: dict | None = None,
+    train_start: str | None = None,
+    train_end: str | None = None,
 ) -> int:
     feature_cols = FEATURE_COLS if feature_cols is None else feature_cols
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    # `train_end` is what oos_guard reads to refuse in-sample backtest rows, so
+    # it must be the split boundary, not the wall clock. It defaulted to
+    # datetime.now() until 2026-07-28, which recorded "trained through today"
+    # for every model however it was actually split — making a --train-end
+    # holdout invisible to the guard, and any real holdout unenforceable.
+    end = datetime.now().strftime("%Y-%m-%d") if train_end is None else train_end
+    start = (
+        (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        if train_start is None else train_start
+    )
 
     # model_registry has columns shaped for classifiers (test_accuracy, test_f1);
     # repurposed here for directional accuracy and IC respectively rather than
@@ -498,7 +516,9 @@ def main() -> None:
         logger.info("Running walk-forward parameter sweep...")
         try:
             wf_config = WalkForwardConfig()
-            best_q, best_w = sweep_params(symbols, args.days, db, wf_config)
+            best_q, best_w = sweep_params(
+                symbols, args.days, db, wf_config, end=args.train_end
+            )
             logger.info("Parameter sweep complete: signal_quantile=%.2f threshold_window=%d", best_q, best_w)
         except Exception as exc:
             logger.warning("Parameter sweep failed: %s — using defaults (0.7, 60)", exc)
@@ -537,6 +557,8 @@ def main() -> None:
             best_threshold_window=best_w,
             model_key=args.model_key,
             feature_cols=data["feature_cols"],
+            train_start=data["train_start_date"],
+            train_end=data["train_end_date"],
             extra={
                 "demeaned_target": data["demeaned"],
                 "cs_mode": data["cs_mode"],
