@@ -48,6 +48,26 @@ def _spearman_ic(scores: np.ndarray, actuals: np.ndarray) -> float:
     return 0.0 if np.isnan(ic) else float(ic)
 
 
+def _prefetch_by_symbol(
+    records: list[dict], fetch_prices_fn: Callable, fwd_ret_horizon: int
+) -> dict[str, Optional["pd.DataFrame"]]:
+    """One fetch per symbol, spanning the full date range records need."""
+    by_symbol: dict[str, tuple[datetime, datetime]] = {}
+    for r in records:
+        d = datetime.strptime(r["date"], "%Y-%m-%d")
+        lo, hi = by_symbol.get(r["symbol"], (d, d))
+        by_symbol[r["symbol"]] = (min(lo, d), max(hi, d))
+
+    frames: dict[str, Optional["pd.DataFrame"]] = {}
+    for symbol, (lo, hi) in by_symbol.items():
+        end = hi + timedelta(days=fwd_ret_horizon * 2 + 10)
+        try:
+            frames[symbol] = fetch_prices_fn(symbol, lo.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        except Exception:
+            frames[symbol] = None
+    return frames
+
+
 def _signal_to_score(signal: str, confidence: float) -> float:
     """Map signal + confidence to a directional score for IC computation."""
     if signal == "BUY":
@@ -92,9 +112,15 @@ def score_realized_ic(
     for r in scoreable:
         by_model.setdefault(r["model"], []).append(r)
 
+    truncated_by_model: dict[str, list[dict]] = {
+        model: sorted(model_records, key=lambda r: r["date"])[-min_lookback:]
+        for model, model_records in by_model.items()
+    }
+    all_used_records = [r for recs in truncated_by_model.values() for r in recs]
+    frames = _prefetch_by_symbol(all_used_records, fetch_prices_fn, fwd_ret_horizon)
+
     results: dict[str, Optional[dict]] = {}
-    for model, model_records in by_model.items():
-        sorted_records = sorted(model_records, key=lambda r: r["date"])[-min_lookback:]
+    for model, sorted_records in truncated_by_model.items():
         if len(sorted_records) < min_lookback:
             logger.info(
                 "score_realized_ic: insufficient history for %s (%d < %d)",
@@ -107,18 +133,16 @@ def score_realized_ic(
         for r in sorted_records:
             symbol = r["symbol"]
             pred_date = datetime.strptime(r["date"], "%Y-%m-%d")
-            fetch_start = pred_date.strftime("%Y-%m-%d")
-            fetch_end = (pred_date + timedelta(days=fwd_ret_horizon * 2 + 10)).strftime("%Y-%m-%d")
-            try:
-                price_df = fetch_prices_fn(symbol, fetch_start, fetch_end)
-            except Exception:
+            price_df = frames.get(symbol)
+            if price_df is None:
                 continue
-            if price_df is None or len(price_df) < fwd_ret_horizon + 1:
+            window = price_df.loc[pred_date:]
+            if len(window) < fwd_ret_horizon + 1:
                 continue
             entry_price = float(r["price"])
             if entry_price <= 0:
                 continue
-            realized_price = float(price_df["close"].iloc[fwd_ret_horizon])
+            realized_price = float(window["close"].iloc[fwd_ret_horizon])
             realized_return = (realized_price / entry_price) - 1.0
             if abs(realized_return) < 1e-5:
                 continue
