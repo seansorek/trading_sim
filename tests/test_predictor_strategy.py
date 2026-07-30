@@ -146,14 +146,14 @@ class TestPredictorStrategy:
     def test_holding_period_is_enforced(self):
         df = _make_ohlcv(200)  # bumped from 100 — daily_v6 z-score needs ~110 warmup rows
         n = len(df)
-        # BUY signals at bars 0, 1, 2 — with holding_period=5, only first should fire
+        # BUY at bars 0-2 then flat. holding_period=5 pins the long open through
+        # bar 4 (one trade, not three), and releases it at bar 5.
         raw = np.array([1, 1, 1] + [0] * (n - 3), dtype=int)
         pred = _mock_predictor(raw.astype(float))
         dec = _mock_decision(raw)
         cfg = StrategyConfig(name="test", holding_period=5)
         strat = PredictorStrategy(cfg, pred, dec)
         sig = strat.signal(pd.DataFrame(), df)
-        # After shift(1): only bar 1 should be 1; bars 2 and 3 should be 0
-        assert sig.iloc[1] == 1
-        assert sig.iloc[2] == 0
-        assert sig.iloc[3] == 0
+        # After shift(1), sig[t] is the target position decided on bar t-1.
+        assert (sig.iloc[1:6] == 1).all(), "long held for the full holding period"
+        assert sig.iloc[6] == 0, "released once the holding period has elapsed"
