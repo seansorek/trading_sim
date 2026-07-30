@@ -134,9 +134,15 @@ def score_realized_ic(
 
         scores_arr = np.array(scores)
         actuals_arr = np.array(actuals)
+        directional = scores_arr != 0.0
+        n_dir = int(directional.sum())
         results[model] = {
             "ic": _spearman_ic(scores_arr, actuals_arr),
-            "directional_accuracy": float(np.mean(np.sign(scores_arr) == np.sign(actuals_arr))),
+            "directional_accuracy": (
+                float(np.mean(np.sign(scores_arr[directional]) == np.sign(actuals_arr[directional])))
+                if n_dir else 0.0
+            ),
+            "n_directional": n_dir,
             "lookback_n": len(scores),
             "mean_pred": float(scores_arr.mean()),
             "std_pred": float(scores_arr.std()),

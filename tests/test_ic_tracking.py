@@ -121,6 +121,28 @@ def test_score_realized_ic_excludes_near_zero_returns(tmp_path):
     assert result.get("daily_predictor") is None
 
 
+def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
+    """HOLD signals (score=0) must not count as directional misses."""
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    records = []
+    for i in range(20):
+        d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
+        # 10 correct BUYs, 10 HOLDs
+        signal = "BUY" if i < 10 else "HOLD"
+        records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
+                        "signal": signal, "confidence": 0.7, "price": 100.0})
+    path = _write_history(tmp_path, records)
+
+    def mock_fetch(symbol, start, end):
+        closes = [100.0] + [100.0] * (FWD_RET_HORIZON_DAYS - 1) + [101.0]
+        return _make_price_df_from_close(closes)
+
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
+    assert result["daily_predictor"]["directional_accuracy"] == pytest.approx(1.0)
+    assert result["daily_predictor"]["n_directional"] == 10
+
+
 def test_score_realized_ic_handles_missing_file(tmp_path):
     result = score_realized_ic(str(tmp_path / "nonexistent.jsonl"),
                                date.today().strftime("%Y-%m-%d"),
