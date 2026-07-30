@@ -167,7 +167,10 @@ symbols:
   - YUM
   - ZTS
 
-# Symbol universe for the daily prediction job and Discord notifications.
+# Per-symbol watchlist for the daily job. This is NOT the portfolio universe:
+# the target book is ranked over `panel.universe` (stocks only, below), and
+# these symbols only get the per-symbol BUY/SELL/HOLD sidecar. ETFs and
+# leveraged ETFs are fine here precisely because they never enter a ranking.
 # Edit `symbols` to change what gets sent to Discord — no workflow YAML edit needed.
 # Edit `models` to add/remove a model from the live pipeline — no code change needed
 # (predict_next_day_lite.py loads exactly this list; a model missing its pickle is
@@ -306,16 +309,24 @@ discord:
   enabled: true
   username: "Trading Sim"
 
-# Cross-sectional panel backtester (research-only — not part of the live
-# prediction path). See docs/superpowers/specs/2026-07-15-step3-panel-portfolio-design.md
+# Cross-sectional panel. Feeds BOTH the research backtest (run_panel.py) and
+# the live target book (portfolio.py, via predict_next_day_lite.py), so the
+# published book and the measured book share one set of knobs by construction.
+# See docs/superpowers/specs/2026-07-15-step3-panel-portfolio-design.md
 #
 # universe is STOCKS ONLY. Index/sector ETFs (SPY, QQQ, XL*) are baskets of
 # these same names — ranking a stock against a fund that holds it is not a
 # cross-sectional bet. SPY still loads for ret_*_vs_spy features and the
 # gate's beta regression, but is never ranked or held.
+#
+# decile/rebalance_days are the cell the yearly walk-forward held fixed
+# (models/README.md → "Yearly walk-forward"), not a grid search result:
+# run_panel.py sweeps panel_eval.CONFIG_GRID and overrides both, so these
+# values only ever configure the live book. rebalance_days=10 is load-bearing —
+# at 1 the same book turns over ~0.85/day and cost removes 1.4-2.7 Sharpe a year.
 panel:
-  decile: 0.1               # top/bottom fraction of the cross-section
-  rebalance_days: 1         # daily
+  decile: 0.2               # top/bottom fraction of the cross-section
+  rebalance_days: 10        # hold this many business days between re-rankings
   gross_exposure: 1.0       # 0.5 long + 0.5 short; net exposure 0
   cost_bps: 5.0             # one-way cost on turnover notional (ASSUMPTION, not a tunable)
   borrow_bps_annual: 50.0   # flat GC-style rate on short notional

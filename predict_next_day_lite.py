@@ -32,6 +32,14 @@ from db import DB
 from dqn_signal import gate_dqn_signal
 from hybrid_model import TransformerCfg, TransformerEncoder
 from ml_strategies import compute_predictor_signal
+from panel_data import rolling_beta
+from portfolio import (
+    append_book,
+    build_book,
+    format_book,
+    is_rebalance_due,
+    load_last_book,
+)
 from signal_monitor import score_realized_ic, check_signal_drift
 from predictors.base import _scale
 
@@ -239,7 +247,14 @@ def _predict_regressor_signal(
     last_signal = int(signals[-1])
     signal_name = _SIGNAL_NAMES[last_signal + 1]
     confidence = _regressor_confidence(pred_ret, tw)
-    return {"signal": signal_name, "confidence": confidence}
+    # predicted_return is the raw forecast, before any per-name threshold. The
+    # portfolio layer ranks on it: a cross-sectional decision needs the level,
+    # and signal/confidence have both already thrown that away.
+    return {
+        "signal": signal_name,
+        "confidence": confidence,
+        "predicted_return": float(pred_ret[-1]),
+    }
 
 
 def _load_hybrid_pkl(path: str) -> dict:
@@ -518,6 +533,21 @@ def predict_symbol(
     # Latest single-day input for sklearn models
     X_latest = X_all[-1:]
     result["price"] = float(df["close"].iloc[-1])
+
+    # Trailing beta vs SPY, for the portfolio layer's leg sizing. Same estimator
+    # panel_data uses, so the live book and the backtested book size their legs
+    # identically. SPY's own beta is 1 by construction and it is never ranked.
+    if spy_df is not None and symbol != "SPY":
+        try:
+            beta = rolling_beta(
+                feats["close"].astype(float).pct_change(),
+                spy_df["close"].astype(float).pct_change(),
+            ).iloc[-1]
+            if np.isfinite(beta):
+                result["beta"] = float(beta)
+        except Exception as exc:
+            logger.debug("Beta unavailable for %s: %s", symbol, exc)
+
     result["predictions"] = {}
     prediction_date = datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -689,6 +719,7 @@ def send_discord(
     ic_results: dict | None = None,
     drift_warnings: dict | None = None,
     stale_models: dict[str, int] | None = None,
+    book=None,
 ) -> bool:
     if not webhook_url:
         logger.warning("No Discord webhook URL — skipping notification")
@@ -777,6 +808,39 @@ def send_discord(
                 "color": color_map[sig_type],
             })
 
+    # Portfolio embed goes first: it is the output the cross-sectional
+    # walk-forward supports. Warning embeds still insert above it below.
+    if book is not None:
+        d = book.diagnostics
+        if book.is_flat:
+            body = f"_{d.get('reason', 'no position')}_"
+        else:
+            def leg(pairs: list) -> str:
+                return " ".join(f"`{s} {w:+.1%}`" for s, w in pairs)
+
+            body = (
+                f"**Long ({len(book.longs)})**\n{leg(book.longs)}\n\n"
+                f"**Short ({len(book.shorts)})**\n{leg(book.shorts)}\n\n"
+                f"gross {d.get('gross_exposure', 0):.2f} · "
+                f"net {d.get('net_exposure', 0):+.2f}"
+                + (f" · ex-ante β {d['ex_ante_beta']:+.3f}"
+                   if "ex_ante_beta" in d else "")
+                + f" · {d.get('n_ranked', 0)} ranked"
+                + ("\n⚠️ Net exposure is beyond the backtested range — leg betas "
+                   "diverged, so this book is a large dollar-directional bet "
+                   "despite its zero beta."
+                   if d.get("net_exposure_warning") else "")
+            )
+        if len(body) > 4096:
+            body = body[:4093] + "..."
+        embeds.insert(0, {
+            "title": (
+                f"◆ Portfolio — {'REBALANCE' if book.rebalanced else f'HOLD (as of {book.as_of})'}"
+            ),
+            "description": body,
+            "color": 0x5865F2 if book.rebalanced else 0x99AAB5,
+        })
+
     if drift_warnings:
         for model, warned in sorted(drift_warnings.items()):
             if warned:
@@ -841,6 +905,80 @@ def send_discord(
 
 
 # ---------------------------------------------------------------------------
+# Portfolio
+# ---------------------------------------------------------------------------
+
+# The book ranks on this model's forecast. It is a regressor, so its raw
+# `predicted_return` is a cross-sectionally comparable level; the classifiers
+# emit a discretized class whose ties would make a ranking meaningless.
+RANKING_MODEL = "daily_predictor"
+
+
+def build_portfolio(
+    predictions: list[dict],
+    rank_universe: list[str],
+    cfg,
+    prediction_date: str,
+    book_path: str,
+    rebalance_days_override: int | None = None,
+):
+    """Rank today's cross-section into a target book, or hold the current one.
+
+    Returns None when the portfolio is disabled or the ranking model is not
+    live — a missing book is a degraded run, not a failed one, so this never
+    raises past the per-symbol path.
+    """
+    if not rank_universe:
+        return None
+    if RANKING_MODEL not in cfg.prediction.models:
+        logger.warning(
+            "%s is not in prediction.models — no ranked portfolio this run",
+            RANKING_MODEL,
+        )
+        return None
+
+    rebalance_days = (
+        cfg.panel.rebalance_days if rebalance_days_override is None
+        else rebalance_days_override
+    )
+    last = load_last_book(book_path)
+    if not is_rebalance_due(None if last is None else last.as_of,
+                            prediction_date, rebalance_days):
+        logger.info(
+            "Holding book from %s — next rebalance after %d business days",
+            last.as_of, rebalance_days,
+        )
+        return last
+
+    rankable = set(rank_universe)
+    scores, betas = {}, {}
+    for pred in predictions:
+        symbol = pred.get("symbol")
+        if symbol not in rankable or "error" in pred:
+            continue
+        model_pred = pred.get("predictions", {}).get(RANKING_MODEL, {})
+        if "predicted_return" not in model_pred:
+            continue
+        scores[symbol] = model_pred["predicted_return"]
+        if "beta" in pred:
+            betas[symbol] = pred["beta"]
+
+    logger.info(
+        "Ranking %d/%d universe symbols (%d with a beta estimate)",
+        len(scores), len(rank_universe), len(betas),
+    )
+    return build_book(
+        scores,
+        as_of=prediction_date,
+        decile=cfg.panel.decile,
+        gross_exposure=cfg.panel.gross_exposure,
+        min_names=cfg.panel.min_names,
+        sector_of=cfg.panel.sector_of(),
+        betas=betas,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -863,17 +1001,35 @@ def main() -> None:
     parser.add_argument("--output", default="tomorrow_trades.json")
     parser.add_argument(
         "--history", default="predictions/history.jsonl",
-        help="Append-only JSONL file recording each day's predictions "
+        help="Append-only JSONL file recording each day's per-symbol predictions "
              "(tracked in git so it survives ephemeral CI runners; "
              "pass an empty string to skip writing it)"
     )
+    parser.add_argument(
+        "--book", default="predictions/portfolio.jsonl",
+        help="Append-only JSONL log of the target book. Tracked in git: it is "
+             "what the job holds between rebalances, so losing it means "
+             "rebalancing every day. Pass an empty string to skip the portfolio."
+    )
+    parser.add_argument(
+        "--rebalance-days", type=int, default=None,
+        help="Override panel.rebalance_days for this run. Mostly for forcing a "
+             "fresh book (--rebalance-days 1) when testing."
+    )
     args = parser.parse_args()
 
-    symbols = (
+    # Two universes with two jobs (see CLAUDE.md → Symbol universes):
+    #   panel.universe   — stocks only, ranked against each other into the book
+    #   prediction.symbols — the watchlist that gets per-symbol signals, and may
+    #                        hold ETFs, which must never enter the cross-section
+    watchlist = (
         [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
         if args.symbols
         else cfg.prediction.symbols
     )
+    rank_universe = [] if not args.book else list(cfg.panel.universe)
+    # Predict each symbol once; the two universes overlap heavily.
+    symbols = list(dict.fromkeys([*rank_universe, *watchlist]))
 
     db: Optional[DB] = None
     try:
@@ -931,10 +1087,21 @@ def main() -> None:
         logger.warning("Could not load SPY data for relative features: %s", exc)
 
     logger.info("Predicting for %d symbols using %d models...", len(symbols), len(models))
-    predictions = [
+    all_predictions = [
         predict_symbol(s, models, db=db, history_days=cfg.data.history_days, spy_df=spy_df)
         for s in symbols
     ]
+    by_symbol = {p["symbol"]: p for p in all_predictions}
+
+    # --- Portfolio: rank the cross-section into a target book ---
+    book = build_portfolio(
+        all_predictions, rank_universe, cfg, prediction_date,
+        book_path=args.book, rebalance_days_override=args.rebalance_days,
+    )
+
+    # Per-symbol reporting stays on the watchlist. The ranked universe is ~5x
+    # wider and exists to be ranked, not to be listed one name at a time.
+    predictions = [by_symbol[s] for s in watchlist if s in by_symbol]
 
     # --- Drift detection ---
     drift_warnings: dict = {}
@@ -958,9 +1125,17 @@ def main() -> None:
         except Exception as exc:
             logger.warning("Drift detection failed: %s", exc)
 
-    # Summary
+    # Summary — portfolio first: it is the output with cross-sectional
+    # evidence behind it (models/README.md → yearly walk-forward).
+    if book is not None:
+        prices = {p["symbol"]: p.get("price", 0.0) for p in all_predictions}
+        print("\n" + "=" * 50)
+        print("TARGET PORTFOLIO")
+        print("=" * 50)
+        print(format_book(book, prices))
+
     print("\n" + "=" * 50)
-    print("DAILY PREDICTIONS")
+    print("PER-SYMBOL SIGNALS (watchlist)")
     print("=" * 50)
     for pred in predictions:
         if "error" in pred:
@@ -976,18 +1151,36 @@ def main() -> None:
 
     # Write JSON artifact (for GitHub Actions)
     with open(args.output, "w") as f:
-        json.dump(predictions, f, indent=2)
-    logger.info("Saved predictions to %s", args.output)
+        json.dump(
+            {
+                "date": prediction_date,
+                "portfolio": None if book is None else {
+                    "as_of": book.as_of,
+                    "rebalanced": book.rebalanced,
+                    "weights": book.weights,
+                    "diagnostics": book.diagnostics,
+                },
+                "predictions": predictions,
+            },
+            f, indent=2,
+        )
+    logger.info("Saved portfolio + predictions to %s", args.output)
 
     # Append to durable predictions history (separate from the ephemeral DB)
     if args.history:
         n = append_predictions_history(predictions, args.history, prediction_date)
         logger.info("Appended %d records to %s", n, args.history)
 
+    # The book log is what tomorrow's run holds between rebalances — write it
+    # even on hold days so the cadence survives a lost or skipped run.
+    if book is not None and args.book:
+        append_book(args.book, book, prediction_date)
+        logger.info("Recorded book (as_of %s) in %s", book.as_of, args.book)
+
     # Discord notification
     webhook = os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("WEBHOOK_URL")
     if webhook:
-        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings, stale_models=stale):
+        if send_discord(predictions, webhook, ic_results=ic_results, drift_warnings=drift_warnings, stale_models=stale, book=book):
             logger.info("Discord notification sent.")
         else:
             logger.warning("Discord notification failed.")

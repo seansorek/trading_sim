@@ -678,6 +678,47 @@ per-symbol axis (+0.0046/+0.0055 on B, +0.0030/+0.0050 on C at 1d/3d), each |t| 
 and 1.3; pooling the two windows still lands near t ~ 1.3. Suggestive, unproven, and the
 cheaper of the two changes to keep.
 
+### The book went live — and what beta-neutral costs in net exposure (2026-07-30)
+
+`predict_next_day_lite.py` now publishes the ranked book as its headline output;
+`portfolio.py` builds it by calling `panel_backtester.rank_to_weights`, the same
+function `run_panel.py` measures. That equality was verified against the real
+pipeline, not just asserted: on 2026-07-30 the live path and
+`build_panels → sector_neutralize → rank_to_weights` produced **identical
+62-name books** — same names, same weights, net −0.716 both, betas equal to
+machine precision.
+
+The live book uses `panel.decile: 0.2` / `panel.rebalance_days: 10`, the cell the
+yearly walk-forward above held fixed. `run_panel.py` still sweeps the full
+`CONFIG_GRID` and overrides both, so these values only ever configure production.
+
+**Beta-neutrality is bought with net notional, and the mean hides how much.**
+Sizing the legs so `L·β_L = S·β_S` means that when the long leg's mean beta is
+*k* times the short leg's, the book holds *k* times more short notional. The
+panel diagnostics only ever reported `mean_net_exposure` (−0.12 over 2500 days,
+−0.22 over 1200). The per-date distribution at the live config is much wider:
+
+| decile | mean | p1 | p50 | p99 | min | max | \|net\| > 0.5 |
+|---|---|---|---|---|---|---|---|
+| 0.1 | −0.255 | −0.649 | −0.251 | +0.068 | −0.714 | +0.080 | 7.5% |
+| 0.2 | −0.217 | −0.618 | −0.198 | +0.011 | −0.641 | +0.024 | 5.7% |
+
+(1200 days, sector-neutralized, `rebalance_days=10`.)
+
+So a book with zero ex-ante beta can still be ~86% short and ~14% long in
+dollars, which is what 2026-07-30's −0.716 was — driven by leg betas spanning
+−0.43 (CB) to +3.48 (AMD). `portfolio.NET_EXPOSURE_WARN = 0.5` flags this in the
+logs, stdout, and Discord. It deliberately does **not** clamp: a clamp would make
+the published book differ from the measured one, which is the single property the
+shared `rank_to_weights` exists to guarantee.
+
+Unchanged by any of this: **the gate still FAILS.** Re-run on 1200 days gives
+DSR 0.263 (< 0.95), PBO 0.232, realized beta +0.030, best config (0.1, 10) at
+ann Sharpe +0.54. Publishing the book is an architecture change, not evidence of
+an edge — it makes the daily output match where the measurement says the signal
+lives (5/5 positive yearly IC on the cross-section) instead of where it says the
+signal does not (per-name timing, alpha −8.94%).
+
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay
 - **Actions**: `HOLD=0, LONG=1, SHORT=2` (mapped to `HOLD/BUY/SELL` in predictions)
