@@ -87,8 +87,8 @@ ordering held on the 157-name demeaned panel across two separate evaluation wind
 Do not compare the new `test_ic` (+0.0436) against the old pickle's (+0.0740) — different
 universes pool different numbers of rows into the test statistic, so those two figures are not
 on the same scale. The walk-forward above is the like-for-like comparison.
-| **Backtest Sharpe** | +0.16 avg (10-symbol, 365-day window, post look-ahead fix 2026-07-13; pre-fix was +0.27 on 700-day window) — the only positive Sharpe among the three live models; see PBO/DSR below |
-| **Average return** | +0.07% avg per round-trip (10-symbol, 365-day window, post-fix 2026-07-13; pre-fix was +0.18%) |
+| **Backtest Sharpe** | **Stale — measured under the one-bar-hold bug (see below).** Was +0.16 avg (10-symbol, 365-day window, post look-ahead fix 2026-07-13). Needs a rerun. |
+| **Average return** | **Stale — same reason.** Was +0.07% avg per round-trip. |
 | **Alpha vs. benchmark** | -8.94% avg; avg information ratio -0.62 (strategy underperforms buy-and-hold on most symbols over the 365-day post-fix window) |
 | **PBO (final, 2026-07-15)** | **0.228** (CPCV, 245 folds, 20 configs, 12870 combinations) — moderate-overfitting zone; better than `daily_v3` baseline of 0.514. IS-selected params expected to underperform OOS in ~23% of paths. |
 | **Median DSR (final, 2026-07-15)** | **0.776** across AAPL, MSFT, SPY, QQQ, NVDA — per-symbol DSR: AAPL=0.859, MSFT=0.776, SPY=0.580, QQQ=0.819, NVDA=0.724. Selected (q,w) per symbol: AAPL=(0.75,40), MSFT=(0.80,60), SPY=(0.80,100), QQQ=(0.75,60), NVDA=(0.75,40). |
@@ -149,6 +149,8 @@ See `docs/runbook.md` for the exact retraining commands.
 - `daily_xgboost_v<N>.pkl` — Versioned snapshots
 - `daily_hybrid.pkl` / `daily_hybrid_v<N>.pkl` — XGBoost-transformer hybrid, trained via `train_hybrid.py` (see [hybrid_model.py](../hybrid_model.py))
 - `daily_predictor.pkl` / `daily_predictor_v<N>.pkl` — Regression forecaster, trained via `train_predictor.py`. Pairs with `ml_strategies.DailyPredictorStrategy` as the decision layer — see "Prediction vs. strategy" below.
+- `daily_predictor_holdout.pkl` — **Research only, never deployed.** Same recipe as `daily_predictor` but `--train-end 2025-07-28`, carving a 12-month holdout. Exists so execution changes can be scored on data the model provably never saw; do not add to `prediction.models`, it deliberately ignores the last year.
+- `daily_predictor_holdoutB.pkl` — **Research only, never deployed.** `--train-end 2024-04-16`, so both the flat "window B" year and the favorable "window C" stretch are out of sample for it. This is the fit that regime-tests a result rather than just date-tests it — see "Window-B re-cut" below.
 - `dqn_agent.pt` — PyTorch DQN agent (optional; trained separately via `train_dqn.py`)
 
 Each classifier pickle contains: `model`, `scaler`, `feature_contract`, `confidence_threshold`, `label_map`, `trained_at`, `train_symbols`, and accuracy metrics. `daily_predictor.pkl` has the same shape minus the classification-specific fields — see its own section below.
@@ -268,6 +270,359 @@ rank of today's |predicted return| within its trailing window (see
 with the same skepticism as the backtest: a promising lead under active validation, not a
 proven edge.
 
+### Every single-name backtest before 2026-07-28 held each position for exactly one bar
+
+`BaseStrategy._apply_holding_period` zeroed suppressed bars. Its output is read by
+`Backtester` as a *target position*, not a per-bar trade instruction, so a zeroed
+continuation bar did not mean "no new trade" — it meant **go flat**. The method named for
+enforcing a *minimum* hold was enforcing a one-bar *maximum* hold followed by a
+`holding_period`-bar lockout.
+
+Measured on `daily_predictor`, 10 symbols, 365 days: every position, every symbol, ran for
+exactly 1 bar. With the filter disabled entirely, the raw decision layer produces runs of up
+to 15–16 bars. So the deployed strategy took a model fit on **3-day** forward returns, held
+**1 day**, paid a full round trip, and sat out the next four. Stop-loss and take-profit were
+unreachable by construction — across all 10 symbols, zero barrier exits ever fired.
+
+Fixed 2026-07-28: a suppressed bar now carries the position forward. The dwell clock restarts
+only on entries and reversals, not on exits — a flat state is not a position being held, and
+imposing a cooldown there would discard signal for no reason. Same signal model, same window,
+old rule vs. new:
+
+| | mean hold (bars) | mean Sharpe | mean return | mean IR | barrier exits |
+|---|---|---|---|---|---|
+| old (zero-out) | 1.0 | −1.31 | −0.230% | −0.515 | 0 |
+| new (carry-forward) | 6.6 | −0.53 | −0.081% | −0.506 | 11 |
+
+Better on Sharpe for 7 of 10 symbols. **Read this as a bug fix, not an edge.** Both columns
+are still negative, information ratio is unchanged to two decimals (the strategy remains worse
+than buy-and-hold), and this is a single 365-day window of ~129 usable bars per symbol on
+which `oos_guard` could not confirm out-of-sample boundaries. It says the previous numbers
+measured a broken execution path, not that the fixed path makes money.
+
+**Every single-name backtest figure recorded above this line predates the fix and was produced
+under the one-bar-hold behaviour.** The `daily_predictor` card's +0.16 Sharpe / +0.07% return
+included. The panel results are unaffected — `panel_backtester` never used this code path.
+
+Mean hold is now 6.6 bars against a 3-day label horizon, so the next question is a vertical
+barrier at the horizon rather than a longer dwell.
+
+### Volatility-scaled stop-loss / take-profit (2026-07-28)
+
+`ExecutionConfig.stop_loss_atr_mult` / `take_profit_atr_mult` replace the fixed 5%/10%
+barriers with `mult × ATR-14%` measured at entry (`config/default.yaml` sets 2×/4×, keeping
+the same 1:2 risk/reward). ATR is shifted one bar so a wide bar cannot widen the stop meant to
+catch it, clipped to a 0.5–10% sanity band, and pinned for the life of the position so the
+stop cannot run away from a losing trade. Setting both multipliers to `0.0` restores the fixed
+pcts and is the A/B baseline; the fixed pcts also apply during the ATR-14 warmup.
+
+Motivation: a flat 5% stop is a two-day move on TSLA and a quarterly event on SPY, which made
+the barrier a de facto per-symbol random exit rule. Measured against the *old* holding rule it
+changed nothing at all (identical Sharpe to four decimals, zero barrier exits either way) —
+no position lived long enough to reach any barrier. It only became live once that was fixed.
+
+### Vertical barrier (2026-07-28)
+
+`ExecutionConfig.max_holding_bars` forces flat after N bars in a position, completing the
+triple barrier: stop, target, clock. `config/default.yaml` sets 3, matching
+`daily_features.FWD_RET_HORIZON_DAYS` — holding past the horizon the model was fit on is a bet
+on nothing it forecast. Checked after the price barriers so a stop landing on the final bar is
+still logged as a stop, and it sets the same re-entry cooldown as the other forced exits;
+without that a still-live signal would re-enter next bar and the barrier would only churn
+commission. `0` disables it.
+
+### Execution decomposition (2026-07-28)
+
+Each change isolated as one increment, same signal model, 10 symbols, 365 days, means across
+symbols. `signal_run` is mean bars per non-zero signal run; `vert` counts vertical-barrier
+exits.
+
+| cell | Sharpe | return | IR | max DD | hit | trades | signal_run | stops | TPs | vert |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A baseline (pre-fix) | −1.311 | −0.230% | −0.515 | −0.383 | 0.359 | 17.5 | 1.00 | 0 | 0 | 0 |
+| B +holding fix | −0.654 | −0.131% | −0.511 | −0.666 | 0.487 | 19.9 | 6.61 | 16 | 4 | 0 |
+| C +ATR barriers | −0.534 | −0.081% | −0.506 | −0.644 | 0.502 | 20.1 | 6.61 | 10 | 1 | 0 |
+| D +vertical barrier | **−0.326** | −0.014% | −0.498 | −0.426 | 0.533 | 17.3 | 6.61 | 4 | 0 | 59 |
+| E D but holding_period=0 | −0.896 | −0.208% | −0.511 | −0.483 | 0.450 | 20.7 | 3.05 | 4 | 0 | 18 |
+
+Reading it:
+
+- **The holding fix is the dominant term** (A→B, +0.66 Sharpe), and the vertical barrier is
+  second (C→D, +0.21). ATR scaling is the smallest (B→C, +0.12) and works mostly by *widening*
+  barriers: stop exits fall 16→10 and take-profits 4→1, i.e. the fixed 5%/10% was cutting
+  trades that had not actually moved much in their own name's terms.
+- **B and C nearly double max drawdown** (−0.38 → −0.66). Holding a position for six bars
+  instead of one is more exposure, and the price barriers alone did not contain it. The
+  vertical barrier is what brings drawdown back (−0.43) — the clock, not the stop, is doing
+  the risk control.
+- **`holding_period` is NOT made redundant by the vertical barrier** (D→E, −0.57 Sharpe). The
+  prediction that the clock could replace the dwell filter was wrong: dropping it halves mean
+  signal-run to 3.05 and gives back more than the vertical barrier gained. The two rules do
+  different jobs — the dwell filter suppresses rapid reversals, the clock caps total exposure.
+
+**Caveat on this table:** it was run against a model whose training window covered the same
+dates, because `oos_guard` could not enforce a boundary (see the two bugs below). It is
+superseded by the holdout rerun in the next section.
+
+### A real holdout — `daily_predictor_holdout` (2026-07-28)
+
+Two bugs made every previous "out-of-sample" claim in this file unverifiable:
+
+1. **`_save_and_register` recorded `train_end = datetime.now()`**, ignoring `--train-end`
+   entirely. `oos_guard` reads exactly that field to refuse in-sample backtest rows, so a model
+   split at a fixed calendar date still advertised "trained through today". Fixed: the artifact
+   now records the split boundary returned by `prepare_data` (specifically the day before the
+   first test date — `oos_guard`'s embargo is in calendar days while the split purges
+   `FWD_RET_HORIZON_DAYS` *trading* dates, and a weekend could otherwise let rows inside the
+   last training label's horizon back in).
+2. **The `(signal_quantile, threshold_window)` sweep ran over all history.**
+   `walk_forward.build_fold_data` hardcoded `end = now()`, so the decision layer was tuned on
+   the holdout even when the prediction model was not. `build_fold_data` and `sweep_params`
+   now take an `end` bound, and `train_predictor` passes `--train-end` through.
+
+`models/daily_predictor_holdout.pkl` — ElasticNet, 159 symbols, `--days 2500
+--train-end 2025-07-28`. Train 214 014 rows through 2025-07-28, embargo 3 dates, test 38 955
+rows from 2025-07-31. The sweep, now bounded, still picks (0.80, 40).
+
+| | value |
+|---|---|
+| Holdout pooled IC | **+0.0280** |
+| Holdout cross-sectional IC | **+0.0298** (IR +0.162 over 245 dates) |
+| Holdout directional accuracy | 0.5190 |
+| Holdout R² | −0.0057 |
+
+Do not compare +0.0280 against the deployed model's +0.0436 — different test windows pool
+different rows, the same trap flagged for the Ridge→ElasticNet swap. This is simply the first
+IC figure for this model measured on data it provably never saw.
+
+The same five-cell decomposition, rerun on that holdout (10 symbols, 245 dates). Features are
+built on full history so the `daily_v6` z-scores get their ~110-bar warmup, then `df` and
+signal are sliced to the holdout — features at `t` use only data ≤ `t`, so the longer history
+cannot leak, whereas trimming *before* feature construction (what `_oos_trim_for_strategy`
+does) hands the backtester ~110 bars of half-warmed features.
+
+| cell | Sharpe | return | IR | max DD | hit | trades | signal_run | stops | TPs | vert | beats A |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A baseline (pre-fix) | −0.193 | −0.101% | −0.756 | −0.520 | 0.447 | 45.6 | 1.00 | 0 | 0 | 0 | — |
+| B +holding fix | +0.028 | +0.008% | −0.752 | −0.884 | 0.520 | 53.0 | 5.61 | 24 | 4 | 0 | 4/10 |
+| C +ATR barriers | +0.211 | +0.186% | −0.747 | −0.792 | 0.522 | 53.7 | 5.61 | 20 | 2 | 0 | 6/10 |
+| D +vertical barrier | **+0.510** | +0.192% | −0.741 | −0.636 | 0.583 | 44.0 | 5.61 | 4 | 1 | 166 | **8/10** |
+| E D but holding_period=0 | −0.188 | −0.108% | −0.758 | −0.694 | 0.517 | 55.5 | 2.58 | 4 | 1 | 52 | 5/10 |
+
+The A < B < C < D ordering replicates on clean data, and holds up better than it did in the
+window above: D crosses into positive Sharpe and beats baseline on 8 of 10 symbols rather than
+6. E again confirms the vertical barrier does not replace `holding_period`.
+
+**What is still not established.** Information ratio is ≈ −0.75 in every cell and barely moves
+across the ladder — against buy-and-hold the strategy loses, and none of these execution
+changes touch that. Max drawdown is *worse* than baseline everywhere (−0.52 → −0.64 at D);
+holding six bars instead of one is simply more exposure, and the clock only partly contains it.
+And this is one 245-date holdout in one regime. The yearly walk-forward below shows 2024 with
+positive IC and negative gross Sharpe, so a favorable stretch proves little; the honest read is
+that the execution path is now coherent and the ladder is real, not that the strategy makes
+money.
+
+### Conviction sizing vs volatility targeting (2026-07-28)
+
+`build_strategy_signal` used to wrap every strategy's output in `np.sign()`, so a fractional
+target position was flattened to full size and sizing was unreachable no matter what a decision
+layer emitted. It now clips to [-1, 1] instead (identity for ternary strategies), and:
+
+- `compute_predictor_signal(..., conviction=True)` returns the *same triggers and signs* as a
+  float scaled by how far the prediction clears its own rolling threshold
+  (`|pred| / (2 x thr)`, capped at 1). Only magnitude differs, so the modes are directly
+  comparable. The live path uses the default int mode and is untouched.
+- `ExecutionConfig.vol_target_annual` scales notional by `target / realized_vol` (20-bar,
+  shifted one bar, multiplier clipped to [0.25, 3.0]) — equal risk rather than equal notional.
+  Deliberately independent of conviction so each can be measured alone.
+- `_apply_holding_period` compares *direction* rather than value, so a conviction size is
+  pinned at entry instead of resizing (and paying spread) every bar.
+
+Measured on the holdout, on top of cell D. **Every sizing variant also cuts exposure, and
+cutting exposure raises Sharpe by itself** whenever losses are fatter-tailed than gains — so
+each is shown against a flat multiplier matched to its realized mean position size: same
+average exposure, zero information.
+
+| cell | Sharpe | return | IR | max DD | hit | mean shares |
+|---|---|---|---|---|---|---|
+| D ternary | +0.510 | +0.192% | −0.741 | −0.636 | 0.583 | 11.18 |
+| D +conviction | **+0.598** | +0.159% | −0.743 | −0.369 | 0.589 | 7.58 |
+| ⤷ flat control, same exposure | +0.519 | +0.124% | −0.745 | −0.406 | 0.577 | 7.68 |
+| D +vol target (15% annual) | +0.389 | +0.135% | −0.743 | −0.381 | 0.575 | 6.66 |
+| ⤷ flat control, same exposure | +0.522 | +0.110% | −0.745 | −0.356 | 0.563 | 6.94 |
+
+- **Conviction is doing real work, not de-levering.** The flat control at the same exposure
+  gains almost nothing over ternary (+0.519 vs +0.510), so the +0.088 is not an artifact of
+  holding less. Against its own control: paired diff **+0.079, t = +1.77, 7/10 symbols**.
+  Suggestive, not established — ten symbols in one market are far from ten independent
+  observations, so the effective t is weaker than the nominal one.
+- **Volatility targeting is worse than simply holding a smaller flat position** (−0.133,
+  t = −1.38, 4/10). It destroys more signal than it saves in risk on this strategy; NVDA
+  (+0.594 → +0.029) and QQQ (+0.497 → +0.109) carry most of the damage, consistent with the
+  edge living partly in the high-vol names that vol targeting shrinks hardest.
+- This was **pre-registered the other way**: the prediction was that with IC ≈ 0.03, `|pred|`
+  would be too noisy to size on and the vol-target term would carry any gain. Both halves were
+  wrong.
+- Conviction buys risk-adjusted quality, not return: total return *falls* (+0.192% → +0.159%)
+  while max drawdown nearly halves (−0.636 → −0.369).
+- IR is ≈ −0.74 in every cell. None of this closes the gap to buy-and-hold.
+
+**Both default to off** (`conviction=False`, `vol_target_annual=0.0`). A t of 1.77 on a single
+holdout is not grounds for flipping a default — that is precisely the parameter-selection
+behaviour the PBO figures above exist to police.
+
+**Update:** the holdout used here sits entirely inside the favorable 2025+ regime, and the
+window-B re-cut of the panel version (below) shows conviction weighting reversing sign in the
+flat regime. Treat this single-name t = 1.77 as regime-contaminated too; it has not been
+re-cut over window B, and should be before it is quoted again.
+
+### Conviction weighting on the cross-sectional book (2026-07-28)
+
+`rank_to_weights` equal-weighted every name in a leg. With `PanelConfig.conviction`
+(`run_panel.py --conviction`) it instead weights by each name's distance from the date's
+cross-sectional median, clipped to `[median/2, median*2]` so the most-convicted name holds at
+most 4x the least. **Each leg's total notional is preserved exactly**, so gross exposure,
+dollar neutrality and beta neutrality are untouched by construction — measured gross exposure
+matches to four decimals (1.0033 vs 1.0032), which is why no exposure-matched control is needed
+here, unlike the single-name test.
+
+Holdout model, sector-neutralized, 156 names, across the standard config grid:
+
+| window | config | gross SR flat → conv | net SR flat → conv | turnover flat → conv |
+|---|---|---|---|---|
+| full (1597 d) | d=0.1 r=10 | 0.967 → 0.934 | 0.728 → 0.708 | 0.139 → 0.140 |
+| full | d=0.2 r=10 | 0.803 → 0.918 | 0.527 → 0.662 | 0.118 → 0.123 |
+| full | d=0.2 r=5 | 1.007 → 1.216 | 0.519 → 0.758 | 0.219 → 0.227 |
+| full | d=0.1 r=5 | 1.348 → 1.361 | 0.912 → 0.951 | 0.256 → 0.258 |
+| **holdout (249 d)** | d=0.1 r=10 | 1.118 → 1.188 | 0.838 → 0.915 | 0.145 → 0.147 |
+| **holdout** | d=0.2 r=10 | 0.569 → 0.847 | 0.264 → **0.547** | 0.128 → 0.132 |
+| **holdout** | d=0.2 r=5 | 0.891 → 1.077 | 0.400 → 0.597 | 0.230 → 0.238 |
+| **holdout** | d=0.1 r=5 | 0.819 → 1.048 | 0.362 → 0.607 | 0.274 → 0.276 |
+
+Mean net Sharpe: full **+0.672 → +0.770** (3/4 configs), holdout **+0.466 → +0.666** (4/4).
+Gross improves in 7 of 8 cells too, so this is not a cost effect — turnover rises by only
+1–3%, since re-weighting inside a leg trades far less than changing which names are in it.
+
+The one loss is `d=0.1 r=10` on the full window, and it is the cell where you would expect it:
+at decile 0.1 a leg holds ~15 of 156 names, so there is little within-leg dispersion left to
+exploit and tilting mostly concentrates.
+
+On its face this looked like the same idea working far better on the book than on single names
+(+0.20 mean net Sharpe, 4/4, versus t = 1.77 on 10 symbols). **The window-B re-cut below shows
+that reading was wrong** — the 12-month holdout above sits *entirely inside* "window C"
+(2025-04-16 →), the favorable stretch identified by the second-holdout analysis, so it tested
+the model out-of-sample but never tested the regime.
+
+#### Window-B re-cut — it does not replicate (2026-07-28)
+
+`daily_predictor_holdoutB` (`--train-end 2024-04-16`, `models/daily_predictor_holdoutB.pkl`)
+never saw either regime, so one fit scores both:
+
+| window | dates | gross SR flat → conv | net SR flat → conv | net diff | conv wins |
+|---|---|---|---|---|---|
+| **B** 2024-04-19 → 2025-04-15 | 247 | −0.453 → −0.572 | −0.913 → **−1.009** | **−0.096** | 1/4 |
+| **C** 2025-04-16 → 2026-07-28 | 320 | +1.834 → +1.953 | +1.457 → +1.593 | +0.136 | 2/4 |
+
+Conviction *loses* in the flat regime, on gross as well as net, and its window-C win drops from
+4/4 to 2/4 once a different fit produces the rankings — with a per-config spread from −0.18 to
++0.43. The pre-registered claim from the previous section fails.
+
+The coherent reading is that conviction weighting is **leverage on signal quality, not a source
+of signal**: it concentrates capital in the names the ranker is most confident about, which
+amplifies whatever edge exists and equally amplifies its absence. Window B's book is deeply
+negative before conviction touches it (net −0.91 flat), and conviction makes it worse. That is
+the mechanism behaving exactly as designed, and it is precisely why it cannot be switched on —
+the regime is not knowable in advance.
+
+This is the third time a promising lead in this file has turned out to be one regime: the
+augment-axis result, the +0.16 single-name Sharpe, and now conviction weighting. The pattern is
+consistent enough to treat "measured on 2025+ data only" as disqualifying on its own.
+
+`conviction` defaults to **off** in both the panel and the single-name path, and should stay
+off. Reviving it needs a mechanism that is positive in window B, not a better window-C number.
+
+**The deployed `daily_predictor.pkl` is unchanged** — it is trained through the present, which
+is correct for live prediction, and was deliberately not replaced by a model that ignores the
+last 12 months. Now that `train_end` is recorded properly, a production retrain also makes its
+boundary enforceable:
+
+```bash
+python train_predictor.py --symbols "$(python -c 'from config import get_config; print(",".join(get_config().symbols))')" --days 2500 --model enet
+```
+
+#### Single-name conviction, re-cut the same way (2026-07-28)
+
+The panel re-cut above left the single-name claim (+0.079 Sharpe over its exposure-matched
+control, t=+1.77, n=10) untested. Same `holdoutB` fit, 60 names sampled across the config
+universe instead of 10, flat control recalibrated **per window** from that window's realised
+mean position size:
+
+| window | ternary | conviction | control | conviction − control | t | wins |
+|---|---|---|---|---|---|---|
+| **B** 2024-04-19 → 2025-04-15 | +0.316 | +0.336 | +0.312 (×0.719) | **+0.024** | +0.90 | 29/60 |
+| **C** 2025-04-16 → 2026-07-28 | +0.008 | +0.052 | +0.026 (×0.714) | **+0.027** | +1.22 | 35/60 |
+
+Unlike the panel, single-name conviction does *not* flip sign — but the effect is a third of
+what the 10-name holdout reported and is not significant in either window. The original +0.079
+was small-sample noise around a true effect of roughly +0.025. Conviction also cuts mean
+drawdown (−0.61% → −0.41% in B), but so does the flat control (−0.43%), so that is de-levering,
+not conviction. Verdict unchanged: **stays off.**
+
+### The signal has real directional information; the single-name structure cannot harvest it (2026-07-28)
+
+Decomposing the single-name book by side, same 60 names, same two out-of-sample windows:
+
+| window | side | Sharpe | mean ret | hit rate | trades |
+|---|---|---|---|---|---|
+| **B** | both | +0.316 | +0.225% | 0.546 | 55 |
+| | long | +0.399 | +0.217% | 0.677 | 36 |
+| | short | +0.072 | +0.036% | 0.382 | 25 |
+| **C** | both | +0.008 | +0.087% | 0.559 | 67 |
+| | long | +0.170 | +0.177% | 0.656 | 52 |
+| | short | −0.308 | −0.110% | 0.290 | 20 |
+
+A 0.29 short-side hit rate reads as "the model is good long and bad short", but that is the
+wrong statistic — with P(up) well above 0.5 over a 3-day horizon, a *coin-flip* signal produces
+this exact pattern. The discriminating quantity is whether P(up) differs between long-signal and
+short-signal bars:
+
+| window | P(up) uncond. | P(up \| long) | P(up \| short) | directional edge | t |
+|---|---|---|---|---|---|
+| **B** | 0.526 | 0.559 | 0.505 | **+0.056** | **+2.35** |
+| **C** | 0.540 | 0.553 | 0.500 | **+0.052** | **+2.35** |
+
+Same magnitude, same t-statistic, two independent out-of-sample regimes. **This is the most
+stable result in this file** — and it is the first one that survived the window-B test that
+killed the augment axis, the +0.16 single-name Sharpe, and conviction weighting.
+
+The problem is not the signal, it is the structure it is being traded through. On the return
+scale:
+
+| window | uncond. 3d ret | long-signal | short-signal | short excess |
+|---|---|---|---|---|
+| **B** | +0.036% | +0.297% | +0.034% | −0.00% |
+| **C** | +0.293% | +0.403% | −0.028% | −0.32% |
+
+The short leg is *informed and still loses*: "below average" in a universe that drifts up is not
+a short. A symmetric single-name long/short spends real information fighting drift. Neither
+obvious repair works:
+
+- **Drop the shorts.** Long-only Sharpe is +0.399 (B) and +0.170 (C) against buy-and-hold at
+  +0.250 and **+0.818**. In the good regime it is a strictly worse way to be long.
+- **Net the market out.** Pre-registered: subtracting SPY's own model forecast per bar should
+  push short excess negative in both windows and help C more than B, +0.05 to +0.15 Sharpe.
+  Result: **−0.44 (t=−2.76) in B and −0.05 in C** — wrong sign in both. The diagnostic says why:
+  SPY's same-horizon forecast is noise, not a drift estimate, and subtracting one shared series
+  from every name degraded long-side selection from +0.278% to +0.169% excess. Window B's short
+  excess *did* reach the predicted −0.30%, and it did not matter, because the long side was
+  carrying the book. Reverted, not kept behind a flag.
+
+What this points at is the panel, which nets drift out by construction (long the top decile,
+short the bottom) rather than by subtracting an estimate of it. The single-name backtester runs
+one symbol per process and cannot hold a hedge, so it structurally cannot express the trade the
+evidence supports. **Further single-name decision-layer work is not where the remaining value
+is** — the +0.05 directional edge is real and belongs in a market-neutral book.
+
 ### Cross-sectional axis and model class — second-holdout result (2026-07-28)
 
 Six cells, {per-symbol z-score axis, both axes} x {Ridge, ElasticNet, XGBoost}, all on the
@@ -322,6 +677,47 @@ The only effect with a consistent sign in both windows is ElasticNet over Ridge 
 per-symbol axis (+0.0046/+0.0055 on B, +0.0030/+0.0050 on C at 1d/3d), each |t| between 0.7
 and 1.3; pooling the two windows still lands near t ~ 1.3. Suggestive, unproven, and the
 cheaper of the two changes to keep.
+
+### The book went live — and what beta-neutral costs in net exposure (2026-07-30)
+
+`predict_next_day_lite.py` now publishes the ranked book as its headline output;
+`portfolio.py` builds it by calling `panel_backtester.rank_to_weights`, the same
+function `run_panel.py` measures. That equality was verified against the real
+pipeline, not just asserted: on 2026-07-30 the live path and
+`build_panels → sector_neutralize → rank_to_weights` produced **identical
+62-name books** — same names, same weights, net −0.716 both, betas equal to
+machine precision.
+
+The live book uses `panel.decile: 0.2` / `panel.rebalance_days: 10`, the cell the
+yearly walk-forward above held fixed. `run_panel.py` still sweeps the full
+`CONFIG_GRID` and overrides both, so these values only ever configure production.
+
+**Beta-neutrality is bought with net notional, and the mean hides how much.**
+Sizing the legs so `L·β_L = S·β_S` means that when the long leg's mean beta is
+*k* times the short leg's, the book holds *k* times more short notional. The
+panel diagnostics only ever reported `mean_net_exposure` (−0.12 over 2500 days,
+−0.22 over 1200). The per-date distribution at the live config is much wider:
+
+| decile | mean | p1 | p50 | p99 | min | max | \|net\| > 0.5 |
+|---|---|---|---|---|---|---|---|
+| 0.1 | −0.255 | −0.649 | −0.251 | +0.068 | −0.714 | +0.080 | 7.5% |
+| 0.2 | −0.217 | −0.618 | −0.198 | +0.011 | −0.641 | +0.024 | 5.7% |
+
+(1200 days, sector-neutralized, `rebalance_days=10`.)
+
+So a book with zero ex-ante beta can still be ~86% short and ~14% long in
+dollars, which is what 2026-07-30's −0.716 was — driven by leg betas spanning
+−0.43 (CB) to +3.48 (AMD). `portfolio.NET_EXPOSURE_WARN = 0.5` flags this in the
+logs, stdout, and Discord. It deliberately does **not** clamp: a clamp would make
+the published book differ from the measured one, which is the single property the
+shared `rank_to_weights` exists to guarantee.
+
+Unchanged by any of this: **the gate still FAILS.** Re-run on 1200 days gives
+DSR 0.263 (< 0.95), PBO 0.232, realized beta +0.030, best config (0.1, 10) at
+ann Sharpe +0.54. Publishing the book is an architecture change, not evidence of
+an edge — it makes the daily output match where the measurement says the signal
+lives (5/5 positive yearly IC on the cross-section) instead of where it says the
+signal does not (per-name timing, alpha −8.94%).
 
 ### DQN (`dqn_agent.pt`)
 - **Algorithm**: PyTorch DQN with target network and experience replay

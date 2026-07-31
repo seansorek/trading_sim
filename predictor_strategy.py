@@ -42,4 +42,6 @@ class PredictorStrategy(BaseStrategy):
         ctx = DecisionContext(index=daily_feats.index, symbol=self.cfg.name)
         signals = self.decision.decide(scores, proba, ctx)
         raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
-        return raw.shift(1).fillna(0).astype(int)
+        # float, not int: a fractional target position must survive this cast
+        # (astype(int) truncates 0.6 to 0). Ternary layers are unaffected.
+        return raw.shift(1).fillna(0).astype(float)

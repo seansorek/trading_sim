@@ -17,35 +17,29 @@ class _DummyStrategy(BaseStrategy):
 
 
 class TestApplyHoldingPeriod:
-    def test_spacing_is_exactly_holding_period(self):
+    def test_persistent_signal_is_held_not_chopped(self):
         """
-        With holding_period=5, a trade at bar 0 should allow
-        the next trade at bar 5, not bar 6 (off-by-one bug).
+        A continuously-BUY signal is one position held throughout, not a trade
+        every `holding_period` bars with flat gaps between.
+
+        This is the regression test for the inverted rule: the output is a
+        target position, so zeroing a suppressed bar told the engine to go
+        flat, capping every hold at one bar.
         """
         cfg = StrategyConfig(name="test", holding_period=5)
         strat = _DummyStrategy(cfg)
 
-        n = 30
-        idx = pd.date_range("2024-01-02", periods=n, freq="B")
-        # Signal at every bar — only some should survive
+        idx = pd.date_range("2024-01-02", periods=30, freq="B")
         raw = pd.Series(1, index=idx)
 
         filtered = strat._apply_holding_period(raw)
+        assert (filtered == 1).all(), (
+            "A persistent BUY must stay in position; any 0 here means the "
+            "backtester would be told to flatten and re-enter."
+        )
 
-        # Collect indices of executed trades
-        trade_locs = [i for i in range(n) if filtered.iloc[i] != 0]
-
-        # There should be trades, and consecutive trades should be
-        # spaced exactly holding_period bars apart.
-        assert len(trade_locs) >= 2, "Expected at least 2 trades"
-        for i in range(1, len(trade_locs)):
-            spacing = trade_locs[i] - trade_locs[i - 1]
-            assert spacing == 5, (
-                f"Expected spacing of 5 between trade at bar {trade_locs[i - 1]} "
-                f"and bar {trade_locs[i]}, got {spacing}"
-            )
-
-    def test_first_trade_at_bar_zero_is_accepted(self):
+    def test_position_is_held_for_exactly_holding_period_after_signal_ends(self):
+        """One BUY bar then silence: hold 5 bars (0-4), flat from bar 5."""
         cfg = StrategyConfig(name="test", holding_period=5)
         strat = _DummyStrategy(cfg)
 
@@ -54,10 +48,11 @@ class TestApplyHoldingPeriod:
         raw.iloc[0] = 1
 
         filtered = strat._apply_holding_period(raw)
-        assert filtered.iloc[0] == 1
+        assert list(filtered.iloc[:5]) == [1, 1, 1, 1, 1]
+        assert list(filtered.iloc[5:]) == [0] * 5
 
-    def test_trade_exactly_at_holding_period_is_allowed(self):
-        """A trade at bar 0 and another at bar 5 should both execute (holding_period=5)."""
+    def test_reversal_exactly_at_holding_period_is_allowed(self):
+        """BUY at bar 0, SELL at bar 5 — the reversal lands on the first free bar."""
         cfg = StrategyConfig(name="test", holding_period=5)
         strat = _DummyStrategy(cfg)
 
@@ -67,11 +62,12 @@ class TestApplyHoldingPeriod:
         raw.iloc[5] = -1  # exactly holding_period bars later
 
         filtered = strat._apply_holding_period(raw)
-        assert filtered.iloc[0] == 1, "Bar 0 trade should be accepted"
-        assert filtered.iloc[5] == -1, "Bar 5 trade should be accepted (exactly holding_period)"
+        assert (filtered.iloc[:5] == 1).all(), "Long position held bars 0-4"
+        assert filtered.iloc[5] == -1, "Reversal accepted at exactly holding_period"
+        assert (filtered.iloc[5:] == -1).all(), "Short then held its own 5 bars"
 
-    def test_trade_one_bar_before_holding_period_is_suppressed(self):
-        """A trade at bar 0 and another at bar 4 should suppress bar 4 (holding_period=5)."""
+    def test_reversal_one_bar_early_is_suppressed_and_position_carried(self):
+        """A SELL at bar 4 is too early: the long is carried, not flattened."""
         cfg = StrategyConfig(name="test", holding_period=5)
         strat = _DummyStrategy(cfg)
 
@@ -81,8 +77,11 @@ class TestApplyHoldingPeriod:
         raw.iloc[4] = -1  # one bar too early
 
         filtered = strat._apply_holding_period(raw)
-        assert filtered.iloc[0] == 1
-        assert filtered.iloc[4] == 0, "Bar 4 should be suppressed (within holding period)"
+        assert filtered.iloc[4] == 1, (
+            "Suppressed reversal must carry the existing long forward — "
+            "emitting 0 would execute as an exit."
+        )
+        assert filtered.iloc[5] == 0, "Bar 5 is free and the raw signal is flat"
 
     def test_holding_period_zero_passes_all_signals(self):
         cfg = StrategyConfig(name="test", holding_period=0)

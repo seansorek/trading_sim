@@ -123,8 +123,18 @@ class DailyXGBoostStrategy(BaseStrategy):
 # Regression-based daily strategy
 # ---------------------------------------------------------------------------
 
+# Multiple of the rolling threshold at which conviction sizing reaches full
+# size. A prediction sitting exactly on the threshold gets half size, one at
+# 2x or beyond gets the whole allocation. Keeps mean exposure near the ternary
+# baseline so a conviction A/B is not silently also an exposure A/B.
+CONVICTION_FULL_SIZE_RATIO = 2.0
+
+
 def compute_predictor_signal(
-    pred_ret: np.ndarray, signal_quantile: float, threshold_window: int
+    pred_ret: np.ndarray,
+    signal_quantile: float,
+    threshold_window: int,
+    conviction: bool = False,
 ) -> np.ndarray:
     """
     Causal rolling-quantile decision layer for a continuous return forecast.
@@ -144,6 +154,13 @@ def compute_predictor_signal(
     pred_ret. Bars before `threshold_window`'s min_periods is satisfied
     default to HOLD (0), since the threshold is undefined (NaN) and any
     NaN comparison is False.
+
+    With `conviction=True` the same triggers are returned as a *float* target
+    position in [-1, 1], scaled by how far the prediction clears its own
+    threshold (`|pred| / (RATIO * thr)`, capped at 1). Same trigger set, same
+    signs — only the magnitude differs, so the two modes are directly
+    comparable. The live path (`predict_next_day_lite`) uses the default int
+    mode; nothing about it changes.
     """
     pred_series = pd.Series(pred_ret)
     abs_pred = pred_series.abs()
@@ -153,6 +170,17 @@ def compute_predictor_signal(
         .shift(1)
     )
     trigger = (abs_pred > rolling_thr).values
+
+    if conviction:
+        # thr > 0 wherever trigger is True (|pred| > thr >= 0), so no zero div.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scale = np.clip(
+                abs_pred.values / (CONVICTION_FULL_SIZE_RATIO * rolling_thr.values),
+                0.0, 1.0,
+            )
+        sized = np.where(trigger, np.sign(pred_ret) * scale, 0.0)
+        return np.nan_to_num(sized, nan=0.0)
+
     actions = np.ones(len(pred_series), dtype=int)  # default: HOLD
     actions[trigger & (pred_ret > 0)] = 2  # BUY
     actions[trigger & (pred_ret < 0)] = 0  # SELL
@@ -194,10 +222,12 @@ class DailyPredictorStrategy(BaseStrategy):
         signal_quantile: float = 0.7,
         threshold_window: int = 60,
         model_path: str = "models/daily_predictor.pkl",
+        conviction: bool = False,
     ):
         super().__init__(cfg)
         self.model = None
         self.scaler = None
+        self.conviction = conviction
         # Params set here before pickle load; updated below if pickle has tuned values.
         self.signal_quantile = signal_quantile
         self.threshold_window = threshold_window
@@ -309,12 +339,14 @@ class DailyPredictorStrategy(BaseStrategy):
                 )
 
         signals = compute_predictor_signal(
-            pred_ret, self.signal_quantile, self.threshold_window
+            pred_ret, self.signal_quantile, self.threshold_window,
+            conviction=self.conviction,
         )
         raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
         # Execution lag: decide on close[t], trade at close[t+1]. Matches
         # PredictorStrategy.signal (predictor_strategy.py:45). Backtest-only —
         # the live path (_predict_regressor_signal) takes signals[-1] and trades
         # the next session, so it is already correct and must NOT be shifted.
-        return raw.shift(1).fillna(0).astype(int)
+        # float, not int — astype(int) would truncate a conviction size to 0.
+        return raw.shift(1).fillna(0).astype(float)
 

@@ -225,8 +225,10 @@ def test_get_config_caches_first_path_ignores_later_path_argument():
 
 def test_panel_config_loads_from_yaml():
     cfg = load_config("config/default.yaml")
-    assert cfg.panel.decile == 0.1
-    assert cfg.panel.rebalance_days == 1
+    # decile/rebalance_days configure the LIVE book (run_panel overrides both
+    # from CONFIG_GRID), so they track the walk-forward cell in models/README.md.
+    assert cfg.panel.decile == 0.2
+    assert cfg.panel.rebalance_days == 10
     assert cfg.panel.gross_exposure == 1.0
     assert cfg.panel.cost_bps == 5.0
     assert cfg.panel.borrow_bps_annual == 50.0

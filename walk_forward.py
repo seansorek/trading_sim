@@ -124,16 +124,22 @@ _FALLBACK_QUANTILE = 0.7
 _FALLBACK_WINDOW = 60
 
 
-def build_fold_data(symbols, days, db, config=None):
+def build_fold_data(symbols, days, db, config=None, end=None):
     """Pool per-fold (pred_window, y_te, test_offset) tuples across symbols.
 
     Extracted verbatim from sweep_params' inner loop so sweep_params and the
     CPCV matrix builder derive folds identically (single source of truth).
+
+    `end` bounds the history the folds are drawn from (default: today). Pass
+    the training cutoff when fitting a model with a holdout — otherwise the
+    (quantile, window) sweep selects its parameters using the very rows the
+    holdout is supposed to be judging, and the decision layer is fit in-sample
+    even though the prediction model is not.
     """
     if config is None:
         config = WalkForwardConfig()
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = datetime.now().strftime("%Y-%m-%d") if end is None else str(end)
+    start = (pd.Timestamp(end) - timedelta(days=days)).strftime("%Y-%m-%d")
     spy_df = _load_symbol("SPY", start, end, db)
 
     fold_data = []
@@ -202,11 +208,15 @@ def sweep_params(
     config: Optional[WalkForwardConfig] = None,
     quantiles: Optional[list[float]] = None,
     windows: Optional[list[int]] = None,
+    end=None,
 ) -> tuple[float, int]:
     """
     Sweep (signal_quantile, threshold_window) over walk-forward folds for all symbols.
     Returns (best_signal_quantile, best_threshold_window) based on median IC across symbols.
     Falls back to (0.7, 60) if no symbols produce valid folds or all IC <= 0.
+
+    `end` bounds the sweep's history — pass the training cutoff so the decision
+    layer is not tuned on holdout rows (see build_fold_data).
     """
     if config is None:
         config = WalkForwardConfig()
@@ -215,7 +225,7 @@ def sweep_params(
     if windows is None:
         windows = _DEFAULT_WINDOWS
 
-    fold_data = build_fold_data(symbols, days, db, config)
+    fold_data = build_fold_data(symbols, days, db, config, end=end)
     if not fold_data:
         logger.warning("sweep_params: no valid folds — returning defaults (%s, %d)",
                        _FALLBACK_QUANTILE, _FALLBACK_WINDOW)

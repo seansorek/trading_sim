@@ -1,6 +1,21 @@
 # Trading Sim
 
-Generates daily ML trading signals (BUY/SELL/HOLD) for a configurable symbol universe and sends them to Discord. GitHub Actions runs the prediction job automatically every morning.
+Ranks a ~159-name US equity universe daily and publishes a **beta-neutral
+long/short target book** to Discord, alongside per-symbol BUY/SELL/HOLD signals
+for a smaller watchlist. GitHub Actions runs the job every morning.
+
+**This is a portfolio system, not a per-symbol signal system.** That distinction
+is load-bearing, and it is the repo's own measurement that forces it:
+
+- The cross-sectional ranker has a small but **sign-stable** edge — IC positive
+  in 5/5 yearly walk-forward folds, net Sharpe positive in 4/5.
+- The per-symbol timing path **loses to buy-and-hold** (alpha −8.94%, IR −0.62),
+  and the classifiers sit at the majority-class baseline.
+
+So the book is the product and the per-symbol signals are a sidecar kept for
+their IC/drift telemetry. See `models/README.md` for both sets of numbers,
+including the caveats — a *small* edge measured on one vendor's unaudited data
+with survivorship bias is not a licence to trade it.
 
 ---
 
@@ -51,38 +66,64 @@ python train_predictor.py --symbols "$(python -c 'from config import get_config;
 of history. Use it to hold out a fixed window — a fraction split slides whenever `--days` moves
 and therefore holds nothing out.
 
-### 2. Backtest models
+### 2. Backtest the portfolio
 
-Runs simulated trading across symbols and strategies in parallel, writes equity curves and metrics to `results/`, and records runs in the DB.
+The primary backtest. Ranks the whole `panel.universe` cross-section per date,
+builds a beta-neutral decile long/short book, and reports DSR, realized beta,
+turnover, cost drag and PBO over `panel_eval.CONFIG_GRID`.
+
+```bash
+python run_panel.py --days 2500
+```
+
+Optional flags:
+- `--cost-bps 10` — cost **sensitivity reporting**, not a knob to tune until the gate passes
+- `--no-sector-neutral` / `--conviction` — A/B comparisons against the base book
+
+Output: `results/panel_summary.json`.
+
+**Per-symbol backtest (secondary).** `simulate_multi.py` runs the single-name
+`Backtester` per (symbol, strategy). Keep it for per-name diagnostics; do not
+read its Sharpe as the system's performance — a long-biased per-name timing
+strategy is the thing the portfolio exists to replace.
 
 ```bash
 python simulate_multi.py --symbols AAPL,MSFT,SPY --strategies daily_logistic,daily_xgboost,daily_predictor
 ```
 
-Optional flags:
 - `--start 2023-01-01 --end 2024-01-01` — explicit date range (default: last `--days` days)
-- `--days 365` — how many days back to run (default: 365)
-- `--workers 4` — parallel processes (default: CPU count capped at 4)
+- `--days 365` / `--workers 4`
+- Outputs: `results/multi_summary.json`, `results/<SYMBOL>_<STRATEGY>_{metrics.json,equity_curve.csv}`
 
-Key outputs:
-- `results/multi_summary.json` — all metrics in one file
-- `results/<SYMBOL>_<STRATEGY>_metrics.json` — per-run detail
-- `results/<SYMBOL>_<STRATEGY>_equity_curve.csv`
+### 3. Publish the daily book
 
-### 3. Generate daily predictions
-
-Loads the most recent trained models, fetches the latest bar for each symbol, and sends predictions to Discord.
+Ranks `panel.universe`, builds today's target book, and posts it to Discord
+ahead of the per-symbol watchlist signals.
 
 ```bash
 python predict_next_day_lite.py
 ```
 
-Reads symbols from `config/default.yaml → prediction.symbols` by default. Override for a quick test:
-```bash
-python predict_next_day_lite.py --symbols AAPL,SPY
-```
+- `--symbols AAPL,SPY` — override the per-symbol **watchlist** only. The ranked
+  universe always comes from `panel.universe`; a hand-picked list is not a
+  cross-section.
+- `--book ""` — skip the portfolio entirely (per-symbol signals only)
+- `--rebalance-days 1` — force a fresh book instead of holding
 
-Requires `DISCORD_WEBHOOK_URL` env var for notifications. Without it, predictions are still written to `tomorrow_trades.json` and logged to stdout.
+Outputs `tomorrow_trades.json` (`{date, portfolio, predictions}`), appends
+`predictions/portfolio.jsonl` and `predictions/history.jsonl`, and logs to
+stdout. `DISCORD_WEBHOOK_URL` enables notifications.
+
+#### The book holds; it does not re-rank daily
+
+`panel.rebalance_days` (10) is enforced live, not just in the backtest. On most
+days the job re-publishes the stored book marked `HOLD`; only when the window
+elapses does it re-rank and mark `REBALANCE`. This is not a nicety — at
+`rebalance_days: 1` the same book turns over ~0.85/day and cost removes 1.4–2.7
+Sharpe every year.
+
+That makes `predictions/portfolio.jsonl` **state, not a log**. The CI job commits
+it back to the repo; delete it and the next run rebalances from scratch.
 
 ---
 
@@ -95,8 +136,18 @@ Requires `DISCORD_WEBHOOK_URL` env var for notifications. Without it, prediction
 2. Commit the new `models/daily_logistic.pkl` and `models/daily_xgboost.pkl`.
 3. Push to `main`. The next GitHub Actions run will use the new models.
 
-**To change what symbols get predicted:**
+**To change what the portfolio ranks:**
+Edit `panel.sectors` in `config/default.yaml` and push — membership and sector
+identity come from the same block, so they cannot drift apart. Stocks only.
+
+**To change the per-symbol watchlist:**
 Edit `prediction.symbols` in `config/default.yaml` and push. No workflow YAML edit needed.
+
+**To change the book's shape or cadence:**
+Edit `panel.decile` / `panel.rebalance_days`. These configure the *live* book
+only — `run_panel.py` overrides both from `panel_eval.CONFIG_GRID`. Re-run
+`run_panel.py` before changing them: the grid is what the DSR is deflated
+against, and picking a cell by eye outside it is unmeasured.
 
 **To change which models predict (add/remove a model from the live pipeline):**
 Edit `prediction.models` in `config/default.yaml` and push. `predict_next_day_lite.py` reads this
@@ -110,12 +161,24 @@ edit needed.
 
 ## Symbol universes
 
-| Config key | Purpose | Where used |
-|---|---|---|
-| `symbols` | Training + backtest universe — 159 names, mirroring `panel.sectors` plus SPY/QQQ/IWM | `train_models.py`, `train_predictor.py`, `simulate_multi.py` |
-| `prediction.symbols` | Daily prediction + Discord output (can be wider) | `predict_next_day_lite.py`, GitHub Actions |
+Three lists in `config/default.yaml`, with three different jobs. They are not
+interchangeable.
 
-Both live in `config/default.yaml`.
+| Config key | Size | Purpose | Where used |
+|---|---|---|---|
+| `panel.sectors` → `panel.universe` | 156 | **The portfolio cross-section.** Stocks only. Flattened from `sectors` at load time, so a symbol cannot be ranked without a sector and the two can never drift | `run_panel.py`, `portfolio.py`, `predict_next_day_lite.py` |
+| `symbols` | 159 | Training + per-symbol backtest — `panel.universe` plus SPY/QQQ/IWM | `train_models.py`, `train_predictor.py`, `simulate_multi.py` |
+| `prediction.symbols` | 30 | Per-symbol watchlist for the BUY/SELL/HOLD sidecar. May contain ETFs | `predict_next_day_lite.py`, GitHub Actions |
+
+**ETFs must never enter `panel.universe`.** SPY, QQQ, IWM and the XL\* funds are
+baskets of the same names being ranked — shorting a fund that holds your long is
+not a cross-sectional bet, and a diversified basket ranks structurally mid-pack.
+SPY still loads, for the `ret_*_vs_spy` features and the beta estimate, but is
+never ranked or held. `tests/test_config.py::test_panel_universe_is_stocks_only`
+enforces this.
+
+The daily job predicts the *union* of `panel.universe` and
+`prediction.symbols` (~174 names, ~15 overlap) and fetches each symbol once.
 
 ---
 
@@ -134,7 +197,9 @@ Test coverage:
 - `test_predict.py` — model loading validation, signal generation, Discord formatting
 - `test_data_leakage.py` — purged/embargo-gap regression tests for the train/test split
 - `test_predictor.py` — regression prediction model + `DailyPredictorStrategy` decision layer
-- `test_config.py` — prediction.models / prediction.symbols YAML loading
+- `test_config.py` — prediction.models / prediction.symbols / panel YAML loading
+- `test_portfolio.py` — target book construction, beta-neutral leg sizing, sector neutralization, rebalance cadence, and that the live book equals `rank_to_weights`
+- `test_panel_backtester.py` / `test_panel_data.py` / `test_panel_eval.py` — the portfolio backtest engine, panel alignment, and the DSR/beta/PBO gate
 
 ---
 
@@ -148,9 +213,14 @@ Test coverage:
 | `train_models.py` | **Entry point:** train and save Logistic + XGBoost models |
 | `train_predictor.py` | **Entry point:** train the Ridge return-prediction model (experimental prediction/strategy split) |
 | `train_dqn.py` | **Entry point:** train the DQN agent |
-| `simulate_multi.py` | **Entry point:** parallel backtest runner |
-| `predict_next_day_lite.py` | **Entry point:** daily prediction + Discord webhook |
-| `simulation_pipeline.py` | Backtester engine, metrics (Sharpe/Sortino/drawdown), walk-forward |
+| `run_panel.py` | **Entry point:** portfolio backtest + DSR/beta/PBO gate |
+| `simulate_multi.py` | **Entry point:** per-symbol backtest runner (secondary) |
+| `predict_next_day_lite.py` | **Entry point:** daily book + per-symbol signals + Discord webhook |
+| `portfolio.py` | Live target book: ranks one cross-section, holds it between rebalances. Delegates weighting to `panel_backtester` so live and backtest cannot diverge |
+| `panel_data.py` | Builds aligned date×symbol prediction/return/close/beta panels |
+| `panel_backtester.py` | Portfolio engine — `rank_to_weights` and `sector_neutralize` are the shared decision layer for both backtest and live |
+| `panel_eval.py` | Portfolio gate: deflated Sharpe, realized beta, PBO over `CONFIG_GRID` |
+| `simulation_pipeline.py` | Single-symbol backtester, metrics (Sharpe/Sortino/drawdown), walk-forward |
 | `db.py` | SQLite layer — bars, features, model registry, predictions, backtest runs |
 | `data_loader.py` | yfinance wrapper with DB caching |
 | `ml_strategies.py` | `DailyLogisticStrategy`, `DailyXGBoostStrategy`, `DailyPredictorStrategy` wrappers; `compute_predictor_signal` is the shared decision-layer function used by both backtest and live prediction |

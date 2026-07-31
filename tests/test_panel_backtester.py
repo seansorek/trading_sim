@@ -205,6 +205,52 @@ def test_beta_row_equalizes_leg_beta_exposure():
     assert w.sum() < 0                              # dollar neutrality traded away
 
 
+def test_conviction_tilts_within_leg_but_preserves_every_invariant():
+    """Conviction redistributes inside a leg — it must not move the leg totals.
+
+    Gross exposure, dollar neutrality and beta neutrality are all encoded in the
+    two leg notionals, so conviction weighting is only safe if those are exactly
+    preserved.
+    """
+    pred = _pred_row()
+    beta = pd.Series(np.linspace(0.5, 2.0, len(pred)), index=pred.index)
+    kw = dict(decile=0.25, gross_exposure=1.0, min_names=20)
+
+    flat = rank_to_weights(pred, **kw)
+    conv = rank_to_weights(pred, **kw, conviction=True)
+
+    assert conv.abs().sum() == pytest.approx(1.0)                    # gross
+    assert conv.sum() == pytest.approx(0.0)                          # dollar neutral
+    assert conv[conv > 0].sum() == pytest.approx(flat[flat > 0].sum())
+    assert conv[conv < 0].sum() == pytest.approx(flat[flat < 0].sum())
+    assert not np.allclose(conv.values, flat.values), "conviction did not tilt anything"
+
+    # Beta neutrality survives too.
+    cb = rank_to_weights(pred, **kw, beta_row=beta, conviction=True)
+    assert cb.abs().sum() == pytest.approx(1.0)
+
+
+def test_conviction_weights_the_most_extreme_name_highest():
+    """Monotone in |pred - centre|, and bounded by the concentration cap."""
+    pred = _pred_row()
+    w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20,
+                        conviction=True)
+    longs = w[w > 0].sort_index()
+    # S39 is the most extreme prediction, S30 the leg boundary.
+    assert longs["S39"] > longs["S30"]
+    assert longs.max() / longs.min() <= 4.0 + 1e-9   # CONVICTION_CAP ** 2
+
+
+def test_conviction_falls_back_to_equal_weight_on_a_flat_cross_section():
+    """No dispersion means no conviction information — do not divide by zero."""
+    pred = pd.Series(3.0, index=[f"S{i:02d}" for i in range(40)])
+    w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20,
+                        conviction=True)
+    nz = w[w != 0].abs()
+    assert nz.nunique() == 1
+    assert w.abs().sum() == pytest.approx(1.0)
+
+
 def test_without_beta_row_the_book_stays_dollar_neutral():
     pred = _pred_row()
     w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20)
