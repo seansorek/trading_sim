@@ -74,27 +74,20 @@ def test_score_realized_ic_computes_correct_ic(tmp_path):
     today = date.today()
     cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
     records = []
-    # 20 BUY predictions; store indices for lookup
-    indices_by_date = {}
+    # 20 BUY predictions; older records (higher i) get higher confidence
     for i in range(20):
         d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
-        indices_by_date[d] = i
         records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
                         "signal": "BUY", "confidence": 0.7 + i * 0.01, "price": 100.0})
 
     path = _write_history(tmp_path, records)
 
-    # Mock: return prices where realized_return is positive and correlates with date
+    # Prices rise monotonically further back in time, so older (higher-confidence)
+    # predictions realize larger returns — single fetch spans the whole date range.
     def mock_fetch(symbol, start, end):
-        # Extract the prediction date from the start parameter (it's the pred_date)
-        # Return FWD_RET_HORIZON_DAYS+1 bars; close[FWD_RET_HORIZON_DAYS] > close[0]
-        # Realized return varies positively: more recent predictions (higher confidence) get higher returns
-        # We'll vary based on the start date to correlate with confidence
-        pred_date = start
-        idx = indices_by_date.get(pred_date, 10)
-        realized_return = 0.01 + (idx * 0.0001)  # Higher idx (older dates) get smaller returns
-        closes = [100.0] + [100.0] * (FWD_RET_HORIZON_DAYS - 1) + [100.0 * (1 + realized_return)]
-        return _make_price_df_from_close(closes)
+        idx = pd.bdate_range(start, end)
+        closes = [100.0 * (1 + 0.01 + (today - d.date()).days * 0.0001) for d in idx]
+        return pd.DataFrame({"close": closes}, index=idx)
 
     result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
     assert result["daily_predictor"] is not None
@@ -121,6 +114,32 @@ def test_score_realized_ic_excludes_near_zero_returns(tmp_path):
     assert result.get("daily_predictor") is None
 
 
+def test_score_realized_ic_fetches_once_per_symbol(tmp_path):
+    """Regardless of model count or lookback size, fetch_prices_fn is called once per symbol."""
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    records = []
+    for model in ("daily_predictor", "hourly_predictor"):
+        for i in range(20):
+            d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
+            records.append({"date": d, "symbol": "AAPL", "model": model,
+                            "signal": "BUY", "confidence": 0.7, "price": 100.0})
+    path = _write_history(tmp_path, records)
+
+    call_count = {"n": 0}
+
+    def mock_fetch(symbol, start, end):
+        call_count["n"] += 1
+        idx = pd.bdate_range(start, end)
+        closes = [100.0 + i * 0.5 for i in range(len(idx))]
+        return pd.DataFrame({"close": closes}, index=idx)
+
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
+    assert call_count["n"] == 1  # one symbol -> one fetch, even across two models
+    assert result["daily_predictor"] is not None
+    assert result["hourly_predictor"] is not None
+
+
 def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
     """HOLD signals (score=0) must not count as directional misses."""
     today = date.today()
@@ -135,8 +154,9 @@ def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
     path = _write_history(tmp_path, records)
 
     def mock_fetch(symbol, start, end):
-        closes = [100.0] + [100.0] * (FWD_RET_HORIZON_DAYS - 1) + [101.0]
-        return _make_price_df_from_close(closes)
+        idx = pd.bdate_range(start, end)
+        closes = [100.0 + i * 0.5 for i in range(len(idx))]
+        return pd.DataFrame({"close": closes}, index=idx)
 
     result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
     assert result["daily_predictor"]["directional_accuracy"] == pytest.approx(1.0)
