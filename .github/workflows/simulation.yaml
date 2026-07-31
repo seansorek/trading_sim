@@ -15,7 +15,10 @@ permissions:
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The job fetches bars for the union of panel.universe (159 ranked names)
+    # and prediction.symbols (30 watchlist names) on an ephemeral runner with
+    # no DB cache — ~1s/symbol against yfinance, plus retry/backoff.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
@@ -41,12 +44,18 @@ jobs:
           # next scheduled run) but must not post a live trading signal.
           DISCORD_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && secrets.DISCORD_WEBHOOK_URL || '' }}
 
-      - name: Commit predictions history
+      # portfolio.jsonl is not just a record — it is the state the next run
+      # reads to decide whether to hold or rebalance. Losing it means
+      # re-ranking every day, which the walk-forward shows costs 1.4-2.7 Sharpe.
+      - name: Commit predictions history and portfolio book
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add predictions/history.jsonl
+          # Whole directory, not named files: portfolio.jsonl does not exist
+          # until the first run that builds a book, and `git add` on a missing
+          # pathspec fails the step.
+          git add predictions/
           if git diff --cached --quiet; then
             echo "No history changes to commit"
           else

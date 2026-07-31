@@ -66,43 +66,98 @@ The next GitHub Actions run (or the next 06:00 UTC scheduled run) will pick up t
 Run the prediction job locally against a small symbol set to confirm no load errors:
 
 ```bash
-python predict_next_day_lite.py --symbols AAPL,SPY
+python predict_next_day_lite.py --symbols AAPL,SPY --book ""
 ```
 
 Expected stdout: a JSON-structured prediction log with no `RuntimeError`, followed by the
-`DAILY PREDICTIONS` summary block with signals for both symbols.
+`PER-SYMBOL SIGNALS` summary block with signals for both symbols.
+
+`--book ""` skips the portfolio so the check stays fast. To smoke-test the book
+too, drop the flag — but note it then fetches all ~174 symbols (~3–5 minutes).
 
 ---
 
-## 2. Adding or Removing a Symbol from the Prediction Universe
+## 2. Changing the Symbol Universes
 
-### Adding a symbol
+There are two, and they are not interchangeable. Adding a ticker to the wrong one
+either does nothing useful or corrupts the cross-section.
 
-1. Add the ticker to `prediction.symbols` in `config/default.yaml`:
+| I want to... | Edit |
+|---|---|
+| Change what the **portfolio ranks** | `panel.sectors` |
+| Change what gets a **per-symbol BUY/SELL/HOLD** | `prediction.symbols` |
+
+### Adding a name to the portfolio universe
+
+1. Add the ticker under the right sector in `panel.sectors` — that block is the
+   source of truth for both membership and sector identity, and `config.py`
+   flattens it into `panel.universe`:
    ```yaml
-   prediction:
-     symbols:
-       - AAPL
-       - NEWTKR   # ← add here
+   panel:
+     sectors:
+       Technology:
+         - AAPL
+         - NEWTKR   # ← add here
    ```
-2. No code change needed. `predict_next_day_lite.py` reads `prediction.symbols` at startup.
-3. *(Optional but recommended)* Backtest the new symbol before adding it to Discord output:
+2. **Stocks only.** An index or sector ETF here is a basket of names already in
+   the cross-section; `tests/test_config.py::test_panel_universe_is_stocks_only`
+   will fail if you add one.
+3. A ticker listed under two sectors raises at config load — its sector-neutral
+   weight would be ambiguous.
+4. Re-run the portfolio backtest before deploying — the universe is an input to
+   the measurement, not a cosmetic list:
+   ```bash
+   python run_panel.py --days 2500
+   ```
+5. Commit and push. The next run rebalances into a book that can hold it.
+
+### Adding a name to the per-symbol watchlist
+
+1. Add the ticker to `prediction.symbols` in `config/default.yaml`. ETFs are fine
+   here — nothing ranks them.
+2. No code change needed; `predict_next_day_lite.py` reads it at startup.
+3. *(Optional)* Backtest it first:
    ```bash
    python simulate_multi.py --symbols NEWTKR --strategies daily_predictor --days 365
    ```
-4. Commit and push:
-   ```bash
-   git add config/default.yaml
-   git commit -m "feat: add NEWTKR to prediction universe"
-   git push
-   ```
+4. Commit and push.
 
 ### Removing a symbol
 
-1. Remove the ticker from `prediction.symbols` in `config/default.yaml`.
-2. Commit and push — no other changes needed.
+Remove it from whichever list it is in and push. Removal does not delete
+historical records from `predictions/history.jsonl` or `predictions/portfolio.jsonl`
+— both are append-only, and old records are harmless.
 
-**Note:** Removing a symbol does not delete its historical predictions from `predictions/history.jsonl`. That file is append-only; old records are harmless.
+---
+
+## 2b. The Book Is Stuck on HOLD / Is Not Rebalancing
+
+The daily job re-publishes the stored book until `panel.rebalance_days` (10)
+business days have elapsed. `HOLD` on most mornings is correct behaviour, not a
+fault — daily re-ranking costs 1.4–2.7 Sharpe a year in turnover.
+
+To confirm what it thinks it is holding:
+
+```bash
+tail -1 predictions/portfolio.jsonl
+```
+
+To force a fresh book locally:
+
+```bash
+python predict_next_day_lite.py --rebalance-days 1
+```
+
+**If `predictions/portfolio.jsonl` is missing or was reverted,** the next run
+rebalances from scratch. That is the recovery path, not a bug — but it means an
+unplanned round-trip, so avoid resetting the file casually. It is state, and
+`simulation.yaml` commits it back after every scheduled run.
+
+**If the book publishes with a net-exposure warning,** the two legs' betas
+diverged enough that beta-neutral sizing produced a large dollar-directional
+position (see `models/README.md` → "what beta-neutral costs in net exposure").
+The book is reported as-is on purpose — it is not clamped, because a clamped book
+is not the book that was backtested.
 
 ---
 
