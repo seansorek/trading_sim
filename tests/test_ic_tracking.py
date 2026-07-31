@@ -154,8 +154,9 @@ def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
     path = _write_history(tmp_path, records)
 
     def mock_fetch(symbol, start, end):
-        closes = [100.0] + [100.0] * (FWD_RET_HORIZON_DAYS - 1) + [101.0]
-        return _make_price_df_from_close(closes)
+        idx = pd.bdate_range(start, end)
+        closes = [100.0 + i * 0.5 for i in range(len(idx))]
+        return pd.DataFrame({"close": closes}, index=idx)
 
     result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
     assert result["daily_predictor"]["directional_accuracy"] == pytest.approx(1.0)
