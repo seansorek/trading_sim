@@ -60,50 +60,83 @@ def _prefetch_by_symbol(
 
     frames: dict[str, Optional["pd.DataFrame"]] = {}
     for symbol, (lo, hi) in by_symbol.items():
+        # Pad the start back a bit: a record's true trading session (see
+        # `_resolve_session_date`) can fall a few calendar days before its
+        # own recorded date, and that session needs to be present in the
+        # fetched frame to be resolved correctly.
+        start = lo - timedelta(days=10)
         end = hi + timedelta(days=fwd_ret_horizon * 2 + 10)
         try:
-            frames[symbol] = fetch_prices_fn(symbol, lo.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+            frames[symbol] = fetch_prices_fn(symbol, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         except Exception:
             frames[symbol] = None
     return frames
 
 
-def _dedupe_scoreable(records: list[dict]) -> list[dict]:
+def _resolve_session_date(price_df: Optional["pd.DataFrame"], calendar_date) -> Optional["pd.Timestamp"]:
     """
-    Collapse consecutive same-(model, symbol) records that carry an
-    identical price down to the earliest one.
+    The most recent trading session at or before `calendar_date`.
+
+    `calendar_date` is passed through unchanged whenever it is itself a
+    trading session (the ordinary case). It only gets remapped backward
+    when it isn't one — a weekend or holiday the daily cron still ran
+    on — in which case the close it observed belongs to the last real
+    session before it. Returns None if `price_df` has no session at or
+    before `calendar_date` to resolve to.
+    """
+    if price_df is None or price_df.empty:
+        return None
+    eligible = price_df.index[price_df.index <= calendar_date]
+    if len(eligible) == 0:
+        return None
+    return eligible[-1]
+
+
+def _dedupe_scoreable(records: list[dict], frames: dict[str, Optional["pd.DataFrame"]]) -> list[dict]:
+    """
+    Collapse records down to one observation per real trading session,
+    anchored to the session that actually produced the recorded close —
+    not the calendar date the cron happened to run on.
 
     The daily job runs every day (including weekends) before the US open,
     so Saturday/Sunday/Monday-pre-open runs all observe the same last
     close as the preceding Friday and each appends its own record to the
-    history file. Left alone, `score_realized_ic` treats those as three
-    independent observations of the same realized close and scores each
-    against a different (and mostly wrong) forward window, since
-    `price_df.loc[pred_date:]` snaps a weekend `pred_date` forward to the
-    next trading bar.
+    history file under its own calendar date. Left alone,
+    `score_realized_ic` would treat those calendar dates as independent
+    observations and slice each one's forward-return window from a
+    different start point, since `price_df.loc[pred_date:]` snaps a
+    non-trading `pred_date` forward to the *next* bar rather than back to
+    the session that actually produced the close.
 
-    Keeping only the earliest record in each run of identical prices
-    collapses the duplicates to one observation per real trading session
-    *and* anchors `pred_date` to the actual session the price came from,
-    which fixes the forward-horizon drift as well.
+    Resolving each record to its actual session (`_resolve_session_date`)
+    fixes both problems in one step: restatements of the same session
+    collapse naturally, because they resolve to the same date, and the
+    forward-return window is anchored to the session that really produced
+    the entry price instead of snapping forward past it. Unlike collapsing
+    on price equality alone, two genuinely distinct sessions that happen
+    to close at the same price are never merged, since they resolve to
+    different session dates. If a record's price data isn't available to
+    resolve against, it's kept under its original date rather than
+    dropped, so a fetch failure degrades to the pre-dedup behavior
+    instead of silently discarding history.
     """
-    grouped: dict[tuple[str, str], list[dict]] = {}
+    resolved: list[dict] = []
     for r in records:
-        grouped.setdefault((r["model"], r["symbol"]), []).append(r)
+        calendar_date = datetime.strptime(r["date"], "%Y-%m-%d")
+        session_date = _resolve_session_date(frames.get(r["symbol"]), calendar_date)
+        if session_date is not None:
+            r = {**r, "date": session_date.strftime("%Y-%m-%d")}
+        resolved.append(r)
 
+    resolved.sort(key=lambda r: r["date"])
+    seen: set[tuple[str, str, str]] = set()
     deduped: list[dict] = []
-    for group_records in grouped.values():
-        group_records.sort(key=lambda r: r["date"])
-        prev_price: Optional[float] = None
-        for r in group_records:
-            price = float(r["price"])
-            if prev_price is not None and abs(price - prev_price) < 1e-9:
-                # Same close as the prior record for this (model, symbol) -
-                # a weekend/pre-open cron run that saw no new bar. Skip it
-                # so the underlying close isn't counted more than once.
-                continue
-            deduped.append(r)
-            prev_price = price
+    for r in resolved:
+        key = (r["model"], r["symbol"], r["date"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
     return deduped
 
 
@@ -146,9 +179,15 @@ def score_realized_ic(
         and datetime.strptime(r["date"], "%Y-%m-%d").date() <= cutoff
     ]
 
+    # Fetched once per symbol up front: needed both to resolve each
+    # record's real trading session below and to score the forward
+    # return later, and the range already covers every scoreable record.
+    frames = _prefetch_by_symbol(scoreable, fetch_prices_fn, fwd_ret_horizon)
+
     # Collapse weekend/pre-open cron runs that restate the same close as a
-    # prior record so each realized bar is scored exactly once (see #134).
-    scoreable = _dedupe_scoreable(scoreable)
+    # prior record, anchored to the session that produced it, so each
+    # realized bar is scored exactly once against the right window (#134).
+    scoreable = _dedupe_scoreable(scoreable, frames)
 
     # Group by model; take the most recent min_lookback entries
     by_model: dict[str, list[dict]] = {}
@@ -159,8 +198,6 @@ def score_realized_ic(
         model: sorted(model_records, key=lambda r: r["date"])[-min_lookback:]
         for model, model_records in by_model.items()
     }
-    all_used_records = [r for recs in truncated_by_model.values() for r in recs]
-    frames = _prefetch_by_symbol(all_used_records, fetch_prices_fn, fwd_ret_horizon)
 
     results: dict[str, Optional[dict]] = {}
     for model, sorted_records in truncated_by_model.items():
