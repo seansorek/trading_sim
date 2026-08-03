@@ -433,22 +433,28 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame,
         pnl_list: list[float] = []
         pos = 0
         entry_price: Optional[float] = None
-        # Weighted-average commission+spread_cost per share for the currently
-        # open leg, tracked the same way entry_price is — so realized PnL can
-        # be netted of the entry-side cost as well as the exit-side cost
-        # (issue #114: hit_rate/profit_factor must be net of both fields the
-        # execution model already logs per trade, not just the raw fill-price
-        # delta).
+        # Weighted-average commission-per-share for the currently open leg,
+        # tracked the same way entry_price is — so realized PnL can be
+        # netted of the entry-side commission as well as the exit-side
+        # commission (issue #114: hit_rate/profit_factor must be net of
+        # commission, not just the raw fill-price delta).
+        #
+        # `spread_cost` is deliberately excluded here: Backtester.run already
+        # bakes half the spread into `fill_price` itself
+        # (`fill_price = mid + side * (spr / 2 + slippage)`), so the
+        # fill-to-fill gross_pnl below already reflects the round-trip
+        # spread cost. `spread_cost` is logged for diagnostics only — netting
+        # it out again here would charge the spread twice (PR #126 review,
+        # discussion_r3655948346).
         entry_cost_per_share: float = 0.0
         for ts, t in trades.iterrows():
             side = 1 if t["side"] == "BUY" else -1
             t_shares = t["shares"]
             # .get(...) rather than [...]: tolerate older/synthetic trade
-            # frames that predate these columns, treating missing cost data
+            # frames that predate this column, treating missing cost data
             # as zero rather than raising.
             t_cost_per_share = (
-                (float(t.get("commission", 0.0) or 0.0)
-                 + float(t.get("spread_cost", 0.0) or 0.0)) / t_shares
+                float(t.get("commission", 0.0) or 0.0) / t_shares
                 if t_shares else 0.0
             )
             if pos == 0:
@@ -471,8 +477,8 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame,
                 pos += side * t_shares
             else:
                 # Opposite-direction: realize PnL on the portion reduced/closed,
-                # net of both legs' commission + spread_cost attributable to
-                # the closed shares.
+                # net of both legs' commission attributable to the closed
+                # shares (spread is already priced into fill_price, see above).
                 closed_shares = min(abs(pos), t_shares)
                 gross_pnl = (
                     (t["fill_price"] - entry_price)

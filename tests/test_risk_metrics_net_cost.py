@@ -4,8 +4,10 @@
   to the target return (not the sample std of only the losing subset), so a
   single-loss sample still returns a finite value.
 - compute_metrics' realized trade P&L (hit_rate, profit_factor) must be net
-  of the logged `commission` and `spread_cost` fields, not just the raw
-  fill-price delta.
+  of the logged `commission` field, not just the raw fill-price delta —
+  but must NOT additionally net `spread_cost`, since that cost is already
+  priced into `fill_price` by the execution model (netting it again would
+  double-charge the spread; see PR #126 review, discussion_r3655948346).
 """
 import sys
 from pathlib import Path
@@ -76,7 +78,8 @@ def test_sortino_zero_when_no_losses():
 
 
 # ---------------------------------------------------------------------------
-# Realized trade P&L must be net of commission + spread_cost
+# Realized trade P&L must be net of commission only — spread_cost is already
+# priced into fill_price by the execution model and must NOT be netted again.
 # ---------------------------------------------------------------------------
 
 def _make_trades_with_costs(rows: list) -> pd.DataFrame:
@@ -93,34 +96,37 @@ def _make_trades_with_costs(rows: list) -> pd.DataFrame:
     )
 
 
-def test_gross_winner_becomes_net_loser_after_costs():
+def test_gross_winner_becomes_net_loser_after_commission():
     """A trade that looks like a small win on fill-price alone (110 - 109 =
     +1/share over 10 shares = +10 gross) must be reported as a LOSS once the
-    logged commission + spread_cost are netted out (here: 8 + 8 = 16 total
-    cost > 10 gross gain)."""
+    logged commission is netted out (here: 6 + 6 = 12 total commission > 10
+    gross gain). `spread_cost` is set absurdly large on both legs to pin
+    that it has no effect on the result — it's already reflected in the 109
+    -> 110 fill-price delta, not a separate cash outflow to net again."""
     idx = pd.date_range("2024-01-02", periods=10, freq="B", tz="UTC")
     equity = pd.Series(100_000.0 + np.zeros(10), index=idx)
 
     trades = _make_trades_with_costs([
-        ("BUY", 10, 109.0, 4.0, 4.0),   # entry: costs 4 commission + 4 spread
-        ("SELL", 10, 110.0, 4.0, 4.0),  # exit: costs 4 commission + 4 spread
+        ("BUY", 10, 109.0, 6.0, 999.0),   # entry: 6 commission; spread_cost ignored
+        ("SELL", 10, 110.0, 6.0, 999.0),  # exit: 6 commission; spread_cost ignored
     ])
     # Gross PnL = (110 - 109) * 10 = +10
-    # Net PnL   = 10 - (4+4) - (4+4) = 10 - 16 = -6  -> a LOSS
+    # Net PnL   = 10 - (6+6) = -2  -> a LOSS, regardless of spread_cost
     metrics = compute_metrics(equity, trades)
 
     assert metrics["n_round_trades"] == 1
     assert metrics["hit_rate"] == pytest.approx(0.0), (
         "Gross-winning trade should be reclassified as a net loser once "
-        "commission + spread_cost are netted out."
+        "commission is netted out, independent of spread_cost."
     )
-    # gross_profit == 0 (no winning trades) and gross_loss == 6 -> factor 0.0
+    # gross_profit == 0 (no winning trades) and gross_loss == 2 -> factor 0.0
     assert metrics["profit_factor"] == pytest.approx(0.0)
 
 
-def test_net_pnl_nets_commission_and_spread_on_both_legs():
+def test_net_pnl_nets_commission_only_and_ignores_spread_cost():
     """Directly pin the net PnL value (not just win/loss classification) for
-    a simple one-round-trip trade with costs on both legs."""
+    a simple one-round-trip trade, and confirm varying spread_cost alone
+    never changes it (only commission does)."""
     idx = pd.date_range("2024-01-02", periods=10, freq="B", tz="UTC")
     equity = pd.Series(100_000.0 + np.zeros(10), index=idx)
 
@@ -129,41 +135,38 @@ def test_net_pnl_nets_commission_and_spread_on_both_legs():
         ("SELL", 5, 120.0, 1.5, 2.5),
     ])
     # Gross = (120-100)*5 = 100
-    # Entry cost/share = (1+2)/5 = 0.6 ; exit cost/share = (1.5+2.5)/5 = 0.8
-    # Net = 100 - (0.6+0.8)*5 = 100 - 7 = 93
+    # Entry commission/share = 1/5 = 0.2 ; exit commission/share = 1.5/5 = 0.3
+    # Net = 100 - (0.2+0.3)*5 = 100 - 2.5 = 97.5 (spread_cost of 2.0/2.5 not netted)
     metrics = compute_metrics(equity, trades)
     assert metrics["hit_rate"] == pytest.approx(1.0)
     assert metrics["profit_factor"] is None or metrics["profit_factor"] > 0
 
-    # Recover gross_profit via profit_factor's numerator is indirect; assert
-    # indirectly by re-deriving what a still-net-loser scenario would look
-    # like with heavier costs (belt-and-braces against a regression that
-    # nets only one of the two fields).
-    heavier_costs = _make_trades_with_costs([
-        ("BUY", 5, 100.0, 5.0, 5.0),
-        ("SELL", 5, 120.0, 5.0, 5.0),
+    # Same commission, wildly different spread_cost: result must be identical.
+    same_commission_diff_spread = _make_trades_with_costs([
+        ("BUY", 5, 100.0, 1.0, 5000.0),
+        ("SELL", 5, 120.0, 1.5, 5000.0),
     ])
-    # Gross = 100; net = 100 - (10/5 + 10/5)*5 = 100 - 20 = 80 -> still a win
-    heavier_metrics = compute_metrics(equity, heavier_costs)
-    assert heavier_metrics["hit_rate"] == pytest.approx(1.0)
+    diff_spread_metrics = compute_metrics(equity, same_commission_diff_spread)
+    assert diff_spread_metrics["hit_rate"] == metrics["hit_rate"]
+    assert diff_spread_metrics["profit_factor"] == metrics["profit_factor"]
 
-    even_heavier_costs = _make_trades_with_costs([
-        ("BUY", 5, 100.0, 15.0, 15.0),
-        ("SELL", 5, 120.0, 15.0, 15.0),
-    ])
-    # Gross = 100; net = 100 - (30/5 + 30/5)*5 = 100 - 60 = 40 -> still a win,
-    # but pushing costs further should eventually flip it (sanity check the
-    # monotonic direction of the netting, not just a single fixed point).
-    even_heavier_metrics = compute_metrics(equity, even_heavier_costs)
-    assert even_heavier_metrics["hit_rate"] == pytest.approx(1.0)
-
+    # Commission alone, pushed high enough, still flips the classification
+    # (sanity check that commission is netted, not ignored entirely).
     flipping_costs = _make_trades_with_costs([
-        ("BUY", 5, 100.0, 25.0, 25.0),
-        ("SELL", 5, 120.0, 25.0, 25.0),
+        ("BUY", 5, 100.0, 12.0, 0.0),
+        ("SELL", 5, 120.0, 12.0, 0.0),
     ])
-    # Gross = 100; net = 100 - (50/5 + 50/5)*5 = 100 - 100 = 0 -> not > 0
+    # Gross = 100; net = 100 - (12/5 + 12/5)*5 = 100 - 24 = 76 -> still a win
     flipping_metrics = compute_metrics(equity, flipping_costs)
-    assert flipping_metrics["hit_rate"] == pytest.approx(0.0)
+    assert flipping_metrics["hit_rate"] == pytest.approx(1.0)
+
+    heavier_flipping_costs = _make_trades_with_costs([
+        ("BUY", 5, 100.0, 60.0, 0.0),
+        ("SELL", 5, 120.0, 60.0, 0.0),
+    ])
+    # Gross = 100; net = 100 - (60/5 + 60/5)*5 = 100 - 120 = -20 -> a loss
+    heavier_flipping_metrics = compute_metrics(equity, heavier_flipping_costs)
+    assert heavier_flipping_metrics["hit_rate"] == pytest.approx(0.0)
 
 
 def test_trades_missing_cost_columns_default_to_zero_cost():
