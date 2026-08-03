@@ -1,17 +1,18 @@
 """test_ic_tracking.py — Tests for score_realized_ic in signal_monitor.py."""
 import json
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import spearmanr
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from signal_monitor import score_realized_ic, _signal_to_score
+from signal_monitor import score_realized_ic, _signal_to_score, _dedupe_scoreable
 from daily_features import FWD_RET_HORIZON_DAYS
 
 
@@ -77,8 +78,10 @@ def test_score_realized_ic_computes_correct_ic(tmp_path):
     # 20 BUY predictions; older records (higher i) get higher confidence
     for i in range(20):
         d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
+        # Entry price varies per record (as it would for real distinct trading
+        # sessions) so these aren't mistaken for weekend/pre-open duplicates.
         records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
-                        "signal": "BUY", "confidence": 0.7 + i * 0.01, "price": 100.0})
+                        "signal": "BUY", "confidence": 0.7 + i * 0.01, "price": 100.0 + i * 1e-6})
 
     path = _write_history(tmp_path, records)
 
@@ -122,8 +125,9 @@ def test_score_realized_ic_fetches_once_per_symbol(tmp_path):
     for model in ("daily_predictor", "hourly_predictor"):
         for i in range(20):
             d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
+            # Distinct entry price per record — see note above.
             records.append({"date": d, "symbol": "AAPL", "model": model,
-                            "signal": "BUY", "confidence": 0.7, "price": 100.0})
+                            "signal": "BUY", "confidence": 0.7, "price": 100.0 + i * 1e-6})
     path = _write_history(tmp_path, records)
 
     call_count = {"n": 0}
@@ -149,8 +153,9 @@ def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
         d = (cutoff_date - timedelta(days=i)).strftime("%Y-%m-%d")
         # 10 correct BUYs, 10 HOLDs
         signal = "BUY" if i < 10 else "HOLD"
+        # Distinct entry price per record — see note above.
         records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
-                        "signal": signal, "confidence": 0.7, "price": 100.0})
+                        "signal": signal, "confidence": 0.7, "price": 100.0 + i * 1e-6})
     path = _write_history(tmp_path, records)
 
     def mock_fetch(symbol, start, end):
@@ -168,3 +173,173 @@ def test_score_realized_ic_handles_missing_file(tmp_path):
                                date.today().strftime("%Y-%m-%d"),
                                fetch_prices_fn=lambda s, st, en: None)
     assert result == {}
+
+
+# --- Regression tests for #134: weekend/pre-open duplicate records ---------
+
+def test_dedupe_scoreable_collapses_consecutive_same_price_runs():
+    """
+    Unit test for the helper directly: a Friday close restated on Saturday,
+    Sunday, and Monday (the exact scenario from #134 — cron runs daily but
+    the market only produced one new close) must collapse to a single
+    record, keeping the earliest (real trading-session) date.
+    """
+    records = [
+        {"date": "2026-07-03", "symbol": "AAPL", "model": "m", "price": 308.63,
+         "signal": "HOLD", "confidence": 0.5},   # Friday (real close)
+        {"date": "2026-07-04", "symbol": "AAPL", "model": "m", "price": 308.63,
+         "signal": "HOLD", "confidence": 0.5},   # Saturday (duplicate)
+        {"date": "2026-07-05", "symbol": "AAPL", "model": "m", "price": 308.63,
+         "signal": "HOLD", "confidence": 0.5},   # Sunday (duplicate)
+        {"date": "2026-07-06", "symbol": "AAPL", "model": "m", "price": 308.65,
+         "signal": "HOLD", "confidence": 0.5},   # Monday (genuine new close)
+    ]
+    deduped = _dedupe_scoreable(records)
+    assert [r["date"] for r in deduped] == ["2026-07-03", "2026-07-06"]
+
+
+def test_dedupe_scoreable_keeps_distinct_prices_and_symbols():
+    """Records with genuinely different prices, or different symbols/models,
+    are independent observations and must not be collapsed."""
+    records = [
+        {"date": "2026-07-01", "symbol": "AAPL", "model": "m", "price": 100.0,
+         "signal": "BUY", "confidence": 0.5},
+        {"date": "2026-07-02", "symbol": "AAPL", "model": "m", "price": 101.0,
+         "signal": "BUY", "confidence": 0.5},
+        {"date": "2026-07-01", "symbol": "MSFT", "model": "m", "price": 100.0,
+         "signal": "BUY", "confidence": 0.5},
+        {"date": "2026-07-01", "symbol": "AAPL", "model": "other_model", "price": 100.0,
+         "signal": "BUY", "confidence": 0.5},
+    ]
+    deduped = _dedupe_scoreable(records)
+    assert len(deduped) == 4
+
+
+def _fridays_with_weekend_duplicates(cutoff_date, n=20):
+    """
+    Build `n` distinct "trading day" records, each with a unique price, and
+    a version of the same history where every record is additionally
+    restated on the following two calendar days with an identical price
+    (simulating Saturday/Sunday cron runs that see no new close).
+
+    Base dates are spaced 7 real days apart and offset 3 days behind the
+    cutoff so that even the +2-day duplicate of the most recent record is
+    still old enough to be scoreable.
+    """
+    clean, messy = [], []
+    for i in range(n):
+        base_date = cutoff_date - timedelta(days=3) - timedelta(days=7 * i)
+        price = 100.0 + i * 1.0
+        confidence = 0.5 + (i % 10) * 0.02
+        rec = {
+            "date": base_date.strftime("%Y-%m-%d"), "symbol": "AAPL", "model": "daily_predictor",
+            "signal": "BUY", "confidence": confidence, "price": price,
+        }
+        clean.append(rec)
+        messy.append(dict(rec))
+        for offset in (1, 2):
+            messy.append({
+                "date": (base_date + timedelta(days=offset)).strftime("%Y-%m-%d"),
+                "symbol": "AAPL", "model": "daily_predictor",
+                "signal": "BUY", "confidence": confidence, "price": price,
+            })
+    return clean, messy
+
+
+def _linear_mock_fetch(symbol, start, end):
+    idx = pd.bdate_range(start, end)
+    closes = [100.0 + i * 0.3 for i in range(len(idx))]
+    return pd.DataFrame({"close": closes}, index=idx)
+
+
+def test_score_realized_ic_weekend_duplicates_do_not_change_result(tmp_path):
+    """
+    The central regression case for #134: history padded with weekend/
+    pre-open duplicates (a raw record count ~3x the real trading-session
+    count, matching the ~30% duplicate rate reported in the issue) must
+    score identically to the deduplicated history — the duplicates must
+    not be counted as extra independent observations nor shift which
+    forward window a prediction is scored against.
+    """
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    clean, messy = _fridays_with_weekend_duplicates(cutoff_date, n=20)
+
+    assert len(messy) == 60  # 20 real records x 3 (Fri/Sat/Sun) — the ~3x
+                              # duplication described in the issue.
+
+    (tmp_path / "clean").mkdir()
+    (tmp_path / "messy").mkdir()
+    clean_path = _write_history(tmp_path / "clean", clean)
+    messy_path = _write_history(tmp_path / "messy", messy)
+
+    clean_result = score_realized_ic(clean_path, today.strftime("%Y-%m-%d"),
+                                      fetch_prices_fn=_linear_mock_fetch)
+    messy_result = score_realized_ic(messy_path, today.strftime("%Y-%m-%d"),
+                                      fetch_prices_fn=_linear_mock_fetch)
+
+    assert clean_result["daily_predictor"] is not None
+    # Sample size must reflect real trading sessions only, never the
+    # inflated raw record count.
+    assert clean_result["daily_predictor"]["lookback_n"] == 20
+    assert messy_result["daily_predictor"] == clean_result["daily_predictor"]
+
+
+def test_score_realized_ic_weekend_duplicates_do_not_inflate_sample_past_min_lookback(tmp_path):
+    """
+    A more extreme duplicate ratio: only 12 real trading sessions exist,
+    each tripled by weekend restatement (36 raw records — comfortably
+    above min_lookback=20). Before the fix, [-min_lookback:] would happily
+    slice 20 rows out of the padded 36 and report a "healthy" lookback_n
+    of 20, even though only 12 independent closes exist. After the fix,
+    deduplication happens first, so the true sample (12) is correctly
+    judged insufficient.
+    """
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    _, messy = _fridays_with_weekend_duplicates(cutoff_date, n=12)
+    assert len(messy) == 36
+
+    path = _write_history(tmp_path, messy)
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"),
+                               fetch_prices_fn=_linear_mock_fetch)
+    assert result["daily_predictor"] is None
+
+
+def test_score_realized_ic_manual_numerical_sanity_check(tmp_path):
+    """
+    Directly recompute the expected IC for the deduplicated (clean) history
+    using scipy, independent of score_realized_ic's internals, as a
+    numerical sanity check on the realized-return math and the final
+    Spearman IC.
+    """
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    clean, _ = _fridays_with_weekend_duplicates(cutoff_date, n=20)
+    path = _write_history(tmp_path, clean)
+
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"),
+                               fetch_prices_fn=_linear_mock_fetch)
+    assert result["daily_predictor"] is not None
+
+    # Reproduce the expected scores/returns by hand from the same records
+    # and the same deterministic price function used by the mock fetch.
+    full_span_start = min(datetime.strptime(r["date"], "%Y-%m-%d") for r in clean)
+    idx = pd.bdate_range(
+        full_span_start.strftime("%Y-%m-%d"),
+        (today + timedelta(days=FWD_RET_HORIZON_DAYS * 2 + 10)).strftime("%Y-%m-%d"),
+    )
+    closes = pd.Series([100.0 + i * 0.3 for i in range(len(idx))], index=idx)
+
+    expected_scores, expected_returns = [], []
+    for r in sorted(clean, key=lambda r: r["date"]):
+        pred_date = datetime.strptime(r["date"], "%Y-%m-%d")
+        window = closes.loc[pred_date:]
+        realized_price = float(window.iloc[FWD_RET_HORIZON_DAYS])
+        realized_return = (realized_price / r["price"]) - 1.0
+        expected_scores.append(_signal_to_score(r["signal"], r["confidence"]))
+        expected_returns.append(realized_return)
+
+    expected_ic, _ = spearmanr(np.array(expected_scores), np.array(expected_returns))
+    assert result["daily_predictor"]["ic"] == pytest.approx(float(expected_ic), abs=1e-9)
+    assert result["daily_predictor"]["lookback_n"] == len(expected_scores) == 20

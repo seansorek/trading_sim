@@ -68,6 +68,45 @@ def _prefetch_by_symbol(
     return frames
 
 
+def _dedupe_scoreable(records: list[dict]) -> list[dict]:
+    """
+    Collapse consecutive same-(model, symbol) records that carry an
+    identical price down to the earliest one.
+
+    The daily job runs every day (including weekends) before the US open,
+    so Saturday/Sunday/Monday-pre-open runs all observe the same last
+    close as the preceding Friday and each appends its own record to the
+    history file. Left alone, `score_realized_ic` treats those as three
+    independent observations of the same realized close and scores each
+    against a different (and mostly wrong) forward window, since
+    `price_df.loc[pred_date:]` snaps a weekend `pred_date` forward to the
+    next trading bar.
+
+    Keeping only the earliest record in each run of identical prices
+    collapses the duplicates to one observation per real trading session
+    *and* anchors `pred_date` to the actual session the price came from,
+    which fixes the forward-horizon drift as well.
+    """
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        grouped.setdefault((r["model"], r["symbol"]), []).append(r)
+
+    deduped: list[dict] = []
+    for group_records in grouped.values():
+        group_records.sort(key=lambda r: r["date"])
+        prev_price: Optional[float] = None
+        for r in group_records:
+            price = float(r["price"])
+            if prev_price is not None and abs(price - prev_price) < 1e-9:
+                # Same close as the prior record for this (model, symbol) -
+                # a weekend/pre-open cron run that saw no new bar. Skip it
+                # so the underlying close isn't counted more than once.
+                continue
+            deduped.append(r)
+            prev_price = price
+    return deduped
+
+
 def _signal_to_score(signal: str, confidence: float) -> float:
     """Map signal + confidence to a directional score for IC computation."""
     if signal == "BUY":
@@ -106,6 +145,10 @@ def score_realized_ic(
         and "signal" in r and "confidence" in r and "date" in r
         and datetime.strptime(r["date"], "%Y-%m-%d").date() <= cutoff
     ]
+
+    # Collapse weekend/pre-open cron runs that restate the same close as a
+    # prior record so each realized bar is scored exactly once (see #134).
+    scoreable = _dedupe_scoreable(scoreable)
 
     # Group by model; take the most recent min_lookback entries
     by_model: dict[str, list[dict]] = {}
