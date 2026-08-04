@@ -326,12 +326,19 @@ class TestLoadBarsCached:
                 "confidence_threshold": 0.55,
             }
         }
-        feats_df = _make_features_df(200)
+        def _feats_from_cached_df(cached_df, spy_df=None):
+            # Mirror production's `feats = pd.DataFrame(index=df.index)`: the
+            # mocked feats index must be a true subset of whatever df the
+            # cache actually returns (db.load_bars' date filtering doesn't
+            # exactly mirror the pre-upsert `data` index).
+            feats_df = _make_features_df(len(cached_df))
+            feats_df.index = cached_df.index
+            return feats_df
 
         # history_days must be short enough that the requested start falls
         # within the cached window's coverage tolerance.
         with patch("predict_next_day_lite.fetch_bars_with_fallback") as mock_fetch, \
-             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+             patch("predict_next_day_lite.make_daily_features", side_effect=_feats_from_cached_df):
             result = predict_symbol(
                 "AAPL", models, db=db, history_days=200,
             )
@@ -671,6 +678,37 @@ class TestAppendPredictionsHistory:
 
             assert n1 == 2
             assert n2 == 2
+
+    def test_legacy_record_without_bar_date_never_suppresses_a_real_new_session(self):
+        """A pre-fix legacy record's "date" (calendar run date) must not be treated as a
+        bar_date proxy — the daily cron runs before the open, so a Tuesday run's "date" is
+        Tuesday but its price is actually Monday's close. If that "date" were used as a
+        stand-in bar_date, Wednesday's first fixed run (which genuinely observes Tuesday's
+        close, bar_date="2026-07-07") would find last_bar_dates == "2026-07-07" and wrongly
+        skip it, permanently losing Tuesday's session (see PR #137 review)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            # A legacy record written before bar_date existed: run date "2026-07-07"
+            # (Tuesday) but the price it recorded was actually Monday's close.
+            legacy_record = {
+                "date": "2026-07-07",
+                "symbol": "AAPL",
+                "model": "daily_logistic",
+                "signal": "BUY",
+                "confidence": 0.7,
+                "price": 150.0,
+            }
+            with open(path, "w") as f:
+                f.write(json.dumps(legacy_record) + "\n")
+
+            # Wednesday's first post-fix run genuinely observes Tuesday's close.
+            n = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-07"), path, "2026-07-08"
+            )
+
+            assert n == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 3
 
 
 # ---------------------------------------------------------------------------
