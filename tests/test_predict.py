@@ -572,8 +572,105 @@ class TestAppendPredictionsHistory:
             append_predictions_history(self._predictions(), path, "2026-01-01")
 
             record = json.loads(Path(path).read_text().splitlines()[0])
-            assert set(record) == {"date", "symbol", "model", "signal", "confidence", "price"}
+            assert set(record) == {
+                "date", "bar_date", "symbol", "model", "signal", "confidence", "price",
+            }
             assert record["price"] == 150.0
+
+    # -- source-side fix for #134: skip the append when the underlying price
+    # bar hasn't advanced since the last recorded prediction for that
+    # (symbol, model), so weekend/pre-open cron runs never restate the same
+    # close as a fresh observation. --
+
+    def _predictions_with_bar_date(self, bar_date):
+        preds = self._predictions()
+        preds[0]["bar_date"] = bar_date
+        return preds
+
+    def test_skips_record_when_bar_date_unchanged(self):
+        """A second run observing the same last close (weekend/pre-open) writes nothing new."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n1 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            # Saturday run: cron fires, but the market's last close is still Friday's.
+            n2 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-04"
+            )
+            # Sunday run: same story.
+            n3 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-05"
+            )
+
+            assert n1 == 2
+            assert n2 == 0
+            assert n3 == 0
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 2
+
+    def test_appends_when_bar_date_advances(self):
+        """A genuinely new session (Monday's real close) is recorded normally."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-04"
+            )
+            n_monday = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-06"), path, "2026-07-06"
+            )
+
+            assert n_monday == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 4
+            records = [json.loads(line) for line in lines]
+            assert {r["bar_date"] for r in records} == {"2026-07-03", "2026-07-06"}
+
+    def test_skip_is_per_symbol_model_pair(self):
+        """One (symbol, model) being stale doesn't suppress a different pair that isn't."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            preds = [
+                {
+                    "symbol": "AAPL",
+                    "price": 150.0,
+                    "bar_date": "2026-07-03",  # unchanged — stale
+                    "predictions": {
+                        "daily_logistic": {"signal": "BUY", "confidence": 0.7},
+                    },
+                },
+                {
+                    "symbol": "MSFT",
+                    "price": 400.0,
+                    "bar_date": "2026-07-04",  # a different symbol with a fresh bar
+                    "predictions": {
+                        "daily_logistic": {"signal": "SELL", "confidence": 0.8},
+                    },
+                },
+            ]
+            n = append_predictions_history(preds, path, "2026-07-04")
+
+            assert n == 1
+            lines = Path(path).read_text().strip().splitlines()
+            records = [json.loads(line) for line in lines]
+            assert sum(r["symbol"] == "MSFT" for r in records) == 1
+            assert sum(r["symbol"] == "AAPL" for r in records) == 2  # only the first run's
+
+    def test_missing_bar_date_falls_back_to_prediction_date_and_never_skips(self):
+        """Callers that don't set bar_date (e.g. legacy/non predict_symbol paths) still work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n1 = append_predictions_history(self._predictions(), path, "2026-01-01")
+            n2 = append_predictions_history(self._predictions(), path, "2026-01-02")
+
+            assert n1 == 2
+            assert n2 == 2
 
 
 # ---------------------------------------------------------------------------
