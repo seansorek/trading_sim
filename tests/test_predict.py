@@ -326,12 +326,19 @@ class TestLoadBarsCached:
                 "confidence_threshold": 0.55,
             }
         }
-        feats_df = _make_features_df(200)
+        def _feats_from_cached_df(cached_df, spy_df=None):
+            # Mirror production's `feats = pd.DataFrame(index=df.index)`: the
+            # mocked feats index must be a true subset of whatever df the
+            # cache actually returns (db.load_bars' date filtering doesn't
+            # exactly mirror the pre-upsert `data` index).
+            feats_df = _make_features_df(len(cached_df))
+            feats_df.index = cached_df.index
+            return feats_df
 
         # history_days must be short enough that the requested start falls
         # within the cached window's coverage tolerance.
         with patch("predict_next_day_lite.fetch_bars_with_fallback") as mock_fetch, \
-             patch("predict_next_day_lite.make_daily_features", return_value=feats_df):
+             patch("predict_next_day_lite.make_daily_features", side_effect=_feats_from_cached_df):
             result = predict_symbol(
                 "AAPL", models, db=db, history_days=200,
             )
@@ -572,8 +579,136 @@ class TestAppendPredictionsHistory:
             append_predictions_history(self._predictions(), path, "2026-01-01")
 
             record = json.loads(Path(path).read_text().splitlines()[0])
-            assert set(record) == {"date", "symbol", "model", "signal", "confidence", "price"}
+            assert set(record) == {
+                "date", "bar_date", "symbol", "model", "signal", "confidence", "price",
+            }
             assert record["price"] == 150.0
+
+    # -- source-side fix for #134: skip the append when the underlying price
+    # bar hasn't advanced since the last recorded prediction for that
+    # (symbol, model), so weekend/pre-open cron runs never restate the same
+    # close as a fresh observation. --
+
+    def _predictions_with_bar_date(self, bar_date):
+        preds = self._predictions()
+        preds[0]["bar_date"] = bar_date
+        return preds
+
+    def test_skips_record_when_bar_date_unchanged(self):
+        """A second run observing the same last close (weekend/pre-open) writes nothing new."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n1 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            # Saturday run: cron fires, but the market's last close is still Friday's.
+            n2 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-04"
+            )
+            # Sunday run: same story.
+            n3 = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-05"
+            )
+
+            assert n1 == 2
+            assert n2 == 0
+            assert n3 == 0
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 2
+
+    def test_appends_when_bar_date_advances(self):
+        """A genuinely new session (Monday's real close) is recorded normally."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-04"
+            )
+            n_monday = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-06"), path, "2026-07-06"
+            )
+
+            assert n_monday == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 4
+            records = [json.loads(line) for line in lines]
+            assert {r["bar_date"] for r in records} == {"2026-07-03", "2026-07-06"}
+
+    def test_skip_is_per_symbol_model_pair(self):
+        """One (symbol, model) being stale doesn't suppress a different pair that isn't."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            append_predictions_history(
+                self._predictions_with_bar_date("2026-07-03"), path, "2026-07-03"
+            )
+            preds = [
+                {
+                    "symbol": "AAPL",
+                    "price": 150.0,
+                    "bar_date": "2026-07-03",  # unchanged — stale
+                    "predictions": {
+                        "daily_logistic": {"signal": "BUY", "confidence": 0.7},
+                    },
+                },
+                {
+                    "symbol": "MSFT",
+                    "price": 400.0,
+                    "bar_date": "2026-07-04",  # a different symbol with a fresh bar
+                    "predictions": {
+                        "daily_logistic": {"signal": "SELL", "confidence": 0.8},
+                    },
+                },
+            ]
+            n = append_predictions_history(preds, path, "2026-07-04")
+
+            assert n == 1
+            lines = Path(path).read_text().strip().splitlines()
+            records = [json.loads(line) for line in lines]
+            assert sum(r["symbol"] == "MSFT" for r in records) == 1
+            assert sum(r["symbol"] == "AAPL" for r in records) == 2  # only the first run's
+
+    def test_missing_bar_date_falls_back_to_prediction_date_and_never_skips(self):
+        """Callers that don't set bar_date (e.g. legacy/non predict_symbol paths) still work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            n1 = append_predictions_history(self._predictions(), path, "2026-01-01")
+            n2 = append_predictions_history(self._predictions(), path, "2026-01-02")
+
+            assert n1 == 2
+            assert n2 == 2
+
+    def test_legacy_record_without_bar_date_never_suppresses_a_real_new_session(self):
+        """A pre-fix legacy record's "date" (calendar run date) must not be treated as a
+        bar_date proxy — the daily cron runs before the open, so a Tuesday run's "date" is
+        Tuesday but its price is actually Monday's close. If that "date" were used as a
+        stand-in bar_date, Wednesday's first fixed run (which genuinely observes Tuesday's
+        close, bar_date="2026-07-07") would find last_bar_dates == "2026-07-07" and wrongly
+        skip it, permanently losing Tuesday's session (see PR #137 review)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "history.jsonl")
+            # A legacy record written before bar_date existed: run date "2026-07-07"
+            # (Tuesday) but the price it recorded was actually Monday's close.
+            legacy_record = {
+                "date": "2026-07-07",
+                "symbol": "AAPL",
+                "model": "daily_logistic",
+                "signal": "BUY",
+                "confidence": 0.7,
+                "price": 150.0,
+            }
+            with open(path, "w") as f:
+                f.write(json.dumps(legacy_record) + "\n")
+
+            # Wednesday's first post-fix run genuinely observes Tuesday's close.
+            n = append_predictions_history(
+                self._predictions_with_bar_date("2026-07-07"), path, "2026-07-08"
+            )
+
+            assert n == 2
+            lines = Path(path).read_text().strip().splitlines()
+            assert len(lines) == 3
 
 
 # ---------------------------------------------------------------------------

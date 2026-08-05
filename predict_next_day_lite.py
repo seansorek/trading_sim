@@ -19,6 +19,7 @@ import sys
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -532,7 +533,21 @@ def predict_symbol(
 
     # Latest single-day input for sklearn models
     X_latest = X_all[-1:]
-    result["price"] = float(df["close"].iloc[-1])
+    # Anchor price/date on feats' last row, not df's — make_daily_features
+    # dropna()s rows with any NaN feature (e.g. a missing spy_df alignment),
+    # which can drop df's newest row. Using df's own last row here would let
+    # `price` and `bar_date` describe a different session than the one
+    # X_latest was actually computed from. feats.index is always a subset of
+    # df.index, so this lookup is safe.
+    last_feat_date = feats.index[-1]
+    result["price"] = float(df.loc[last_feat_date, "close"])
+    # The trading-session date of the bar `price` actually came from — not
+    # today's calendar date. On weekends/holidays this is the same value
+    # for consecutive calendar days (see #134): the cron runs daily but
+    # yfinance keeps returning the same last close until the next real
+    # session prints. Used by append_predictions_history to avoid recording
+    # a "new" observation when nothing has actually changed.
+    result["bar_date"] = pd.Timestamp(last_feat_date).strftime("%Y-%m-%d")
 
     # Trailing beta vs SPY, for the portfolio layer's leg sizing. Same estimator
     # panel_data uses, so the live book and the backtested book size their legs
@@ -667,6 +682,44 @@ def predict_symbol(
 # Predictions history (append-only, survives across ephemeral CI runs)
 # ---------------------------------------------------------------------------
 
+def _load_last_bar_dates(history_path: str) -> dict[tuple[str, str], str]:
+    """Latest recorded bar_date per (symbol, model) already in the history file.
+
+    The file is append-only in run order, so a later line always overrides
+    an earlier one for the same key. Older records written before this fix
+    landed have no "bar_date" field; we deliberately do NOT fall back to
+    their "date" (the calendar run date the job happened to execute on) as
+    a proxy — the daily cron runs before the US open, so a record's "date"
+    is generally one session ahead of the actual bar it observed (e.g. a
+    Tuesday run's "date" is Tuesday but its price is Monday's close). Using
+    it as a bar_date stand-in can coincide with a genuinely new bar_date
+    computed on a later run and falsely suppress that real session forever
+    (see PR #137 review). Skipping the fallback means a legacy record simply
+    doesn't count as "last observed" for its (symbol, model) — that key's
+    first post-deploy run always appends, same as before this fix existed,
+    and every record from then on carries a real bar_date.
+    """
+    path = Path(history_path)
+    if not path.exists():
+        return {}
+    last: dict[tuple[str, str], str] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            symbol, model = rec.get("symbol"), rec.get("model")
+            bar_date = rec.get("bar_date")
+            if symbol is None or model is None or bar_date is None:
+                continue
+            last[(symbol, model)] = bar_date
+    return last
+
+
 def append_predictions_history(predictions: list, history_path: str, prediction_date: str) -> int:
     """Append today's predictions to an append-only JSONL history file.
 
@@ -678,24 +731,52 @@ def append_predictions_history(predictions: list, history_path: str, prediction_
 
     prediction_date: ISO date string (YYYY-MM-DD) to use for all records.
     Passed in from main() to avoid midnight-crossing race with score_realized_ic.
+
+    Source-side fix for #134: the daily cron runs every calendar day
+    (including weekends) before the US open, so Saturday/Sunday/pre-open
+    Monday runs would otherwise all observe the same last close as the
+    preceding Friday and each append their own record. Skipping the append
+    whenever the underlying bar hasn't advanced since the last recorded
+    prediction for that (symbol, model) stops those restatements from ever
+    reaching the file — it's the cleanest fix, since it prevents the
+    contamination at the source instead of relying on scoring-side dedup
+    (score_realized_ic._dedupe_scoreable) to clean it up after the fact.
     """
+    last_bar_dates = _load_last_bar_dates(history_path)
+
     records = []
+    skipped = 0
     for pred in predictions:
         if "error" in pred:
             continue
         symbol = pred["symbol"]
         price = pred.get("price")
+        # Fall back to prediction_date if bar_date wasn't set (e.g. a caller
+        # not going through predict_symbol) so the skip check simply never
+        # fires rather than crashing.
+        bar_date = pred.get("bar_date", prediction_date)
         for model_key, model_pred in pred.get("predictions", {}).items():
             if "signal" not in model_pred:
                 continue
+            key = (symbol, model_key)
+            if last_bar_dates.get(key) == bar_date:
+                skipped += 1
+                continue
             records.append({
                 "date": prediction_date,
+                "bar_date": bar_date,
                 "symbol": symbol,
                 "model": model_key,
                 "signal": model_pred["signal"],
                 "confidence": model_pred["confidence"],
                 "price": price,
             })
+
+    if skipped:
+        logger.info(
+            "Skipped %d prediction record(s): underlying price bar has not "
+            "advanced since the last recorded prediction (#134)", skipped,
+        )
 
     if not records:
         return 0
