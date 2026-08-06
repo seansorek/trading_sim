@@ -138,29 +138,35 @@ def _prepare_data(
     symbols: list[str], days: int, db: DB, vol_mult: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """
-    Collect training data across symbols with per-symbol temporal splits.
+    Collect training data across symbols using a single GLOBAL date split.
 
-    Each symbol is split 80/20 by time independently before pooling, so the
-    test set contains truly held-out future data for every symbol. An embargo
-    gap of FWD_RET_HORIZON_DAYS rows is dropped between train and test so that
-    no training label's forward-return horizon overlaps the test period's
-    price action (purged split — see Lopez de Prado).
+    All symbols share ONE train/test boundary date rather than each carving
+    its own 80% split independently (see #138): when symbols have different
+    listing dates, missing-bar patterns, or usable feature lengths, their
+    80% row-count boundaries land on different calendar dates. Pooling those
+    per-symbol splits then lets a later training row from a long-history
+    symbol sit alongside an earlier test row from a shorter-history symbol —
+    since every model here is trained across all symbols pooled together,
+    that is a real leak, not just a per-symbol quirk. Building one dated
+    panel and cutting it at a single trading-date boundary (the 80th
+    percentile of the pooled date axis) makes every train row strictly
+    precede every test row, globally. An embargo gap of FWD_RET_HORIZON_DAYS
+    *trading dates* (shared across symbols) is dropped between train and
+    test so no training label's forward-return horizon overlaps the test
+    period's price action (purged split — see Lopez de Prado).
 
     Returns (X_train, y_train, X_test, y_test, symbol_list_used).
     """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    train_Xs: list[np.ndarray] = []
-    train_ys: list[np.ndarray] = []
-    test_Xs: list[np.ndarray] = []
-    test_ys: list[np.ndarray] = []
-    used_symbols: list[str] = []
-
     # Load SPY once for market-relative features; warn but continue if unavailable
     spy_df = _load_symbol("SPY", start, end, db)
     if spy_df is None:
         logger.warning("Could not load SPY data — ret_*_vs_spy features will be 0")
+
+    symbol_data: dict[str, dict] = {}
+    all_dates: set = set()
 
     for symbol in symbols:
         df = _load_symbol(symbol, start, end, db)
@@ -187,27 +193,58 @@ def _prepare_data(
         pos_thr = raw_vol * np.sqrt(3) * vol_mult
         y_sym = discretize_labels(feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr)
 
-        split = int(len(X_sym) * 0.8)
-        # Embargo gap: drop rows whose fwd_ret_1d horizon would reach into the
-        # test period, so train labels never depend on test-period prices.
-        test_start = split + FWD_RET_HORIZON_DAYS
-        if test_start >= len(X_sym):
-            logger.warning("  %s: too few rows for embargo gap, skipping", symbol)
-            continue
-        X_tr = _preprocess(X_sym[:split].copy())
-        X_te = _preprocess(X_sym[test_start:].copy())
+        symbol_data[symbol] = {"dates": feats.index, "X": X_sym, "y": y_sym}
+        all_dates.update(feats.index)
 
-        train_Xs.append(X_tr); train_ys.append(y_sym[:split])
-        test_Xs.append(X_te);  test_ys.append(y_sym[test_start:])
+    if not symbol_data:
+        raise RuntimeError("No usable training data across all symbols.")
+
+    dates = pd.DatetimeIndex(sorted(all_dates))
+    cut = int(len(dates) * 0.8)
+    if cut < 1 or cut + FWD_RET_HORIZON_DAYS >= len(dates):
+        raise RuntimeError(
+            f"Only {len(dates)} distinct dates — too few for a global split plus embargo."
+        )
+    # Half-open bounds: train is dates < split_date, test is dates >=
+    # test_start_date, and the H dates between them are the embargo.
+    split_date = dates[cut]
+    test_start_date = dates[cut + FWD_RET_HORIZON_DAYS]
+
+    train_Xs: list[np.ndarray] = []
+    train_ys: list[np.ndarray] = []
+    test_Xs: list[np.ndarray] = []
+    test_ys: list[np.ndarray] = []
+    used_symbols: list[str] = []
+
+    for symbol, d in symbol_data.items():
+        sym_dates = d["dates"]
+        train_mask = sym_dates < split_date
+        test_mask = sym_dates >= test_start_date
+
+        n_train = int(train_mask.sum())
+        n_test = int(test_mask.sum())
+        if n_train == 0 or n_test == 0:
+            logger.warning(
+                "  %s: no rows on one side of the global split (train=%d test=%d), skipping",
+                symbol, n_train, n_test,
+            )
+            continue
+
+        X_tr = _preprocess(d["X"][train_mask].copy())
+        X_te = _preprocess(d["X"][test_mask].copy())
+
+        train_Xs.append(X_tr); train_ys.append(d["y"][train_mask])
+        test_Xs.append(X_te);  test_ys.append(d["y"][test_mask])
         used_symbols.append(symbol)
         logger.info(
-            "  %s: %d samples (train=%d embargo=%d test=%d), class dist %s",
-            symbol, len(y_sym), split, FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
-            np.bincount(y_sym).tolist(),
+            "  %s: %d samples (train=%d test=%d) around global split %s (embargo %d dates, test >= %s), class dist %s",
+            symbol, len(d["y"]), n_train, n_test,
+            pd.Timestamp(split_date).date(), FWD_RET_HORIZON_DAYS,
+            pd.Timestamp(test_start_date).date(), np.bincount(d["y"]).tolist(),
         )
 
     if not train_Xs:
-        raise RuntimeError("No usable training data across all symbols.")
+        raise RuntimeError("No usable training data across all symbols after global split.")
 
     X_train = np.vstack(train_Xs)
     y_train = np.concatenate(train_ys)

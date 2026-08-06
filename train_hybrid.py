@@ -121,16 +121,26 @@ def prepare_data(
     val_frac: float = 0.15,
 ) -> dict:
     """
-    Build training/validation/test arrays.
+    Build training/validation/test arrays using a single GLOBAL date split.
 
-    The validation slice is carved out of the TRAIN period only — it is the
-    most recent `val_frac` portion of each symbol's train-period rows, never
+    All symbols share ONE train/val/test boundary rather than each carving
+    its own 80% split independently (see #138): with ragged per-symbol
+    histories (different listing dates, missing bars, or usable feature
+    lengths), per-symbol 80% boundaries land on different calendar dates, so
+    pooling them lets a later training row from a long-history symbol sit
+    alongside an earlier test row from a shorter-history symbol. A single
+    dated panel is cut at one trading-date boundary (the 80th percentile of
+    the pooled date axis) so every train row strictly precedes every
+    validation/test row, globally.
+
+    The validation slice is carved out of the TRAIN period only — the most
+    recent `val_frac` portion of the global train date range — never
     randomly sampled, so it never looks ahead of the (earlier) train-proper
-    rows it's meant to validate. The test set is only ever used once, after
+    dates it's meant to validate. The test set is only ever used once, after
     training/checkpoint-selection has completed, for final reporting (see
-    train_hybrid()). Embargo gaps (>= FWD_RET_HORIZON_DAYS rows) separate
-    train-proper/val and val/test so no label's forward-return horizon
-    reaches into the next split.
+    train_hybrid()). Embargo gaps (>= FWD_RET_HORIZON_DAYS trading dates,
+    shared across symbols) separate train-proper/val and val/test so no
+    label's forward-return horizon reaches into the next split.
 
     Returns dict with keys:
       X_train_seq, X_val_seq, X_test_seq   — (M, lookback, n_feat) sequences (scaled)
@@ -146,11 +156,9 @@ def prepare_data(
     if spy_df is None:
         logger.warning("SPY missing — ret_*_vs_spy features will be 0")
 
-    # First pass: collect per-symbol raw features + labels, do per-symbol temporal split
-    train_blocks: list[tuple[np.ndarray, np.ndarray]] = []
-    val_blocks: list[tuple[np.ndarray, np.ndarray]] = []
-    test_blocks: list[tuple[np.ndarray, np.ndarray]] = []
-    used_symbols: list[str] = []
+    # First pass: collect per-symbol dated features + labels.
+    symbol_data: dict[str, dict] = {}
+    all_dates: set = set()
 
     for sym in symbols:
         df = _load_symbol(sym, start, end, db)
@@ -174,35 +182,64 @@ def prepare_data(
             feats["fwd_ret_1d"].values, pos_thr=pos_thr, neg_thr=-pos_thr
         )
 
-        split = int(len(X_sym) * 0.8)
-        # Embargo gap: drop rows whose fwd_ret_1d horizon would reach into the
-        # test period, so train/val labels never depend on test-period prices.
-        test_start = split + FWD_RET_HORIZON_DAYS
-        if test_start + lookback >= len(X_sym):
-            logger.warning("  %s: too few rows for embargo gap, skipping", sym)
-            continue
+        symbol_data[sym] = {"dates": feats.index, "X": X_sym, "y": y_sym}
+        all_dates.update(feats.index)
 
-        # Carve a validation slice out of the TRAIN period (the most recent
-        # val_frac portion of it), with its own embargo gap against
-        # train-proper, so early stopping never touches the test set.
-        val_len = max(int(split * val_frac), 1)
-        val_start = split - val_len
-        train_end = val_start - FWD_RET_HORIZON_DAYS
-        if train_end <= lookback:
+    if not symbol_data:
+        raise RuntimeError("No usable training data.")
+
+    # Single global date split shared by every symbol. cut is the train/val
+    # boundary index into the pooled, sorted date axis (the same "80%"
+    # boundary train_models._prepare_data uses); val_start/train_end are
+    # carved back from it exactly as the old per-symbol logic carved them
+    # back from each symbol's own `split`.
+    dates = pd.DatetimeIndex(sorted(all_dates))
+    n_dates = len(dates)
+    cut = int(n_dates * 0.8)
+    val_len = max(int(cut * val_frac), 1)
+    val_start_idx = cut - val_len
+    train_end_idx = val_start_idx - FWD_RET_HORIZON_DAYS
+    if train_end_idx < 1 or cut + FWD_RET_HORIZON_DAYS >= n_dates:
+        raise RuntimeError(
+            f"Only {n_dates} distinct dates — too few for a global "
+            "train/val/test split plus embargoes."
+        )
+    train_end_date = dates[train_end_idx]
+    val_start_date = dates[val_start_idx]
+    split_date = dates[cut]
+    test_start_date = dates[cut + FWD_RET_HORIZON_DAYS]
+
+    train_blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    val_blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    test_blocks: list[tuple[np.ndarray, np.ndarray]] = []
+    used_symbols: list[str] = []
+
+    for sym, d in symbol_data.items():
+        sym_dates = d["dates"]
+        train_mask = sym_dates < train_end_date
+        val_mask = (sym_dates >= val_start_date) & (sym_dates < split_date)
+        test_mask = sym_dates >= test_start_date
+
+        n_train = int(train_mask.sum())
+        n_val = int(val_mask.sum())
+        n_test = int(test_mask.sum())
+        if n_train <= lookback or n_test < lookback:
             logger.warning(
-                "  %s: too few rows for train/val embargo gap, skipping", sym,
+                "  %s: too few rows around the global split (train=%d val=%d test=%d), "
+                "skipping", sym, n_train, n_val, n_test,
             )
             continue
 
-        train_blocks.append((X_sym[:train_end], y_sym[:train_end]))
-        val_blocks.append((X_sym[val_start:split], y_sym[val_start:split]))
-        test_blocks.append((X_sym[test_start:], y_sym[test_start:]))
+        train_blocks.append((d["X"][train_mask], d["y"][train_mask]))
+        val_blocks.append((d["X"][val_mask], d["y"][val_mask]))
+        test_blocks.append((d["X"][test_mask], d["y"][test_mask]))
         used_symbols.append(sym)
         logger.info(
-            "  %s: %d rows (train=%d embargo=%d val=%d embargo=%d test=%d) class dist %s",
-            sym, len(y_sym), train_end, val_start - train_end, split - val_start,
-            FWD_RET_HORIZON_DAYS, len(y_sym) - test_start,
-            np.bincount(y_sym).tolist(),
+            "  %s: %d rows (train=%d val=%d test=%d) around global split "
+            "train<%s val<%s embargo test>=%s, class dist %s",
+            sym, len(d["y"]), n_train, n_val, n_test,
+            pd.Timestamp(train_end_date).date(), pd.Timestamp(split_date).date(),
+            pd.Timestamp(test_start_date).date(), np.bincount(d["y"]).tolist(),
         )
 
     if not train_blocks:
