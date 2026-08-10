@@ -14,6 +14,7 @@ from daily_features import discretize_labels, make_daily_features
 def _synthetic_ohlcv(n=400, seed=0):
     rng = np.random.default_rng(seed)
     close = 100 * np.cumprod(1 + rng.normal(0, 0.02, size=n))
+    idx = pd.date_range("2022-01-01", periods=n, freq="B")
     df = pd.DataFrame(
         {
             "open": close,
@@ -21,7 +22,8 @@ def _synthetic_ohlcv(n=400, seed=0):
             "low": close * 0.99,
             "close": close,
             "volume": rng.integers(1_000, 10_000, size=n).astype(float),
-        }
+        },
+        index=idx,
     )
     return df
 
