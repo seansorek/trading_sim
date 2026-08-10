@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from signal_monitor import check_signal_drift
+from signal_monitor import _dedupe_drift_records, check_signal_drift
 
 
 def _write_history(tmp_path, records: list[dict]) -> str:
@@ -27,7 +27,15 @@ def _build_history(
     yesterday_score: float | None = None,
 ) -> tuple[str, str]:
     """Build history with stable daily mean = base_score for n_days.
-    Optionally override yesterday's entry."""
+    Optionally override yesterday's entry.
+
+    Each day gets a distinct `price` (100.0 + i) rather than a flat 100.0,
+    since check_signal_drift now dedupes same-(model, symbol) records that
+    share an identical price as weekend/pre-open restatements (#144) -- a
+    flat price across every synthetic day would collapse this whole fixture
+    down to one record, same as it would never happen with real daily
+    closes.
+    """
     today = date.today()
     records = []
     for i in range(2, n_days + 2):  # from 2 days ago backwards
@@ -35,7 +43,7 @@ def _build_history(
         signal = "BUY" if base_score >= 0 else "SELL"
         records.append({
             "date": d, "symbol": "AAPL", "model": "daily_predictor",
-            "signal": signal, "confidence": abs(base_score), "price": 100.0,
+            "signal": signal, "confidence": abs(base_score), "price": 100.0 + i,
         })
 
     if yesterday_score is not None:
@@ -43,7 +51,7 @@ def _build_history(
         signal = "BUY" if yesterday_score >= 0 else "SELL"
         records.append({
             "date": yesterday, "symbol": "AAPL", "model": "daily_predictor",
-            "signal": signal, "confidence": abs(yesterday_score), "price": 100.0,
+            "signal": signal, "confidence": abs(yesterday_score), "price": 101.0,
         })
 
     path = _write_history(tmp_path, records)
@@ -90,25 +98,27 @@ def test_no_drift_when_abs_shift_below_threshold(tmp_path):
     today = date.today()
     records = []
 
-    # Build 29-day baseline with alternating BUY/HOLD
+    # Build 29-day baseline with alternating BUY/HOLD. Distinct per-day
+    # prices (100.0 + i) so consecutive entries aren't collapsed as
+    # weekend/pre-open restatements by check_signal_drift's dedup (#144).
     for i in range(2, 31):
         d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         if i % 2 == 0:  # Even: BUY 0.0002
             records.append({
                 "date": d, "symbol": "AAPL", "model": "daily_predictor",
-                "signal": "BUY", "confidence": 0.0002, "price": 100.0,
+                "signal": "BUY", "confidence": 0.0002, "price": 100.0 + i,
             })
         else:  # Odd: HOLD 0.0
             records.append({
                 "date": d, "symbol": "AAPL", "model": "daily_predictor",
-                "signal": "HOLD", "confidence": 0.0, "price": 100.0,
+                "signal": "HOLD", "confidence": 0.0, "price": 100.0 + i,
             })
 
     # Yesterday: score 0.001 (high z-score but low abs-shift)
     yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     records.append({
         "date": yesterday, "symbol": "AAPL", "model": "daily_predictor",
-        "signal": "BUY", "confidence": 0.001, "price": 100.0,
+        "signal": "BUY", "confidence": 0.001, "price": 101.0,
     })
 
     path = _write_history(tmp_path, records)
@@ -135,5 +145,85 @@ def test_drift_returns_false_when_insufficient_window(tmp_path):
         records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
                         "signal": "BUY", "confidence": 0.1, "price": 100.0})
     path = _write_history(tmp_path, records)
+    result = check_signal_drift(path, today.strftime("%Y-%m-%d"), {"daily_predictor": 0.9})
+    assert result.get("daily_predictor") is False
+
+
+def test_dedupe_collapses_weekend_restatement_block_via_bar_date():
+    """GH #144: a Fri/Sat/Sun/Mon-pre-open block that all restate Friday's
+    close (same bar_date, distinct calendar `date`) must collapse to one
+    observation, not four."""
+    records = [
+        {"date": "2026-01-02", "bar_date": "2026-01-02", "symbol": "AAPL",
+         "model": "daily_predictor", "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-03", "bar_date": "2026-01-02", "symbol": "AAPL",  # Sat
+         "model": "daily_predictor", "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-04", "bar_date": "2026-01-02", "symbol": "AAPL",  # Sun
+         "model": "daily_predictor", "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-05", "bar_date": "2026-01-02", "symbol": "AAPL",  # Mon pre-open
+         "model": "daily_predictor", "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-06", "bar_date": "2026-01-06", "symbol": "AAPL",  # Tue: new session
+         "model": "daily_predictor", "signal": "SELL", "confidence": 0.2, "price": 102.0},
+    ]
+    deduped = _dedupe_drift_records(records)
+    assert len(deduped) == 2
+    assert deduped[0]["date"] == "2026-01-02"
+    assert deduped[1]["date"] == "2026-01-06"
+
+
+def test_dedupe_collapses_weekend_restatement_block_via_price_fallback():
+    """Same scenario as above but for legacy records with no bar_date --
+    falls back to collapsing consecutive same-price entries."""
+    records = [
+        {"date": "2026-01-02", "symbol": "AAPL", "model": "daily_predictor",
+         "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-03", "symbol": "AAPL", "model": "daily_predictor",  # Sat
+         "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-04", "symbol": "AAPL", "model": "daily_predictor",  # Sun
+         "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-05", "symbol": "AAPL", "model": "daily_predictor",  # Mon pre-open
+         "signal": "BUY", "confidence": 0.1, "price": 100.0},
+        {"date": "2026-01-06", "symbol": "AAPL", "model": "daily_predictor",  # Tue: new session
+         "signal": "SELL", "confidence": 0.2, "price": 102.0},
+    ]
+    deduped = _dedupe_drift_records(records)
+    assert len(deduped) == 2
+    assert deduped[0]["date"] == "2026-01-02"
+    assert deduped[1]["date"] == "2026-01-06"
+
+
+def test_baseline_window_not_padded_by_weekend_restatements(tmp_path):
+    """Before #144: check_signal_drift's baseline counted every calendar
+    date, so a Fri/Sat/Sun restatement block of one real session padded the
+    window with 2 extra copies of the same value. A window that has only
+    8 genuinely distinct prior sessions (below MIN_DRIFT_WINDOW=10) could
+    clear the sufficiency check purely from that padding, computing mu/sigma
+    over an inflated, triplicate-weighted sample. After dedup, the window
+    must be judged on its real distinct-session count."""
+    today = date.today()
+    records = []
+    # 8 distinct, genuinely independent normal sessions -- below
+    # MIN_DRIFT_WINDOW(10) on its own.
+    for i in range(5, 13):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        records.append({
+            "date": d, "bar_date": d, "symbol": "AAPL", "model": "daily_predictor",
+            "signal": "BUY", "confidence": 0.1, "price": 100.0 + i,
+        })
+    # One more real session (Friday), restated on Sat/Sun under distinct
+    # calendar dates but the same bar_date -- 3 raw entries, 1 real session.
+    friday = today - timedelta(days=4)
+    for offset in (4, 3, 2):  # Fri, Sat, Sun
+        d = today - timedelta(days=offset)
+        records.append({
+            "date": d.strftime("%Y-%m-%d"), "bar_date": friday.strftime("%Y-%m-%d"),
+            "symbol": "AAPL", "model": "daily_predictor",
+            "signal": "BUY", "confidence": 0.1, "price": 149.0,
+        })
+    path = _write_history(tmp_path, records)
+    # Deduped: 8 + 1 = 9 distinct sessions total, 8 of which land in the
+    # baseline (the 9th is "yesterday") -- still short of MIN_DRIFT_WINDOW,
+    # so this must report no drift for lack of data, not evaluate a
+    # padded-to-11 raw-entry baseline.
     result = check_signal_drift(path, today.strftime("%Y-%m-%d"), {"daily_predictor": 0.9})
     assert result.get("daily_predictor") is False

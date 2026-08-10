@@ -140,6 +140,45 @@ def _dedupe_scoreable(records: list[dict], frames: dict[str, Optional["pd.DataFr
     return deduped
 
 
+def _dedupe_drift_records(records: list[dict]) -> list[dict]:
+    """
+    Collapse weekend/pre-open cron restatements of the same trading session
+    before check_signal_drift computes daily means from them (GH #144).
+
+    Preferred key: `bar_date`, the field append_predictions_history() has
+    stamped on every record since #137's write-side fix -- exact, no
+    guessing. Records written before that landed (and any caller that
+    doesn't go through predict_symbol) carry no `bar_date`; for those,
+    fall back to collapsing consecutive same-(model, symbol) entries that
+    share an identical `price`, since a restated close is guaranteed to
+    repeat exactly while a genuine session-to-session move essentially
+    never does.
+    ponytail: the price fallback can under-collapse (misses a same-price
+    coincidence between two real sessions) or over-collapse (a thinly
+    traded symbol that's flat two sessions running) -- upgrade to
+    price-fetch session resolution, like score_realized_ic's
+    _dedupe_scoreable/_resolve_session_date, if that shows up in practice.
+    """
+    by_key: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        model, symbol = r.get("model"), r.get("symbol")
+        if not model or not symbol or "date" not in r:
+            continue
+        by_key.setdefault((model, symbol), []).append(r)
+
+    deduped: list[dict] = []
+    for recs in by_key.values():
+        recs = sorted(recs, key=lambda r: r["date"])
+        prev_ident = object()  # sentinel: never equals a real bar_date/price
+        for r in recs:
+            ident = r["bar_date"] if r.get("bar_date") is not None else r.get("price")
+            if ident is not None and ident == prev_ident:
+                continue
+            deduped.append(r)
+            prev_ident = ident
+    return deduped
+
+
 def _signal_to_score(signal: str, confidence: float) -> float:
     """Map signal + confidence to a directional score for IC computation."""
     if signal == "BUY":
@@ -271,8 +310,12 @@ def check_signal_drift(
     AND yesterday also showed the same shift (two-consecutive-day guard).
     """
     records = _load_history(history_path)
+    # Collapse weekend/pre-open restatements of the same session so the
+    # two-consecutive-day guard below never compares an observation
+    # against a copy of itself, and the baseline isn't triplicate-weighted
+    # toward weekend-adjacent sessions (#144).
+    records = _dedupe_drift_records(records)
     today = datetime.strptime(today_date, "%Y-%m-%d").date()
-    yesterday = today - timedelta(days=1)
     window_start = today - timedelta(days=window_days)
 
     # Build daily mean scores from history: {date -> {model -> mean_score}}
@@ -302,11 +345,19 @@ def check_signal_drift(
             warnings[model] = False
             continue
 
-        # Baseline window: exclude today and yesterday for a clean reference
+        # "Yesterday" is the most recent prior *session* this model has a
+        # deduped record for, not the literal calendar day before today --
+        # after _dedupe_drift_records, a Sun/Mon-pre-open run's calendar
+        # "yesterday" would otherwise still point at a restatement of the
+        # same Friday close (#144).
+        model_dates = sorted(d for d in daily_means if model in daily_means[d])
+        if not model_dates:
+            warnings[model] = False
+            continue
+        prev_session = model_dates[-1]
+
         baseline_scores = [
-            daily_means[d][model]
-            for d in daily_means
-            if model in daily_means[d] and d < yesterday
+            daily_means[d][model] for d in model_dates if d != prev_session
         ]
         if len(baseline_scores) < MIN_DRIFT_WINDOW:
             warnings[model] = False
@@ -324,8 +375,7 @@ def check_signal_drift(
             return abs(z) > sigma_threshold and abs(score - mu) > abs_threshold
 
         today_shifted = _is_shifted(today_score)
-        yesterday_score = daily_means.get(yesterday, {}).get(model)
-        yesterday_shifted = yesterday_score is not None and _is_shifted(yesterday_score)
+        yesterday_shifted = _is_shifted(daily_means[prev_session][model])
 
         warnings[model] = today_shifted and yesterday_shifted
 
