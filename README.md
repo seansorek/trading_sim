@@ -1,6 +1,6 @@
 # Trading Sim
 
-Ranks a 159-name US equity cross-section every morning and publishes a
+Ranks a 156-name US equity cross-section every morning and publishes a
 **beta-neutral long/short target book** to Discord, plus per-symbol
 BUY/SELL/HOLD signals for a smaller watchlist. GitHub Actions runs the job at
 06:00 UTC.
