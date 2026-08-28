@@ -26,6 +26,14 @@ on:
 # manually while the 06:00 UTC schedule is about to run) and confirm in the
 # Actions tab that the second run shows "Queued"/waiting on the concurrency
 # group until the first completes, rather than both running concurrently.
+#
+# GitHub Actions only holds one pending run per concurrency group: if a
+# third trigger arrives while a run is already queued, GitHub cancels that
+# queued run and replaces it with the newest one (there is no way to
+# configure a deeper queue). That is fine here — a cancelled run is killed
+# before its steps start, so it never generates output or posts to Discord,
+# and the run that does execute always re-syncs to the latest main (see the
+# "Refresh to latest main" step below) before it reads portfolio state.
 concurrency:
   group: ${{ github.workflow }}-${{ github.repository }}
   cancel-in-progress: false
@@ -44,6 +52,21 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Refresh to latest main
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          # actions/checkout resolves and pins the SHA for this run at
+          # trigger time. The concurrency group above makes an overlapping
+          # run wait its turn, but a waiting run does not re-checkout when
+          # its turn finally arrives — if the run ahead of it in the queue
+          # already pushed a new predictions/portfolio.jsonl to main, this
+          # run would otherwise still read the stale pre-wait snapshot as
+          # its starting state. Fast-forward to whatever main is *now*,
+          # right before that state is read.
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
 
       - name: Set up Python
         uses: actions/setup-python@v5
