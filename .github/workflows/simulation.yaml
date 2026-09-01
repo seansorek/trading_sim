@@ -9,6 +9,35 @@ on:
       - main
   workflow_dispatch:       # Manual trigger
 
+# Serialize state-mutating runs. The scheduled 06:00 UTC run and a manual
+# workflow_dispatch both read predictions/portfolio.jsonl as starting state
+# and later commit+push predictions/. Without this, an overlapping
+# manual/scheduled run can race: both read the same portfolio state, the
+# first push advances main, the second fails non-fast-forward after already
+# generating output and (for schedule/workflow_dispatch) posting to Discord,
+# and one run's state transition is silently dropped. `cancel-in-progress:
+# false` means a second trigger queues and waits rather than cancelling the
+# in-flight run outright, so no run is dropped and the runner does not need
+# force-push/rebase gymnastics to reconcile two runs computed off the same
+# stale book.
+#
+# Manual verification: trigger `workflow_dispatch` twice back to back (e.g.
+# `gh workflow run simulation.yaml` twice within a few seconds, or fire one
+# manually while the 06:00 UTC schedule is about to run) and confirm in the
+# Actions tab that the second run shows "Queued"/waiting on the concurrency
+# group until the first completes, rather than both running concurrently.
+#
+# GitHub Actions only holds one pending run per concurrency group: if a
+# third trigger arrives while a run is already queued, GitHub cancels that
+# queued run and replaces it with the newest one (there is no way to
+# configure a deeper queue). That is fine here — a cancelled run is killed
+# before its steps start, so it never generates output or posts to Discord,
+# and the run that does execute always re-syncs to the latest main (see the
+# "Refresh to latest main" step below) before it reads portfolio state.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.repository }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -23,6 +52,21 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Refresh to latest main
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          # actions/checkout resolves and pins the SHA for this run at
+          # trigger time. The concurrency group above makes an overlapping
+          # run wait its turn, but a waiting run does not re-checkout when
+          # its turn finally arrives — if the run ahead of it in the queue
+          # already pushed a new predictions/portfolio.jsonl to main, this
+          # run would otherwise still read the stale pre-wait snapshot as
+          # its starting state. Fast-forward to whatever main is *now*,
+          # right before that state is read.
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -60,7 +104,29 @@ jobs:
             echo "No history changes to commit"
           else
             git commit -m "chore: record daily predictions $(date -u +%Y-%m-%d)"
-            git push
+            # Defense in depth only: the concurrency group above already
+            # serializes schedule/workflow_dispatch runs, so main should not
+            # have moved since checkout and this push should succeed on the
+            # first try. If it still fails (e.g. an unrelated commit landed
+            # on main mid-run), rebase our single predictions commit onto
+            # the new tip and retry once rather than force-pushing over it.
+            # We deliberately do not re-run prediction generation here -
+            # under normal (serialized) operation this path should not
+            # trigger at all.
+            if ! git push; then
+              echo "Push rejected, retrying once after rebasing onto latest main"
+              git fetch origin main
+              if git rebase origin/main; then
+                if ! git push; then
+                  echo "::error::Push still failed after rebase retry. Manual intervention required to reconcile predictions/ state."
+                  exit 1
+                fi
+              else
+                echo "::error::Rebase onto latest main failed (likely a conflict in predictions/). Manual intervention required."
+                git rebase --abort
+                exit 1
+              fi
+            fi
           fi
 
       - name: Log completion
