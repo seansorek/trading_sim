@@ -258,17 +258,51 @@ def test_without_beta_row_the_book_stays_dollar_neutral():
     assert w.abs().sum() == pytest.approx(1.0)
 
 
-def test_unusable_leg_beta_falls_back_to_dollar_neutral():
-    """A near-zero or negative leg beta must not blow up the notional solve."""
+def test_unusable_leg_beta_goes_flat_not_dollar_neutral():
+    """Regression test for #148.
+
+    A near-zero, NaN, or opposite-signed leg beta means the beta-neutral
+    solve is not constructible. The module docstring says that book should
+    stay flat rather than silently substitute a dollar-neutral book (which
+    the docstring itself calls out as carrying a measured +0.19 beta on the
+    live panel — the opposite of what a `beta_row` caller asked for).
+    Before the fix, the missing `else` meant `long_notional`/`short_notional`
+    kept their dollar-neutral values from above the `if` and the function
+    traded a full-size dollar-neutral book with no signal that anything
+    had failed.
+    """
     pred = _pred_row()
     beta = pd.Series(0.0, index=pred.index)
     w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=beta)
-    assert w.sum() == pytest.approx(0.0)
-    assert w.abs().sum() == pytest.approx(1.0)
+    assert (w == 0.0).all()
 
     nan_beta = pd.Series(np.nan, index=pred.index)
     w2 = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=nan_beta)
-    assert w2.sum() == pytest.approx(0.0)
+    assert (w2 == 0.0).all()
+
+    # Opposite-signed leg betas (short leg positively exposed, long leg
+    # negatively) also make the equal-exposure solve non-constructible.
+    opp_beta = pd.Series(np.linspace(-1.0, 1.0, len(pred))[::-1], index=pred.index)
+    w3 = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=opp_beta)
+    assert (w3 == 0.0).all()
+
+
+def test_run_panel_counts_unconstructible_beta_dates_as_flat_days():
+    """The n_flat_days diagnostic must pick up beta-neutral-not-constructible
+    dates for free, per the issue's suggested fix — no separate counter
+    needed."""
+    idx = pd.bdate_range("2021-01-01", periods=5)
+    cols = [f"S{i:02d}" for i in range(40)]
+    pred = pd.DataFrame(np.tile(np.arange(len(cols), dtype=float), (len(idx), 1)),
+                         index=idx, columns=cols)
+    ret = pd.DataFrame(0.0, index=idx, columns=cols)
+    # Beta of exactly 0 for every name on every date -> never constructible.
+    beta = pd.DataFrame(0.0, index=idx, columns=cols)
+
+    cfg = PanelConfig(decile=0.25, min_names=20, rebalance_days=1)
+    result = run_panel(pred, ret, cfg, beta=beta)
+    assert result.diagnostics["n_flat_days"] == len(idx)
+    assert (result.weights == 0.0).all(axis=None)
 
 
 def test_run_panel_with_beta_reports_near_zero_ex_ante_beta():
