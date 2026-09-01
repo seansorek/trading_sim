@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 # needed to equalize exposures explodes. Fall back to dollar-neutral instead.
 MIN_LEG_BETA = 0.1
 
+# Fraction of a leg's names that need a beta estimate before the leg's mean
+# beta is trusted to represent the whole leg. pandas' .mean() skips NaN, so
+# without this floor a leg with betas for e.g. 1 of 4 names is scored on that
+# single beta and sized as if it were full coverage — see #149.
+MIN_BETA_COVERAGE = 0.8
+
 # A sector needs this many names on a date for its mean to be worth subtracting.
 # Below it, demeaning mostly removes the names' own signal: with 2 names the
 # demeaned pair is always {+d, -d}, which is pure noise amplification.
@@ -131,6 +137,11 @@ def rank_to_weights(
     it. Beta is estimated on a trailing window, so realized beta will not be
     exactly zero; panel_eval's +/-0.1 band still does real work as a check that
     the estimate held up out of sample.
+
+    Each leg's mean beta is only trusted when at least MIN_BETA_COVERAGE of
+    its names actually have a beta estimate — otherwise the leg falls back to
+    the dollar-neutral notional for that date, since a mean over 1-2 names in
+    a much larger leg is not representative of the leg's real exposure.
     """
     weights = pd.Series(0.0, index=pred_row.index)
     valid = pred_row.dropna()
@@ -148,14 +159,31 @@ def rank_to_weights(
 
     long_notional = short_notional = gross_exposure / 2.0
     if beta_row is not None:
-        b_long = beta_row.reindex(longs).mean()
-        b_short = beta_row.reindex(shorts).mean()
-        # Opposite-signed leg betas would make the equal-exposure solve produce
-        # a negative notional; that book is not constructible, so stay flat.
-        if pd.notna(b_long) and pd.notna(b_short) and b_long > MIN_LEG_BETA and b_short > MIN_LEG_BETA:
-            total_beta = b_long + b_short
-            long_notional = gross_exposure * b_short / total_beta
-            short_notional = gross_exposure * b_long / total_beta
+        beta_long = beta_row.reindex(longs)
+        beta_short = beta_row.reindex(shorts)
+        # .mean() skips NaN, so a leg whose beta estimates are mostly missing
+        # would otherwise be sized off whichever one or two names happen to
+        # have one, with no signal that the rest of the leg was unrepresented
+        # (#149). Require a minimum fraction of the leg to actually have a
+        # beta estimate before trusting the leg mean at all.
+        cov_long = beta_long.notna().mean()
+        cov_short = beta_short.notna().mean()
+        if cov_long < MIN_BETA_COVERAGE or cov_short < MIN_BETA_COVERAGE:
+            logger.warning(
+                "beta coverage %.0f%%/%.0f%% (long/short) below floor %.0f%% — "
+                "falling back to dollar-neutral",
+                100 * cov_long, 100 * cov_short, 100 * MIN_BETA_COVERAGE,
+            )
+        else:
+            b_long = beta_long.mean()
+            b_short = beta_short.mean()
+            # Opposite-signed leg betas would make the equal-exposure solve
+            # produce a negative notional; that book is not constructible, so
+            # stay flat.
+            if pd.notna(b_long) and pd.notna(b_short) and b_long > MIN_LEG_BETA and b_short > MIN_LEG_BETA:
+                total_beta = b_long + b_short
+                long_notional = gross_exposure * b_short / total_beta
+                short_notional = gross_exposure * b_long / total_beta
 
     # Centre on the full cross-section, not the leg: a leg-local centre would
     # make the boundary name's distance ~0 by construction on every date.
