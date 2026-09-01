@@ -183,6 +183,72 @@ def test_score_realized_ic_directional_accuracy_ignores_holds(tmp_path):
     assert result["daily_predictor"]["n_directional"] == 10
 
 
+# --- Regression tests for #147: multi-symbol trailing window collapse -----
+
+def test_score_realized_ic_multi_symbol_window_spans_many_dates(tmp_path):
+    """
+    Reproduces #147: the daily job writes one record per symbol per day, so
+    with MIN_LOOKBACK=20 and 20 symbols/day, truncating by *record count*
+    ([-min_lookback:]) selects a single trading session instead of a 20-day
+    trailing window. After the fix (truncating by distinct date), the
+    scored sample must span all 20 trailing dates, not one.
+    """
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    dates = _business_days_before(cutoff_date, 20)
+    symbols = [f"SYM{i}" for i in range(20)]
+
+    records = []
+    for day in dates:
+        d = day.strftime("%Y-%m-%d")
+        for j, sym in enumerate(symbols):
+            records.append({
+                "date": d, "symbol": sym, "model": "daily_predictor",
+                "signal": "BUY" if j % 2 == 0 else "SELL",
+                "confidence": 0.5 + (j % 5) * 0.05,
+                "price": 100.0 + j,
+            })
+    path = _write_history(tmp_path, records)
+
+    # 20 dates x 20 symbols = 400 raw records. Under the pre-fix behavior,
+    # sorted(...)[-20:] would keep only the most recent date's 20 records.
+    assert len(records) == 400
+
+    def mock_fetch(symbol, start, end):
+        idx = pd.bdate_range(start, end)
+        # Distinct, symbol-dependent price path so returns aren't degenerate.
+        offset = symbols.index(symbol)
+        closes = [100.0 + offset + i * 0.1 for i in range(len(idx))]
+        return pd.DataFrame({"close": closes}, index=idx)
+
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"), fetch_prices_fn=mock_fetch)
+    assert result["daily_predictor"] is not None
+
+    # The core regression assertion: the scored sample must reflect the full
+    # 20-day x 20-symbol window (400 observations), not a single day's 20.
+    assert result["daily_predictor"]["lookback_n"] == 400
+    assert result["daily_predictor"]["lookback_n"] > 20
+
+
+def test_score_realized_ic_single_symbol_still_requires_min_lookback_dates(tmp_path):
+    """With one symbol per day, distinct-date truncation must behave exactly
+    like the old record-count truncation: fewer than min_lookback sessions
+    is still reported as insufficient history."""
+    today = date.today()
+    cutoff_date = today - timedelta(days=FWD_RET_HORIZON_DAYS + 1)
+    dates = _business_days_before(cutoff_date, 10)  # below MIN_LOOKBACK=20
+    records = []
+    for i, day in enumerate(dates):
+        d = day.strftime("%Y-%m-%d")
+        records.append({"date": d, "symbol": "AAPL", "model": "daily_predictor",
+                        "signal": "BUY", "confidence": 0.7, "price": 100.0 + i * 1e-6})
+    path = _write_history(tmp_path, records)
+
+    result = score_realized_ic(path, today.strftime("%Y-%m-%d"),
+                               fetch_prices_fn=_linear_mock_fetch)
+    assert result["daily_predictor"] is None
+
+
 def test_score_realized_ic_handles_missing_file(tmp_path):
     result = score_realized_ic(str(tmp_path / "nonexistent.jsonl"),
                                date.today().strftime("%Y-%m-%d"),
