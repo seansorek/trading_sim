@@ -258,20 +258,54 @@ def test_without_beta_row_the_book_stays_dollar_neutral():
     assert w.abs().sum() == pytest.approx(1.0)
 
 
-def test_unusable_leg_beta_falls_back_to_dollar_neutral():
-    """A near-zero or negative leg beta must not blow up the notional solve."""
+def test_unusable_leg_beta_goes_flat_not_dollar_neutral():
+    """Regression test for #148.
+
+    A near-zero, NaN, or opposite-signed leg beta means the beta-neutral
+    solve is not constructible. The module docstring says that book should
+    stay flat rather than silently substitute a dollar-neutral book (which
+    the docstring itself calls out as carrying a measured +0.19 beta on the
+    live panel — the opposite of what a `beta_row` caller asked for).
+    Before the fix, the missing `else` meant `long_notional`/`short_notional`
+    kept their dollar-neutral values from above the `if` and the function
+    traded a full-size dollar-neutral book with no signal that anything
+    had failed.
+    """
     pred = _pred_row()
     beta = pd.Series(0.0, index=pred.index)
     w = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=beta)
-    assert w.sum() == pytest.approx(0.0)
-    assert w.abs().sum() == pytest.approx(1.0)
+    assert (w == 0.0).all()
 
     nan_beta = pd.Series(np.nan, index=pred.index)
     w2 = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=nan_beta)
-    assert w2.sum() == pytest.approx(0.0)
+    assert (w2 == 0.0).all()
+
+    # Opposite-signed leg betas (short leg positively exposed, long leg
+    # negatively) also make the equal-exposure solve non-constructible.
+    opp_beta = pd.Series(np.linspace(-1.0, 1.0, len(pred))[::-1], index=pred.index)
+    w3 = rank_to_weights(pred, decile=0.25, gross_exposure=1.0, min_names=20, beta_row=opp_beta)
+    assert (w3 == 0.0).all()
 
 
-def test_partial_beta_coverage_falls_back_to_dollar_neutral_not_full_size():
+def test_run_panel_counts_unconstructible_beta_dates_as_flat_days():
+    """The n_flat_days diagnostic must pick up beta-neutral-not-constructible
+    dates for free, per the issue's suggested fix — no separate counter
+    needed."""
+    idx = pd.bdate_range("2021-01-01", periods=5)
+    cols = [f"S{i:02d}" for i in range(40)]
+    pred = pd.DataFrame(np.tile(np.arange(len(cols), dtype=float), (len(idx), 1)),
+                         index=idx, columns=cols)
+    ret = pd.DataFrame(0.0, index=idx, columns=cols)
+    # Beta of exactly 0 for every name on every date -> never constructible.
+    beta = pd.DataFrame(0.0, index=idx, columns=cols)
+
+    cfg = PanelConfig(decile=0.25, min_names=20, rebalance_days=1)
+    result = run_panel(pred, ret, cfg, beta=beta)
+    assert result.diagnostics["n_flat_days"] == len(idx)
+    assert (result.weights == 0.0).all(axis=None)
+
+
+def test_partial_beta_coverage_goes_flat_not_full_size():
     """Regression test for #149.
 
     Reproduces the issue's exact scenario: a 20-name cross-section, decile
@@ -285,8 +319,10 @@ def test_partial_beta_coverage_falls_back_to_dollar_neutral_not_full_size():
     sizing branch.
 
     After the fix, coverage below MIN_BETA_COVERAGE must reject the
-    beta-neutral solve for that leg and fall back to the dollar-neutral
-    50/50 notional split instead.
+    beta-neutral solve for that leg. Per #148 (merged after this fix was
+    written), an unconstructible beta-neutral solve stays flat rather than
+    substituting the dollar-neutral book the module docstring calls out as
+    unacceptable — so insufficient coverage now takes the same flat path.
     """
     n = 20
     pred = pd.Series(np.arange(n, dtype=float), index=[f"S{i:02d}" for i in range(n)])
@@ -306,27 +342,22 @@ def test_partial_beta_coverage_falls_back_to_dollar_neutral_not_full_size():
     w_full = rank_to_weights(pred, decile=0.2, gross_exposure=1.0, min_names=20,
                              beta_row=true_beta)
 
-    long_notional_partial = sum(w for w in w_partial if w > 0)
-    short_notional_partial = -sum(w for w in w_partial if w < 0)
-
     # With only 1-of-4 coverage, the leg mean is not trusted: the book must
-    # be dollar-neutral (50/50), not sized off the single-name mean.
-    assert long_notional_partial == pytest.approx(0.5)
-    assert short_notional_partial == pytest.approx(0.5)
-    assert w_partial.sum() == pytest.approx(0.0, abs=1e-12)
+    # go flat, not be sized off the single-name mean.
+    assert (w_partial == 0.0).all()
 
     # Full coverage (the "true" comparison from the issue) does use the
-    # beta-neutral solve and is NOT the dollar-neutral 50/50 split, so this
-    # also confirms the two code paths are actually distinguishable.
+    # beta-neutral solve and is NOT flat, so this also confirms the two code
+    # paths are actually distinguishable.
     long_notional_full = sum(w for w in w_full if w > 0)
     short_notional_full = -sum(w for w in w_full if w < 0)
-    assert long_notional_full != pytest.approx(0.5)
+    assert long_notional_full != pytest.approx(0.0)
+    assert short_notional_full != pytest.approx(0.0)
 
-    # The real ex-ante beta of the partial-coverage book (computed against
-    # the TRUE per-name betas, not the partial estimate) must land near the
-    # dollar-neutral book's beta, not the directional +1.39 the bug produced.
-    dollar_neutral_ex_ante_beta = float((w_partial * true_beta.fillna(0.0)).sum())
-    assert dollar_neutral_ex_ante_beta != pytest.approx(1.39, abs=0.05)
+    # The real ex-ante beta of the partial-coverage (flat) book must be
+    # exactly zero, not the directional +1.39 the bug produced.
+    partial_ex_ante_beta = float((w_partial * true_beta.fillna(0.0)).sum())
+    assert partial_ex_ante_beta == pytest.approx(0.0, abs=1e-12)
 
 
 def test_run_panel_with_beta_reports_near_zero_ex_ante_beta():
