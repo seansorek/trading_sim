@@ -198,6 +198,14 @@ def score_realized_ic(
     """
     Score trailing predictions against realized returns.
 
+    `min_lookback` is a count of distinct trailing *trading dates*, not raw
+    records — the daily job writes one record per symbol per day, so a
+    record-count truncation would collapse the trailing window down to a
+    single day's cross-section as soon as more than one symbol is tracked
+    per model (#147). `lookback_n` in the result reports the number of
+    scored observations (symbol-dates) within that date window, which is
+    normally a multiple of the date count.
+
     fetch_prices_fn(symbol, start_date, end_date) must return a DataFrame
     with a 'close' column (or None on failure).
 
@@ -228,22 +236,33 @@ def score_realized_ic(
     # realized bar is scored exactly once against the right window (#134).
     scoreable = _dedupe_scoreable(scoreable, frames)
 
-    # Group by model; take the most recent min_lookback entries
+    # Group by model; take the most recent min_lookback *distinct trading
+    # dates* (not records) — the daily job writes one record per symbol per
+    # day, so slicing by record count collapses the "trailing window" down
+    # to a single day's cross-section once more than one symbol is tracked
+    # per model (#147).
     by_model: dict[str, list[dict]] = {}
     for r in scoreable:
         by_model.setdefault(r["model"], []).append(r)
 
-    truncated_by_model: dict[str, list[dict]] = {
-        model: sorted(model_records, key=lambda r: r["date"])[-min_lookback:]
-        for model, model_records in by_model.items()
-    }
+    truncated_by_model: dict[str, list[dict]] = {}
+    n_dates_by_model: dict[str, int] = {}
+    for model, model_records in by_model.items():
+        all_dates = sorted({r["date"] for r in model_records})
+        n_dates_by_model[model] = len(all_dates)
+        recent_dates = set(all_dates[-min_lookback:])
+        truncated_by_model[model] = sorted(
+            (r for r in model_records if r["date"] in recent_dates),
+            key=lambda r: r["date"],
+        )
 
     results: dict[str, Optional[dict]] = {}
     for model, sorted_records in truncated_by_model.items():
-        if len(sorted_records) < min_lookback:
+        n_dates = n_dates_by_model[model]
+        if n_dates < min_lookback:
             logger.info(
-                "score_realized_ic: insufficient history for %s (%d < %d)",
-                model, len(sorted_records), min_lookback,
+                "score_realized_ic: insufficient trailing dates for %s (%d < %d)",
+                model, n_dates, min_lookback,
             )
             results[model] = None
             continue
@@ -268,9 +287,15 @@ def score_realized_ic(
             scores.append(_signal_to_score(r["signal"], float(r["confidence"])))
             actuals.append(realized_return)
 
-        if len(scores) < min_lookback // 2:
+        # This floor guards valid *observations* (one per symbol-date), not
+        # trailing dates, so it must scale with how many records actually
+        # fell in the window — with multiple symbols per day that can be
+        # much larger than min_lookback // 2 (#147).
+        min_scored = max(min_lookback // 2, len(sorted_records) // 2)
+        if len(scores) < min_scored:
             logger.info(
-                "score_realized_ic: too few valid scored rows for %s (%d)", model, len(scores)
+                "score_realized_ic: too few valid scored rows for %s (%d < %d)",
+                model, len(scores), min_scored,
             )
             results[model] = None
             continue
