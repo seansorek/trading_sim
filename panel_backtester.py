@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 # Below this, a leg's mean beta is too close to zero to divide by — the scaling
-# needed to equalize exposures explodes. Fall back to dollar-neutral instead.
+# needed to equalize exposures explodes. The beta-neutral solve is then not
+# constructible, so the book stays flat that date (see rank_to_weights).
 MIN_LEG_BETA = 0.1
 
 # A sector needs this many names on a date for its mean to be worth subtracting.
@@ -156,6 +157,18 @@ def rank_to_weights(
             total_beta = b_long + b_short
             long_notional = gross_exposure * b_short / total_beta
             short_notional = gross_exposure * b_long / total_beta
+        else:
+            # beta_row was supplied, so the caller wants a beta-neutral book —
+            # falling through to the dollar-neutral notionals above would
+            # silently trade the specific book the module docstring calls out
+            # as *not* an acceptable stand-in (measured beta +0.19 on the live
+            # panel). Stay flat instead; `weights` is already all zeros, and
+            # run_panel's n_flat_days counts these dates.
+            logger.debug(
+                "rank_to_weights: beta-neutral solve not constructible "
+                "(b_long=%s b_short=%s) — staying flat", b_long, b_short,
+            )
+            return weights
 
     # Centre on the full cross-section, not the leg: a leg-local centre would
     # make the boundary name's distance ~0 by construction on every date.
