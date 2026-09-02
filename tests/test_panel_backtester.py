@@ -305,7 +305,7 @@ def test_run_panel_counts_unconstructible_beta_dates_as_flat_days():
     assert (result.weights == 0.0).all(axis=None)
 
 
-def test_partial_beta_coverage_goes_flat_not_full_size():
+def test_partial_beta_coverage_falls_back_to_dollar_neutral_not_full_size():
     """Regression test for #149.
 
     Reproduces the issue's exact scenario: a 20-name cross-section, decile
@@ -319,10 +319,10 @@ def test_partial_beta_coverage_goes_flat_not_full_size():
     sizing branch.
 
     After the fix, coverage below MIN_BETA_COVERAGE must reject the
-    beta-neutral solve for that leg. Per #148 (merged after this fix was
-    written), an unconstructible beta-neutral solve stays flat rather than
-    substituting the dollar-neutral book the module docstring calls out as
-    unacceptable — so insufficient coverage now takes the same flat path.
+    beta-neutral solve for that leg and fall back to the dollar-neutral
+    50/50 notional split instead — unlike #148's unconstructible-solve case
+    (NaN/opposite-signed/near-zero leg means), partial coverage isn't
+    structurally untradeable, just untrustworthy for beta-neutral sizing.
     """
     n = 20
     pred = pd.Series(np.arange(n, dtype=float), index=[f"S{i:02d}" for i in range(n)])
@@ -342,22 +342,28 @@ def test_partial_beta_coverage_goes_flat_not_full_size():
     w_full = rank_to_weights(pred, decile=0.2, gross_exposure=1.0, min_names=20,
                              beta_row=true_beta)
 
+    long_notional_partial = sum(w for w in w_partial if w > 0)
+    short_notional_partial = -sum(w for w in w_partial if w < 0)
+
     # With only 1-of-4 coverage, the leg mean is not trusted: the book must
-    # go flat, not be sized off the single-name mean.
-    assert (w_partial == 0.0).all()
+    # be dollar-neutral (50/50), not sized off the single-name mean.
+    assert long_notional_partial == pytest.approx(0.5)
+    assert short_notional_partial == pytest.approx(0.5)
+    assert w_partial.sum() == pytest.approx(0.0, abs=1e-12)
 
     # Full coverage (the "true" comparison from the issue) does use the
-    # beta-neutral solve and is NOT flat, so this also confirms the two code
-    # paths are actually distinguishable.
+    # beta-neutral solve and is NOT the dollar-neutral 50/50 split, so this
+    # also confirms the two code paths are actually distinguishable.
     long_notional_full = sum(w for w in w_full if w > 0)
     short_notional_full = -sum(w for w in w_full if w < 0)
-    assert long_notional_full != pytest.approx(0.0)
-    assert short_notional_full != pytest.approx(0.0)
+    assert long_notional_full != pytest.approx(0.5)
+    assert short_notional_full != pytest.approx(0.5)
 
-    # The real ex-ante beta of the partial-coverage (flat) book must be
-    # exactly zero, not the directional +1.39 the bug produced.
-    partial_ex_ante_beta = float((w_partial * true_beta.fillna(0.0)).sum())
-    assert partial_ex_ante_beta == pytest.approx(0.0, abs=1e-12)
+    # The real ex-ante beta of the partial-coverage book (computed against
+    # the TRUE per-name betas, not the partial estimate) must land near the
+    # dollar-neutral book's beta, not the directional +1.39 the bug produced.
+    dollar_neutral_ex_ante_beta = float((w_partial * true_beta.fillna(0.0)).sum())
+    assert dollar_neutral_ex_ante_beta != pytest.approx(1.39, abs=0.05)
 
 
 def test_run_panel_with_beta_reports_near_zero_ex_ante_beta():
