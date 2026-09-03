@@ -305,6 +305,67 @@ def test_run_panel_counts_unconstructible_beta_dates_as_flat_days():
     assert (result.weights == 0.0).all(axis=None)
 
 
+def test_partial_beta_coverage_falls_back_to_dollar_neutral_not_full_size():
+    """Regression test for #149.
+
+    Reproduces the issue's exact scenario: a 20-name cross-section, decile
+    0.2 (4 names per leg), true betas of 0.7 on the long leg and 1.6 on the
+    short leg, but only 1 of 4 names per leg actually carries a beta
+    estimate. `.mean()` skips NaN, so before the fix the single non-NaN
+    value per leg passed both the `pd.notna` and `MIN_LEG_BETA` guards and
+    was treated as if it represented the whole leg — producing a book with
+    real ex-ante beta around +1.39 (net long, opposite the market-neutral
+    book the module exists to produce) while still using the beta-neutral
+    sizing branch.
+
+    After the fix, coverage below MIN_BETA_COVERAGE must reject the
+    beta-neutral solve for that leg and fall back to the dollar-neutral
+    50/50 notional split instead — unlike #148's unconstructible-solve case
+    (NaN/opposite-signed/near-zero leg means), partial coverage isn't
+    structurally untradeable, just untrustworthy for beta-neutral sizing.
+    """
+    n = 20
+    pred = pd.Series(np.arange(n, dtype=float), index=[f"S{i:02d}" for i in range(n)])
+    # decile=0.2 -> k = 4 names per leg. Shorts = S00-S03, longs = S16-S19.
+    true_beta = pd.Series(
+        [1.6] * 4 + [np.nan] * 12 + [0.7] * 4,   # shorts=1.6, middle=NaN, longs=0.7
+        index=pred.index,
+    )
+    # Only 1 of 4 names per leg has a beta estimate — the other 3 are NaN,
+    # simulating a failed trailing-window estimate for most of the leg.
+    partial_beta = true_beta.copy()
+    partial_beta.loc[["S01", "S02", "S03"]] = np.nan     # short leg: keep only S00
+    partial_beta.loc[["S17", "S18", "S19"]] = np.nan     # long leg: keep only S16
+
+    w_partial = rank_to_weights(pred, decile=0.2, gross_exposure=1.0, min_names=20,
+                                beta_row=partial_beta)
+    w_full = rank_to_weights(pred, decile=0.2, gross_exposure=1.0, min_names=20,
+                             beta_row=true_beta)
+
+    long_notional_partial = sum(w for w in w_partial if w > 0)
+    short_notional_partial = -sum(w for w in w_partial if w < 0)
+
+    # With only 1-of-4 coverage, the leg mean is not trusted: the book must
+    # be dollar-neutral (50/50), not sized off the single-name mean.
+    assert long_notional_partial == pytest.approx(0.5)
+    assert short_notional_partial == pytest.approx(0.5)
+    assert w_partial.sum() == pytest.approx(0.0, abs=1e-12)
+
+    # Full coverage (the "true" comparison from the issue) does use the
+    # beta-neutral solve and is NOT the dollar-neutral 50/50 split, so this
+    # also confirms the two code paths are actually distinguishable.
+    long_notional_full = sum(w for w in w_full if w > 0)
+    short_notional_full = -sum(w for w in w_full if w < 0)
+    assert long_notional_full != pytest.approx(0.5)
+    assert short_notional_full != pytest.approx(0.5)
+
+    # The real ex-ante beta of the partial-coverage book (computed against
+    # the TRUE per-name betas, not the partial estimate) must land near the
+    # dollar-neutral book's beta, not the directional +1.39 the bug produced.
+    dollar_neutral_ex_ante_beta = float((w_partial * true_beta.fillna(0.0)).sum())
+    assert dollar_neutral_ex_ante_beta != pytest.approx(1.39, abs=0.05)
+
+
 def test_run_panel_with_beta_reports_near_zero_ex_ante_beta():
     idx = pd.bdate_range("2021-01-01", periods=120)
     cols = [f"S{i:02d}" for i in range(40)]

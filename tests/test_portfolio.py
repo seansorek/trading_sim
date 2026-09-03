@@ -111,6 +111,35 @@ def test_balanced_betas_do_not_warn():
     assert "net_exposure_warning" not in book.diagnostics
 
 
+def test_ex_ante_beta_not_reported_on_partial_beta_coverage():
+    """Regression test for #149.
+
+    Before the fix, `ex_ante_beta` was summed only over held names that had
+    a finite beta, so a book with mostly-missing betas could read as
+    "beta-neutral" (exactly 0.0) while its real beta was large and
+    directional. build_book must now report `beta_coverage` and omit
+    `ex_ante_beta` whenever coverage is partial, rather than publish a
+    number computed over an incomplete set.
+    """
+    scores = _scores(40)
+    # Betas for only 2 of the 8 held names (decile 0.1 -> 4 longs + 4 shorts).
+    betas = {"S36": 1.6, "S00": 0.7}
+    book = build_book(scores, "2026-07-30", decile=0.1, gross_exposure=1.0,
+                      min_names=20, betas=betas)
+
+    assert "ex_ante_beta" not in book.diagnostics
+    assert book.diagnostics["beta_coverage"] == pytest.approx(2 / 8)
+
+
+def test_ex_ante_beta_reported_when_coverage_is_complete():
+    scores = _scores(40)
+    betas = {s: 1.0 for s in scores}
+    book = build_book(scores, "2026-07-30", decile=0.1, gross_exposure=1.0,
+                      min_names=20, betas=betas)
+    assert book.diagnostics["beta_coverage"] == pytest.approx(1.0)
+    assert "ex_ante_beta" in book.diagnostics
+
+
 def test_sector_neutralization_changes_the_ranking():
     """A sector-wide level must not decide the legs.
 

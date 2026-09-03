@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 # constructible, so the book stays flat that date (see rank_to_weights).
 MIN_LEG_BETA = 0.1
 
+# Fraction of a leg's names that need a beta estimate before the leg's mean
+# beta is trusted to represent the whole leg. pandas' .mean() skips NaN, so
+# without this floor a leg with betas for e.g. 1 of 4 names is scored on that
+# single beta and sized as if it were full coverage — see #149.
+MIN_BETA_COVERAGE = 0.8
+
 # A sector needs this many names on a date for its mean to be worth subtracting.
 # Below it, demeaning mostly removes the names' own signal: with 2 names the
 # demeaned pair is always {+d, -d}, which is pure noise amplification.
@@ -132,6 +138,11 @@ def rank_to_weights(
     it. Beta is estimated on a trailing window, so realized beta will not be
     exactly zero; panel_eval's +/-0.1 band still does real work as a check that
     the estimate held up out of sample.
+
+    Each leg's mean beta is only trusted when at least MIN_BETA_COVERAGE of
+    its names actually have a beta estimate — otherwise the leg falls back to
+    the dollar-neutral notional for that date, since a mean over 1-2 names in
+    a much larger leg is not representative of the leg's real exposure.
     """
     weights = pd.Series(0.0, index=pred_row.index)
     valid = pred_row.dropna()
@@ -149,26 +160,47 @@ def rank_to_weights(
 
     long_notional = short_notional = gross_exposure / 2.0
     if beta_row is not None:
-        b_long = beta_row.reindex(longs).mean()
-        b_short = beta_row.reindex(shorts).mean()
-        # Opposite-signed leg betas would make the equal-exposure solve produce
-        # a negative notional; that book is not constructible, so stay flat.
-        if pd.notna(b_long) and pd.notna(b_short) and b_long > MIN_LEG_BETA and b_short > MIN_LEG_BETA:
-            total_beta = b_long + b_short
-            long_notional = gross_exposure * b_short / total_beta
-            short_notional = gross_exposure * b_long / total_beta
-        else:
-            # beta_row was supplied, so the caller wants a beta-neutral book —
-            # falling through to the dollar-neutral notionals above would
-            # silently trade the specific book the module docstring calls out
-            # as *not* an acceptable stand-in (measured beta +0.19 on the live
-            # panel). Stay flat instead; `weights` is already all zeros, and
-            # run_panel's n_flat_days counts these dates.
-            logger.debug(
-                "rank_to_weights: beta-neutral solve not constructible "
-                "(b_long=%s b_short=%s) — staying flat", b_long, b_short,
+        beta_long = beta_row.reindex(longs)
+        beta_short = beta_row.reindex(shorts)
+        # .mean() skips NaN, so a leg whose beta estimates are mostly missing
+        # would otherwise be sized off whichever one or two names happen to
+        # have one, with no signal that the rest of the leg was unrepresented
+        # (#149). Require a minimum fraction of the leg to actually have a
+        # beta estimate before trusting the leg mean at all.
+        cov_long = beta_long.notna().mean()
+        cov_short = beta_short.notna().mean()
+        # A leg with *zero* coverage has no mean to distrust — it falls
+        # through to the b_long/b_short computation below, where mean() of an
+        # all-NaN slice is NaN and the existing unconstructible-solve check
+        # (#148) already sends it flat. Only strictly-partial coverage (some
+        # but not enough) is distinguished here as "distrust the mean, but
+        # the leg isn't data-free" — that's the only case #149 fixes.
+        if (0 < cov_long < MIN_BETA_COVERAGE) or (0 < cov_short < MIN_BETA_COVERAGE):
+            # Below the coverage floor the leg mean isn't trustworthy, but the
+            # data isn't structurally impossible to trade either (contrast the
+            # unconstructible-solve case below, #148) — fall back to the
+            # dollar-neutral notional for this date rather than go flat.
+            logger.warning(
+                "beta coverage %.0f%%/%.0f%% (long/short) below floor %.0f%% — "
+                "falling back to dollar-neutral",
+                100 * cov_long, 100 * cov_short, 100 * MIN_BETA_COVERAGE,
             )
-            return weights
+        else:
+            b_long = beta_long.mean()
+            b_short = beta_short.mean()
+            # Opposite-signed leg betas would make the equal-exposure solve
+            # produce a negative notional; that book is not constructible, so
+            # stay flat.
+            if pd.notna(b_long) and pd.notna(b_short) and b_long > MIN_LEG_BETA and b_short > MIN_LEG_BETA:
+                total_beta = b_long + b_short
+                long_notional = gross_exposure * b_short / total_beta
+                short_notional = gross_exposure * b_long / total_beta
+            else:
+                logger.debug(
+                    "rank_to_weights: beta-neutral solve not constructible "
+                    "(b_long=%s b_short=%s) — staying flat", b_long, b_short,
+                )
+                return weights
 
     # Centre on the full cross-section, not the leg: a leg-local centre would
     # make the boundary name's distance ~0 by construction on every date.

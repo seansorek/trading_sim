@@ -143,10 +143,25 @@ def build_book(
         "beta_neutral": beta_row is not None,
     }
     if beta_row is not None and held:
-        diagnostics["ex_ante_beta"] = float(
-            sum(w * beta_row.get(s, 0.0) for s, w in held.items()
-                if np.isfinite(beta_row.get(s, np.nan)))
-        )
+        n_covered = sum(1 for s in held if np.isfinite(beta_row.get(s, np.nan)))
+        beta_coverage = n_covered / len(held)
+        diagnostics["beta_coverage"] = float(beta_coverage)
+        if beta_coverage >= 1.0:
+            diagnostics["ex_ante_beta"] = float(
+                sum(w * beta_row.get(s, 0.0) for s, w in held.items())
+            )
+        else:
+            # Summing only the covered names (the old behavior) understates
+            # exposure and can read as beta-neutral (e.g. exactly 0.0) on a
+            # book that is anything but — see #149. A diagnostic computed
+            # over an incomplete set is worse than no diagnostic, so omit
+            # ex_ante_beta entirely and surface the coverage gap instead.
+            logger.warning(
+                "Book beta coverage %.0f%% (%d/%d held names) — ex_ante_beta "
+                "not reported because it would be computed over an "
+                "incomplete set of the book's holdings",
+                100 * beta_coverage, n_covered, len(held),
+            )
     if abs(diagnostics["net_exposure"]) > NET_EXPOSURE_WARN:
         diagnostics["net_exposure_warning"] = True
         logger.warning(
