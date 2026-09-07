@@ -276,6 +276,25 @@ def test_drift_keeps_undrifted_weight_when_price_missing():
     assert drifted.weights["B"] == pytest.approx(-0.5)  # unchanged
 
 
+def test_drift_seeds_missing_reference_price_so_the_next_hold_can_drift():
+    """Regression: when a symbol has no `prices` entry (upgrading an old
+    portfolio.jsonl record, or a held name that lacked a price at the last
+    rebalance/drift), the weight correctly stays undrifted this cycle -- but
+    the missing reference must be seeded from today's price so the NEXT hold
+    drifts normally. Before the fix, `ref_prices[symbol]` was never set in
+    this branch, so `p0` stayed missing forever and the weight silently
+    never drifted again, publishing the same stale weight indefinitely
+    instead of only skipping the first cycle."""
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0})  # no reference price for B
+    day1 = drift_book(book, current_prices={"A": 110.0, "B": 100.0})
+    assert day1.weights["B"] == pytest.approx(-0.5)  # nothing to drift from yet
+    assert day1.prices["B"] == pytest.approx(100.0)  # but a reference is now seeded
+
+    day2 = drift_book(day1, current_prices={"A": 110.0, "B": 110.0})
+    assert day2.weights["B"] == pytest.approx(-0.5 * 1.10)  # now drifts normally
+
+
 def test_drift_recomputes_exposure_diagnostics():
     book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
                 prices={"A": 100.0, "B": 100.0},

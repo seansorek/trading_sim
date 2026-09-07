@@ -259,6 +259,15 @@ def drift_book(
         if p0 and p1:
             drifted[symbol] = weight * (p1 / p0)
             ref_prices[symbol] = p1
+        elif p1:
+            # No reference price yet (e.g. upgrading a `portfolio.jsonl`
+            # record logged before `prices` existed, or a held symbol that
+            # lacked a price at the last rebalance/drift). Seed it now so
+            # the NEXT hold can drift correctly — otherwise `p0` stays
+            # missing forever and this weight never drifts at all. Nothing
+            # to drift THIS cycle since there's no prior price to compute a
+            # return against.
+            ref_prices[symbol] = p1
     diagnostics = dict(book.diagnostics)
     for stale_key in ("net_exposure_warning", "beta_coverage", "ex_ante_beta"):
         diagnostics.pop(stale_key, None)
