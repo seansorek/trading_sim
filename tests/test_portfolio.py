@@ -21,6 +21,7 @@ from portfolio import (
     Book,
     append_book,
     build_book,
+    drift_book,
     format_book,
     is_rebalance_due,
     load_last_book,
@@ -243,6 +244,107 @@ def test_log_line_is_valid_json_with_the_weights(tmp_path):
         record = json.loads(f.readline())
     assert record["date"] == "2026-07-30"
     assert record["weights"] == {"AAPL": 0.25}
+
+
+# --- drift (#153) -----------------------------------------------------------
+
+def test_drift_moves_weights_by_price_return():
+    """Mirrors run_panel's hold-day update: prev_w * (1 + ret)."""
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0, "B": 100.0})
+    drifted = drift_book(book, current_prices={"A": 110.0, "B": 90.0})
+    assert drifted.weights["A"] == pytest.approx(0.5 * 1.10)
+    assert drifted.weights["B"] == pytest.approx(-0.5 * 0.90)
+    assert drifted.rebalanced is False
+    assert drifted.as_of == "2026-07-16"  # HOLD-since semantics survive
+
+
+def test_drift_updates_reference_prices_for_next_compounding_step():
+    """Reference prices must roll forward so a second hold day compounds
+    from today's close, not from the original rebalance's close."""
+    book = Book(as_of="2026-07-16", weights={"A": 0.5}, prices={"A": 100.0})
+    day1 = drift_book(book, current_prices={"A": 110.0})
+    day2 = drift_book(day1, current_prices={"A": 121.0})
+    assert day2.weights["A"] == pytest.approx(0.5 * 1.10 * 1.10)
+
+
+def test_drift_keeps_undrifted_weight_when_price_missing():
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0})  # no reference price for B
+    drifted = drift_book(book, current_prices={"A": 110.0})
+    assert drifted.weights["A"] == pytest.approx(0.55)
+    assert drifted.weights["B"] == pytest.approx(-0.5)  # unchanged
+
+
+def test_drift_seeds_missing_reference_price_so_the_next_hold_can_drift():
+    """Regression: when a symbol has no `prices` entry (upgrading an old
+    portfolio.jsonl record, or a held name that lacked a price at the last
+    rebalance/drift), the weight correctly stays undrifted this cycle -- but
+    the missing reference must be seeded from today's price so the NEXT hold
+    drifts normally. Before the fix, `ref_prices[symbol]` was never set in
+    this branch, so `p0` stayed missing forever and the weight silently
+    never drifted again, publishing the same stale weight indefinitely
+    instead of only skipping the first cycle."""
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0})  # no reference price for B
+    day1 = drift_book(book, current_prices={"A": 110.0, "B": 100.0})
+    assert day1.weights["B"] == pytest.approx(-0.5)  # nothing to drift from yet
+    assert day1.prices["B"] == pytest.approx(100.0)  # but a reference is now seeded
+
+    day2 = drift_book(day1, current_prices={"A": 110.0, "B": 110.0})
+    assert day2.weights["B"] == pytest.approx(-0.5 * 1.10)  # now drifts normally
+
+
+def test_drift_recomputes_exposure_diagnostics():
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0, "B": 100.0},
+                diagnostics={"n_ranked": 40, "n_held": 2})
+    drifted = drift_book(book, current_prices={"A": 150.0, "B": 100.0})
+    assert drifted.diagnostics["gross_exposure"] == pytest.approx(0.75 + 0.5)
+    assert drifted.diagnostics["net_exposure"] == pytest.approx(0.75 - 0.5)
+    # Composition-level diagnostics from the last rebalance survive.
+    assert drifted.diagnostics["n_ranked"] == 40
+    assert drifted.diagnostics["n_held"] == 2
+
+
+def test_drift_clears_stale_beta_diagnostics_when_betas_not_supplied():
+    """Regression: republishing a stale ex_ante_beta/warning on a hold day
+    is the bug #153 reports. drift_book must recompute or clear them, never
+    carry the rebalance-day values forward untouched."""
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0, "B": 100.0},
+                diagnostics={"ex_ante_beta": 0.9, "beta_coverage": 1.0,
+                            "net_exposure_warning": True})
+    drifted = drift_book(book, current_prices={"A": 100.0, "B": 100.0})
+    assert "ex_ante_beta" not in drifted.diagnostics
+    assert "beta_coverage" not in drifted.diagnostics
+    assert "net_exposure_warning" not in drifted.diagnostics
+
+
+def test_drift_recomputes_ex_ante_beta_from_current_betas():
+    book = Book(as_of="2026-07-16", weights={"A": 0.5, "B": -0.5},
+                prices={"A": 100.0, "B": 100.0})
+    drifted = drift_book(book, current_prices={"A": 100.0, "B": 100.0},
+                         current_betas={"A": 1.6, "B": 0.8})
+    assert drifted.diagnostics["ex_ante_beta"] == pytest.approx(0.5 * 1.6 + -0.5 * 0.8)
+
+
+def test_drift_warns_when_drifted_net_exposure_breaches_threshold():
+    book = Book(as_of="2026-07-16", weights={"A": 0.9, "B": -0.1},
+                prices={"A": 100.0, "B": 100.0})
+    drifted = drift_book(book, current_prices={"A": 100.0, "B": 100.0})
+    assert drifted.diagnostics["net_exposure_warning"] is True
+
+
+def test_book_roundtrips_prices_through_the_log(tmp_path):
+    path = str(tmp_path / "portfolio.jsonl")
+    book = build_book(_scores(40), "2026-07-30", decile=0.1, gross_exposure=1.0,
+                      min_names=20, prices={s: 100.0 + i for i, s in enumerate(_scores(40))})
+    append_book(path, book, "2026-07-30")
+
+    loaded = load_last_book(path)
+    assert loaded.prices == book.prices
+    assert loaded.prices  # non-empty: held names had prices
 
 
 # --- formatting ------------------------------------------------------------

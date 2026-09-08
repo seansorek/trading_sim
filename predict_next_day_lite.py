@@ -37,6 +37,7 @@ from panel_data import rolling_beta
 from portfolio import (
     append_book,
     build_book,
+    drift_book,
     format_book,
     is_rebalance_due,
     load_last_book,
@@ -1022,20 +1023,28 @@ def build_portfolio(
         cfg.panel.rebalance_days if rebalance_days_override is None
         else rebalance_days_override
     )
+    by_symbol = {p.get("symbol"): p for p in predictions if "error" not in p}
     last = load_last_book(book_path)
     if not is_rebalance_due(None if last is None else last.as_of,
                             prediction_date, rebalance_days):
+        current_prices = {
+            s: p["price"] for s, p in by_symbol.items() if p.get("price")
+        }
+        current_betas = {
+            s: p["beta"] for s, p in by_symbol.items() if "beta" in p
+        }
+        drifted = drift_book(last, current_prices, current_betas)
         logger.info(
-            "Holding book from %s — next rebalance after %d business days",
-            last.as_of, rebalance_days,
+            "Holding book from %s, drifted for %s — next rebalance after "
+            "%d business days",
+            last.as_of, prediction_date, rebalance_days,
         )
-        return last
+        return drifted
 
     rankable = set(rank_universe)
-    scores, betas = {}, {}
-    for pred in predictions:
-        symbol = pred.get("symbol")
-        if symbol not in rankable or "error" in pred:
+    scores, betas, prices = {}, {}, {}
+    for symbol, pred in by_symbol.items():
+        if symbol not in rankable:
             continue
         model_pred = pred.get("predictions", {}).get(RANKING_MODEL, {})
         if "predicted_return" not in model_pred:
@@ -1043,6 +1052,8 @@ def build_portfolio(
         scores[symbol] = model_pred["predicted_return"]
         if "beta" in pred:
             betas[symbol] = pred["beta"]
+        if pred.get("price"):
+            prices[symbol] = pred["price"]
 
     logger.info(
         "Ranking %d/%d universe symbols (%d with a beta estimate)",
@@ -1056,6 +1067,7 @@ def build_portfolio(
         min_names=cfg.panel.min_names,
         sector_of=cfg.panel.sector_of(),
         betas=betas,
+        prices=prices,
     )
 
 

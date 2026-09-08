@@ -55,6 +55,9 @@ class Book:
     weights: dict[str, float] = field(default_factory=dict)
     rebalanced: bool = True          # False when re-published from an earlier date
     diagnostics: dict = field(default_factory=dict)
+    prices: dict[str, float] = field(default_factory=dict)  # reference price per held
+    # symbol as of the last time `weights` was set (rebalance or drift) --
+    # what drift_book() diffs the next day's price against.
 
     @property
     def longs(self) -> list[tuple[str, float]]:
@@ -80,6 +83,52 @@ class Book:
         return not self.weights
 
 
+def _exposure_diagnostics(
+    held: dict[str, float],
+    betas: dict[str, float] | None,
+) -> dict:
+    """gross/net exposure, ex_ante_beta and the net-exposure warning for `held`.
+
+    Shared by `build_book` (fresh rank) and `drift_book` (held-day update) so
+    the two can't compute exposure differently -- see #153, the same class of
+    bug as #105/#123/#134 but on the "book updated between measurements" axis.
+    """
+    diagnostics = {
+        "gross_exposure": float(sum(abs(w) for w in held.values())),
+        "net_exposure": float(sum(held.values())),
+        "beta_neutral": bool(betas),
+    }
+    if betas and held:
+        n_covered = sum(1 for s in held if np.isfinite(betas.get(s, np.nan)))
+        beta_coverage = n_covered / len(held)
+        diagnostics["beta_coverage"] = float(beta_coverage)
+        if beta_coverage >= 1.0:
+            diagnostics["ex_ante_beta"] = float(
+                sum(w * betas.get(s, 0.0) for s, w in held.items())
+            )
+        else:
+            # Summing only the covered names (the old behavior) understates
+            # exposure and can read as beta-neutral (e.g. exactly 0.0) on a
+            # book that is anything but — see #149. A diagnostic computed
+            # over an incomplete set is worse than no diagnostic, so omit
+            # ex_ante_beta entirely and surface the coverage gap instead.
+            logger.warning(
+                "Book beta coverage %.0f%% (%d/%d held names) — ex_ante_beta "
+                "not reported because it would be computed over an "
+                "incomplete set of the book's holdings",
+                100 * beta_coverage, n_covered, len(held),
+            )
+    if abs(diagnostics["net_exposure"]) > NET_EXPOSURE_WARN:
+        diagnostics["net_exposure_warning"] = True
+        logger.warning(
+            "Book net exposure %+.2f exceeds %.2f — beta-neutral leg sizing has "
+            "made this a large dollar-directional position (leg betas diverged). "
+            "Zero ex-ante beta does NOT mean zero directional risk here.",
+            diagnostics["net_exposure"], NET_EXPOSURE_WARN,
+        )
+    return diagnostics
+
+
 def build_book(
     scores: dict[str, float],
     as_of: str,
@@ -88,6 +137,7 @@ def build_book(
     min_names: int,
     sector_of: dict[str, str] | None = None,
     betas: dict[str, float] | None = None,
+    prices: dict[str, float] | None = None,
 ) -> Book:
     """Rank one date's cross-section into a beta-neutral long/short book.
 
@@ -99,6 +149,11 @@ def build_book(
     so their beta exposures cancel; omitting it falls back to a dollar-neutral
     book, which measured +0.19 realized beta on this universe and is NOT market
     neutral. Live should always pass betas — see rank_to_weights' docstring.
+
+    `prices` is symbol -> current price, stashed on the returned `Book` as the
+    reference point `drift_book` diffs against on hold days (see #153). Live
+    should always pass it; omitting it just means the first hold day after
+    this rebalance can't drift (no reference price to compare against).
     """
     clean = {s: float(v) for s, v in scores.items() if v is not None and np.isfinite(v)}
     dropped = len(scores) - len(clean)
@@ -138,38 +193,8 @@ def build_book(
         "n_ranked": int(len(row)),
         "n_held": len(held),
         "n_sector_neutralized": n_sector_neutralized,
-        "gross_exposure": float(sum(abs(w) for w in held.values())),
-        "net_exposure": float(sum(held.values())),
-        "beta_neutral": beta_row is not None,
+        **_exposure_diagnostics(held, betas),
     }
-    if beta_row is not None and held:
-        n_covered = sum(1 for s in held if np.isfinite(beta_row.get(s, np.nan)))
-        beta_coverage = n_covered / len(held)
-        diagnostics["beta_coverage"] = float(beta_coverage)
-        if beta_coverage >= 1.0:
-            diagnostics["ex_ante_beta"] = float(
-                sum(w * beta_row.get(s, 0.0) for s, w in held.items())
-            )
-        else:
-            # Summing only the covered names (the old behavior) understates
-            # exposure and can read as beta-neutral (e.g. exactly 0.0) on a
-            # book that is anything but — see #149. A diagnostic computed
-            # over an incomplete set is worse than no diagnostic, so omit
-            # ex_ante_beta entirely and surface the coverage gap instead.
-            logger.warning(
-                "Book beta coverage %.0f%% (%d/%d held names) — ex_ante_beta "
-                "not reported because it would be computed over an "
-                "incomplete set of the book's holdings",
-                100 * beta_coverage, n_covered, len(held),
-            )
-    if abs(diagnostics["net_exposure"]) > NET_EXPOSURE_WARN:
-        diagnostics["net_exposure_warning"] = True
-        logger.warning(
-            "Book net exposure %+.2f exceeds %.2f — beta-neutral leg sizing has "
-            "made this a large dollar-directional position (leg betas diverged). "
-            "Zero ex-ante beta does NOT mean zero directional risk here.",
-            diagnostics["net_exposure"], NET_EXPOSURE_WARN,
-        )
     if not held:
         diagnostics["reason"] = (
             f"cross-section of {len(row)} names is below min_names={min_names}"
@@ -177,7 +202,10 @@ def build_book(
             else "ranking produced no tradeable legs"
         )
 
-    return Book(as_of=as_of, weights=held, diagnostics=diagnostics)
+    held_prices = {
+        s: float(prices[s]) for s in held if prices and prices.get(s)
+    }
+    return Book(as_of=as_of, weights=held, diagnostics=diagnostics, prices=held_prices)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +230,55 @@ def is_rebalance_due(last_as_of: str | None, today: str, rebalance_days: int) ->
         logger.warning("Unparseable last book date %r — rebalancing", last_as_of)
         return True
     return elapsed >= rebalance_days
+
+
+def drift_book(
+    book: Book,
+    current_prices: dict[str, float],
+    current_betas: dict[str, float] | None = None,
+) -> Book:
+    """Carry a held book's weights forward by each name's price return.
+
+    Mirrors `panel_backtester.run_panel`'s hold-day update (`prev_w = w * (1 +
+    ret)`) so the live book never diverges from the one the backtest measured
+    — see #153. Reference prices come from `book.prices`, set by `build_book`
+    on the last rebalance or by this function on the last hold day, so drift
+    compounds correctly across consecutive hold days without needing price
+    history further back than "the last time this book was published".
+
+    A name with no reference price (first hold after an old book missing
+    `prices`) or no current price (data gap) keeps its last weight
+    undrifted rather than being dropped — a stale weight is closer to the
+    truth than zeroing out a real position.
+    """
+    drifted = dict(book.weights)
+    ref_prices = dict(book.prices)
+    for symbol, weight in book.weights.items():
+        p0 = book.prices.get(symbol)
+        p1 = current_prices.get(symbol)
+        if p0 and p1:
+            drifted[symbol] = weight * (p1 / p0)
+            ref_prices[symbol] = p1
+        elif p1:
+            # No reference price yet (e.g. upgrading a `portfolio.jsonl`
+            # record logged before `prices` existed, or a held symbol that
+            # lacked a price at the last rebalance/drift). Seed it now so
+            # the NEXT hold can drift correctly — otherwise `p0` stays
+            # missing forever and this weight never drifts at all. Nothing
+            # to drift THIS cycle since there's no prior price to compute a
+            # return against.
+            ref_prices[symbol] = p1
+    diagnostics = dict(book.diagnostics)
+    for stale_key in ("net_exposure_warning", "beta_coverage", "ex_ante_beta"):
+        diagnostics.pop(stale_key, None)
+    diagnostics.update(_exposure_diagnostics(drifted, current_betas))
+    return Book(
+        as_of=book.as_of,
+        weights=drifted,
+        rebalanced=False,
+        diagnostics=diagnostics,
+        prices=ref_prices,
+    )
 
 
 def load_last_book(path: str) -> Book | None:
@@ -229,6 +306,7 @@ def load_last_book(path: str) -> Book | None:
         weights={s: float(w) for s, w in last.get("weights", {}).items()},
         rebalanced=False,
         diagnostics=last.get("diagnostics", {}),
+        prices={s: float(p) for s, p in last.get("prices", {}).items()},
     )
 
 
@@ -250,6 +328,7 @@ def append_book(path: str, book: Book, prediction_date: str) -> None:
         "rebalanced": book.rebalanced,
         "weights": book.weights,
         "diagnostics": book.diagnostics,
+        "prices": book.prices,
     }
     with open(path, "a") as f:
         f.write(json.dumps(record) + "\n")
