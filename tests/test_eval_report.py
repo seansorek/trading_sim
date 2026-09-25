@@ -21,3 +21,26 @@ def test_compute_dsr_returns_expected_keys():
         assert k in out
     assert out["n_trials"] == 4
     assert 0.0 <= out["dsr"] <= 1.0
+
+
+def test_compute_dsr_runs_predict_pipeline_once_per_symbol_not_per_config():
+    """Issue #135: model load / make_daily_features / model.predict must run
+    once per symbol and be reused across the whole (q, w) grid, not once per
+    config -- only the final threshold step is genuinely per-config."""
+    import ml_strategies
+
+    df = _synth_prices()
+    calls = []
+    real_predict_returns = ml_strategies.DailyPredictorStrategy._predict_returns
+
+    def spy(self, df_arg):
+        calls.append(1)
+        return real_predict_returns(self, df_arg)
+
+    ml_strategies.DailyPredictorStrategy._predict_returns = spy
+    try:
+        compute_dsr_for_symbol("SYNTH", df, quantiles=[0.6, 0.7, 0.8], windows=[40, 60])
+    finally:
+        ml_strategies.DailyPredictorStrategy._predict_returns = real_predict_returns
+
+    assert len(calls) == 1
