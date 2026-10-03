@@ -114,9 +114,9 @@ def test_compute_dsr_for_symbol_trims_pre_cutoff_rows(tmp_path):
     seen_lengths = []
     real_backtest_sharpe = eval_report._backtest_sharpe
 
-    def spy(df_arg, q, w):
+    def spy(df_arg, strat_arg, daily_feats_arg, pred_ret_arg, q, w):
         seen_lengths.append(len(df_arg))
-        return real_backtest_sharpe(df_arg, q, w)
+        return real_backtest_sharpe(df_arg, strat_arg, daily_feats_arg, pred_ret_arg, q, w)
 
     with patch("eval_report._backtest_sharpe", side_effect=spy):
         compute_dsr_for_symbol(

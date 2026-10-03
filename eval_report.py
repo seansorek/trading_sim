@@ -46,12 +46,13 @@ def compute_pbo(symbols, days, db, config=None):
     return result
 
 
-def _backtest_sharpe(df, q, w):
+def _backtest_sharpe(df, strat, daily_feats, pred_ret, q, w):
     """Daily returns array, annualized Sharpe, and per-period Sharpe for one (q, w) config.
 
-    Forces the config via the env-var override that DailyPredictorStrategy reads
-    at highest priority, so pickle best_* keys do not shadow it.  Saves and
-    restores env vars so calls are independent and never leak state.
+    `strat`/`daily_feats`/`pred_ret` are the (q, w)-independent pipeline outputs
+    (model load, make_daily_features, model.predict) computed once per symbol
+    by the caller and reused across the whole grid -- only the final
+    threshold step varies per config (see issue #135).
 
     Returns:
         (daily_values, annualized_sharpe, per_period_sharpe)
@@ -61,29 +62,15 @@ def _backtest_sharpe(df, q, w):
     trial_sharpe_var so it stays consistent with deflated_sharpe's internal sr
     computation which is also per-period.
     """
-    prev_q = os.environ.get("PREDICTOR_SIGNAL_QUANTILE")
-    prev_w = os.environ.get("PREDICTOR_THRESHOLD_WINDOW")
-    os.environ["PREDICTOR_SIGNAL_QUANTILE"] = str(q)
-    os.environ["PREDICTOR_THRESHOLD_WINDOW"] = str(w)
-    try:
-        cfg = StrategyConfig(name="daily_predictor")
-        strat = DailyPredictorStrategy(cfg)
-        sig = strat.signal(None, df)
-        sig = sig.reindex(df.index).fillna(0).astype(int)
-        bt = Backtester(ExecutionConfig())
-        res = bt.run(df, df, sig, artifact_paths={})
-        daily = res.equity_curve.resample("1D").last().dropna().pct_change().dropna()
-        ann_sharpe = res.metrics.get("daily_sharpe", 0.0)
-        sd = daily.std(ddof=1)
-        per_period_sr = float(daily.mean() / sd) if sd > 0 else 0.0
-        return daily.values, ann_sharpe, per_period_sr
-    finally:
-        for key, prev in (("PREDICTOR_SIGNAL_QUANTILE", prev_q),
-                          ("PREDICTOR_THRESHOLD_WINDOW", prev_w)):
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
+    sig = strat._signal_from_pred_ret(daily_feats, pred_ret, q, w)
+    sig = sig.reindex(df.index).fillna(0).astype(int)
+    bt = Backtester(ExecutionConfig())
+    res = bt.run(df, df, sig, artifact_paths={})
+    daily = res.equity_curve.resample("1D").last().dropna().pct_change().dropna()
+    ann_sharpe = res.metrics.get("daily_sharpe", 0.0)
+    sd = daily.std(ddof=1)
+    per_period_sr = float(daily.mean() / sd) if sd > 0 else 0.0
+    return daily.values, ann_sharpe, per_period_sr
 
 
 def compute_dsr_for_symbol(symbol, df, quantiles=None, windows=None,
@@ -123,9 +110,17 @@ def compute_dsr_for_symbol(symbol, df, quantiles=None, windows=None,
     windows = windows or _DEFAULT_WINDOWS
     configs = [(q, w) for q in quantiles for w in windows]
 
+    # Model load, make_daily_features, and model.predict are identical for
+    # every (q, w) in the grid -- only the final threshold step depends on
+    # the config. Run the shared pipeline once per symbol instead of once
+    # per config (issue #135).
+    cfg = StrategyConfig(name="daily_predictor")
+    strat = DailyPredictorStrategy(cfg)
+    daily_feats, pred_ret = strat._predict_returns(df)
+
     per_config = []       # [(config, daily_returns, annualized_sharpe, per_period_sharpe), ...]
     for (q, w) in configs:
-        daily, ann_sr, pp_sr = _backtest_sharpe(df, q, w)
+        daily, ann_sr, pp_sr = _backtest_sharpe(df, strat, daily_feats, pred_ret, q, w)
         per_config.append(((q, w), daily, ann_sr, pp_sr))
 
     # Use per-period Sharpes for trial_var so it stays in the same units as
