@@ -280,7 +280,11 @@ class DailyPredictorStrategy(BaseStrategy):
                 except ValueError:
                     pass
 
-    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+    def _predict_returns(self, df: pd.DataFrame):
+        """Compute (daily_feats, pred_ret) -- the (q, w)-independent half of
+        signal(). Split out so callers sweeping (signal_quantile,
+        threshold_window) over the same df (e.g. eval_report's grid search)
+        can run the model/feature pipeline once instead of once per config."""
         daily_feats = make_daily_features(df)
         X = daily_feats[FEATURE_COLS].values.astype(np.float32)
 
@@ -338,8 +342,15 @@ class DailyPredictorStrategy(BaseStrategy):
                     n,
                 )
 
+        return daily_feats, pred_ret
+
+    def _signal_from_pred_ret(self, daily_feats: pd.DataFrame, pred_ret,
+                               signal_quantile: float, threshold_window: int) -> pd.Series:
+        """The (q, w)-dependent half of signal(): threshold pred_ret into a
+        position and apply the same holding-period + execution-lag handling
+        signal() does."""
         signals = compute_predictor_signal(
-            pred_ret, self.signal_quantile, self.threshold_window,
+            pred_ret, signal_quantile, threshold_window,
             conviction=self.conviction,
         )
         raw = self._apply_holding_period(pd.Series(signals, index=daily_feats.index))
@@ -349,4 +360,10 @@ class DailyPredictorStrategy(BaseStrategy):
         # the next session, so it is already correct and must NOT be shifted.
         # float, not int — astype(int) would truncate a conviction size to 0.
         return raw.shift(1).fillna(0).astype(float)
+
+    def signal(self, feats: pd.DataFrame, df: pd.DataFrame) -> pd.Series:
+        daily_feats, pred_ret = self._predict_returns(df)
+        return self._signal_from_pred_ret(
+            daily_feats, pred_ret, self.signal_quantile, self.threshold_window
+        )
 
